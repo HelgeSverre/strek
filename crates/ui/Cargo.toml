@@ -1,0 +1,8 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+description = "Retained-mode UI widget system for the vector editor"
+
+[dependencies]
+glam = { workspace = true }

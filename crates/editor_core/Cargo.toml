@@ -1,0 +1,11 @@
+[package]
+name = "editor_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam = { workspace = true }
+slotmap = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+editor_render = { path = "../editor_render" }

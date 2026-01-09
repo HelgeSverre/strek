@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# Node
+node_modules/
+
+# Playwright
+test-results/
+
+# wasm-pack output (already has its own .gitignore)
+apps/web/pkg/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

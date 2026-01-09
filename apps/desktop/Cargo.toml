@@ -1,0 +1,21 @@
+[package]
+name = "vector-editor-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop application for the vector editor"
+
+[[bin]]
+name = "vector-editor"
+path = "src/main.rs"
+
+[dependencies]
+editor_core = { path = "../../crates/editor_core" }
+editor_render = { path = "../../crates/editor_render" }
+render_wgpu = { path = "../../crates/render_wgpu" }
+ui = { path = "../../crates/ui" }
+glam = { workspace = true }
+winit = "0.30"
+wgpu = "23.0"
+pollster = "0.4"
+log = "0.4"
+env_logger = "0.11"
