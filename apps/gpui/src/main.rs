@@ -19,6 +19,7 @@ mod toolbar;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{
     Editor, EditorAction, NodeId, NumericPropertyScrubSession, NumericPropertyTarget,
@@ -33,6 +34,7 @@ use gpui::{
 const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
 const MAX_AUTOMATION_SELECTED_LAYERS: usize = 10_000;
 const MAX_AUTOMATION_SELECTED_LAYER_BYTES: usize = 256 * 1024;
+static OBJECT_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 actions!(
     strek,
@@ -209,6 +211,30 @@ struct ActiveNumericPropertyScrub {
     pointer_origin_x: f32,
 }
 
+#[derive(Debug)]
+struct ObjectClipboard {
+    contents: editor_core::EditorClipboard,
+    metadata: String,
+}
+
+impl ObjectClipboard {
+    fn new(contents: editor_core::EditorClipboard) -> Self {
+        let sequence = OBJECT_CLIPBOARD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            contents,
+            metadata: format!(
+                "{OBJECT_CLIPBOARD_METADATA}:{}:{sequence}",
+                std::process::id()
+            ),
+        }
+    }
+
+    fn owns(&self, item: &ClipboardItem) -> bool {
+        item.metadata()
+            .is_some_and(|metadata| metadata == &self.metadata)
+    }
+}
+
 /// Main application state as a GPUI Entity.
 struct Strek {
     editor: Editor,
@@ -216,7 +242,7 @@ struct Strek {
     recent_files: document_io::RecentFiles,
     file_operation: FileOperation,
     allow_window_close: bool,
-    object_clipboard: Option<editor_core::EditorClipboard>,
+    object_clipboard: Option<ObjectClipboard>,
     keymap: commands::Keymap,
     recent_commands: Vec<commands::CommandTarget>,
     command_palette: Option<Entity<command_palette::CommandPalette>>,
@@ -2514,11 +2540,11 @@ impl Strek {
             }
         } else {
             let clipboard_text = self.selected_object_clipboard_text();
-            self.object_clipboard = self.editor.copy_selection();
-            if self.object_clipboard.is_some() {
+            self.object_clipboard = self.editor.copy_selection().map(ObjectClipboard::new);
+            if let Some(clipboard) = &self.object_clipboard {
                 cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
                     clipboard_text,
-                    OBJECT_CLIPBOARD_METADATA.to_owned(),
+                    clipboard.metadata.clone(),
                 ));
             }
         }
@@ -2543,11 +2569,12 @@ impl Strek {
         } else {
             let clipboard_text = self.selected_object_clipboard_text();
             if let Some(clipboard) = self.editor.copy_selection() {
-                self.object_clipboard = Some(clipboard);
+                let clipboard = ObjectClipboard::new(clipboard);
                 cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
                     clipboard_text,
-                    OBJECT_CLIPBOARD_METADATA.to_owned(),
+                    clipboard.metadata.clone(),
                 ));
+                self.object_clipboard = Some(clipboard);
                 self.editor.delete_selection();
                 changed = true;
             }
@@ -2567,13 +2594,13 @@ impl Strek {
                     changed = true;
                 }
             }
-        } else if cx
-            .read_from_clipboard()
-            .as_ref()
-            .is_some_and(is_strek_object_clipboard)
-        {
+        } else if cx.read_from_clipboard().as_ref().is_some_and(|item| {
+            self.object_clipboard
+                .as_ref()
+                .is_some_and(|clipboard| clipboard.owns(item))
+        }) {
             if let Some(mut clipboard) = self.object_clipboard.take() {
-                if self.editor.paste_clipboard(&mut clipboard) {
+                if self.editor.paste_clipboard(&mut clipboard.contents) {
                     changed = true;
                 }
                 self.object_clipboard = Some(clipboard);
@@ -3090,11 +3117,11 @@ impl Render for Strek {
                 .and_then(|item| item.text())
                 .is_some_and(|text| !text.is_empty()),
             Some(toolbar::MenuKind::Main) => {
-                self.object_clipboard.is_some()
-                    && cx
-                        .read_from_clipboard()
+                cx.read_from_clipboard().as_ref().is_some_and(|item| {
+                    self.object_clipboard
                         .as_ref()
-                        .is_some_and(is_strek_object_clipboard)
+                        .is_some_and(|clipboard| clipboard.owns(item))
+                })
             }
             _ => false,
         };
@@ -3458,11 +3485,6 @@ fn bounded_automation_layer_names<'a>(
         truncated = true;
     }
     (selected, truncated)
-}
-
-fn is_strek_object_clipboard(item: &ClipboardItem) -> bool {
-    item.metadata()
-        .is_some_and(|metadata| metadata == OBJECT_CLIPBOARD_METADATA)
 }
 
 fn canvas_bounds_for_layout(
@@ -3916,15 +3938,19 @@ mod layout_tests {
     }
 
     #[test]
-    fn object_clipboard_requires_its_metadata_marker() {
-        let owned = ClipboardItem::new_string_with_metadata(
-            "Layer".to_owned(),
-            OBJECT_CLIPBOARD_METADATA.to_owned(),
+    fn object_clipboard_requires_its_exact_ownership_token() {
+        let clipboard = ObjectClipboard::new(editor_core::EditorClipboard::default());
+        let owned =
+            ClipboardItem::new_string_with_metadata("Layer".to_owned(), clipboard.metadata.clone());
+        let stale = ClipboardItem::new_string_with_metadata(
+            "Other layer".to_owned(),
+            format!("{OBJECT_CLIPBOARD_METADATA}:other-process:1"),
         );
         let external = ClipboardItem::new_string("Layer".to_owned());
 
-        assert!(is_strek_object_clipboard(&owned));
-        assert!(!is_strek_object_clipboard(&external));
+        assert!(clipboard.owns(&owned));
+        assert!(!clipboard.owns(&stale));
+        assert!(!clipboard.owns(&external));
     }
 
     #[test]
