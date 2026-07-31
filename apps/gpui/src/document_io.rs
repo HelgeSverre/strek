@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use editor_core::{Document, DocumentLoadError};
+use editor_core::{Document, DocumentLoadError, DocumentValidationError};
 
 const DOCUMENT_EXTENSION: &str = "strek.json";
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
@@ -33,6 +33,9 @@ pub enum DocumentIoError {
     Encode {
         source: serde_json::Error,
     },
+    InvalidDocument {
+        source: DocumentValidationError,
+    },
     Write {
         path: PathBuf,
         source: io::Error,
@@ -44,7 +47,7 @@ impl fmt::Display for DocumentIoError {
         match self {
             Self::TooLarge { path, limit } => write!(
                 formatter,
-                "could not open {}: document exceeds the {limit}-byte limit",
+                "document {} exceeds the {limit}-byte limit",
                 path.display()
             ),
             Self::Read { path, source } => {
@@ -54,6 +57,9 @@ impl fmt::Display for DocumentIoError {
                 write!(formatter, "could not open {}: {source}", path.display())
             }
             Self::Encode { source } => write!(formatter, "could not serialize document: {source}"),
+            Self::InvalidDocument { source } => {
+                write!(formatter, "could not save invalid document: {source}")
+            }
             Self::Write { path, source } => {
                 write!(formatter, "could not save {}: {source}", path.display())
             }
@@ -68,6 +74,7 @@ impl Error for DocumentIoError {
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source } => Some(source),
+            Self::InvalidDocument { source } => Some(source),
         }
     }
 }
@@ -82,12 +89,7 @@ pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
         path: path.to_path_buf(),
         source,
     })?;
-    if metadata.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentIoError::TooLarge {
-            path: path.to_path_buf(),
-            limit: MAX_DOCUMENT_BYTES,
-        });
-    }
+    ensure_document_size(path, metadata.len(), MAX_DOCUMENT_BYTES)?;
 
     let mut json = String::new();
     file.take(MAX_DOCUMENT_BYTES + 1)
@@ -96,12 +98,7 @@ pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
             path: path.to_path_buf(),
             source,
         })?;
-    if json.len() as u64 > MAX_DOCUMENT_BYTES {
-        return Err(DocumentIoError::TooLarge {
-            path: path.to_path_buf(),
-            limit: MAX_DOCUMENT_BYTES,
-        });
-    }
+    ensure_document_size(path, json.len() as u64, MAX_DOCUMENT_BYTES)?;
     Document::from_json(&json).map_err(|source| DocumentIoError::Decode {
         path: path.to_path_buf(),
         source,
@@ -110,17 +107,33 @@ pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
 
 /// Serialize a document before handing its snapshot to a background writer.
 pub fn serialize_document(document: &Document) -> Result<String, DocumentIoError> {
-    document
-        .to_json()
-        .map_err(|source| DocumentIoError::Encode { source })
+    let saved = document
+        .to_validated_saved()
+        .map_err(|source| DocumentIoError::InvalidDocument { source })?;
+    serde_json::to_string_pretty(&saved).map_err(|source| DocumentIoError::Encode { source })
 }
 
 /// Persist a serialized document snapshot using a same-directory temporary file.
 pub fn write_document(path: &Path, json: &str) -> Result<(), DocumentIoError> {
+    write_document_with_limit(path, json, MAX_DOCUMENT_BYTES)
+}
+
+fn write_document_with_limit(path: &Path, json: &str, limit: u64) -> Result<(), DocumentIoError> {
+    ensure_document_size(path, json.len() as u64, limit)?;
     write_atomic(path, json.as_bytes()).map_err(|source| DocumentIoError::Write {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn ensure_document_size(path: &Path, bytes: u64, limit: u64) -> Result<(), DocumentIoError> {
+    if bytes > limit {
+        return Err(DocumentIoError::TooLarge {
+            path: path.to_path_buf(),
+            limit,
+        });
+    }
+    Ok(())
 }
 
 /// Give extensionless save destinations the editor's native extension.
@@ -337,6 +350,34 @@ mod tests {
         assert!(matches!(
             read_document(&path),
             Err(DocumentIoError::TooLarge { limit, .. }) if limit == MAX_DOCUMENT_BYTES
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn documents_that_exceed_load_limits_are_not_saved() {
+        let directory = temporary_test_directory("oversized-save");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("oversized.strek.json");
+
+        assert!(matches!(
+            write_document_with_limit(&path, "12345", 4),
+            Err(DocumentIoError::TooLarge { limit: 4, .. })
+        ));
+        assert!(!path.exists());
+
+        let mut document = Document::new();
+        document
+            .add_child(
+                document.root,
+                Node::text("Oversized", "x".repeat(4 * 1024 * 1024 + 1)),
+            )
+            .unwrap();
+        assert!(matches!(
+            serialize_document(&document),
+            Err(DocumentIoError::InvalidDocument {
+                source: DocumentValidationError::TextTooLong { .. }
+            })
         ));
         fs::remove_dir_all(directory).unwrap();
     }

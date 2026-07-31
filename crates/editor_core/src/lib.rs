@@ -1324,13 +1324,41 @@ impl Document {
 
     /// Convert document to a serializable format.
     pub fn to_saved(&self) -> SavedDocument {
-        let mut nodes = self.nodes.clone();
-        nodes.retain(|_, node| !node.deleted);
+        let mut nodes = SlotMap::with_capacity_and_key(self.nodes.len());
+        let mut remapped_ids = HashMap::with_capacity(self.nodes.len());
+        for (id, node) in &self.nodes {
+            if !node.deleted {
+                remapped_ids.insert(id, nodes.insert(node.clone()));
+            }
+        }
+
+        for node in nodes.values_mut() {
+            node.parent = node
+                .parent
+                .and_then(|parent| remapped_ids.get(&parent).copied());
+            node.children = node
+                .children
+                .iter()
+                .filter_map(|child| remapped_ids.get(child).copied())
+                .collect();
+        }
+        let root = remapped_ids.get(&self.root).copied().unwrap_or_else(|| {
+            let missing_root = nodes.insert(Node::group("Invalid missing root"));
+            nodes.remove(missing_root);
+            missing_root
+        });
         SavedDocument {
             version: SavedDocument::CURRENT_VERSION,
             nodes,
-            root: self.root,
+            root,
         }
+    }
+
+    /// Build and validate the exact snapshot that will be persisted.
+    pub fn to_validated_saved(&self) -> Result<SavedDocument, DocumentValidationError> {
+        let saved = self.to_saved();
+        Self::validate_saved_graph(&saved)?;
+        Ok(saved)
     }
 
     /// Create a document from a saved format after validating its live scene graph.
@@ -2564,13 +2592,30 @@ mod tests {
             )
             .expect("root exists");
         assert!(doc.remove(deleted));
+        let survivor = doc
+            .add_child(doc.root, Node::group("Survivor"))
+            .expect("root exists");
 
         let json = doc.to_json().expect("document should serialize");
         assert!(!json.contains("do not persist this secret"));
+        let serialized: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let live_node_count = doc.nodes.values().filter(|node| !node.deleted).count();
+        assert_eq!(
+            serialized["nodes"].as_array().unwrap().len(),
+            live_node_count + 1,
+            "saved slot map should contain only its sentinel and live nodes"
+        );
 
         let restored = Document::from_json(&json).expect("saved document should load");
-        assert_eq!(restored.nodes.len(), 1);
+        assert_eq!(restored.nodes.len(), 2);
         assert!(restored.nodes.contains_key(restored.root));
+        assert!(restored
+            .descendants(restored.root)
+            .any(|id| restored.nodes[id].name == "Survivor"));
+        assert_ne!(
+            survivor,
+            restored.descendants(restored.root).next().unwrap()
+        );
     }
 
     #[test]
