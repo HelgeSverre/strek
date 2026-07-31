@@ -18,10 +18,10 @@ use crate::{
     FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument,
     OpenDocument, OpenKeyboardShortcuts, Paste, PenTool, RectangleTool, Redo, ReversePath,
     SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
-    ShowCommandPalette, SplitPath, TextLarger, TextSmaller, TextTool, ToggleDesignPanel,
-    ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu,
-    Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
-    ZoomToSelection,
+    ShowCommandPalette, SplitPath, StartZoomInput, TextLarger, TextSmaller, TextTool,
+    ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed,
+    ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll,
+    ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -64,6 +64,18 @@ pub struct PanelVisibility {
 pub struct HistoryAvailability {
     pub undo: bool,
     pub redo: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct ZoomInputSnapshot<'a> {
+    pub value: &'a str,
+    pub invalid: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct ZoomState<'a> {
+    pub level: f32,
+    pub input: Option<ZoomInputSnapshot<'a>>,
 }
 
 pub struct MenuState<'a> {
@@ -131,7 +143,7 @@ fn editor_tooltip_owned(
 pub fn render_header(
     document: DocumentHeader,
     current_tool: Tool,
-    zoom: f32,
+    zoom: ZoomState<'_>,
     panels: PanelVisibility,
     history: HistoryAvailability,
     open_menu: Option<MenuKind>,
@@ -215,7 +227,11 @@ pub fn render_header(
             Redo,
         ))
         .child(div().w(px(1.0)).h(px(22.0)).mx(px(2.0)).bg(rgb(BORDER)))
-        .child(zoom_button(zoom, open_menu == Some(MenuKind::Zoom)))
+        .child(zoom_control(
+            zoom.level,
+            zoom.input,
+            open_menu == Some(MenuKind::Zoom),
+        ))
         .child(icon_action_button(
             "layers-panel",
             Icon::Layers,
@@ -1236,33 +1252,99 @@ fn icon_action_button<A: Action + Clone>(
         })
 }
 
-fn zoom_button(zoom: f32, active: bool) -> impl IntoElement {
+fn zoom_control(
+    zoom: f32,
+    input: Option<ZoomInputSnapshot<'_>>,
+    menu_active: bool,
+) -> impl IntoElement {
     div()
-        .id("header-zoom")
+        .id("header-zoom-control")
         .h(px(30.0))
-        .min_w(px(72.0))
         .flex()
         .flex_row()
         .items_center()
-        .justify_center()
-        .gap(px(2.0))
-        .px(px(8.0))
         .rounded(px(6.0))
-        .bg(if active {
+        .bg(if menu_active || input.is_some() {
             rgb(SURFACE_HOVER)
         } else {
             rgba(0x00000000)
         })
+        .child(zoom_icon_button(
+            "header-zoom-out",
+            Icon::Minus,
+            "Zoom out",
+            ZoomOut,
+        ))
+        .child(
+            div()
+                .id("header-zoom-value")
+                .h_full()
+                .min_w(px(52.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(rgb(if input.is_some_and(|input| input.invalid) {
+                    0xff8a80
+                } else {
+                    TEXT
+                }))
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .child(input.map_or_else(
+                    || format!("{:.0}%", zoom * 100.0),
+                    |input| format!("{}%", input.value),
+                ))
+                .tooltip(editor_tooltip("Enter zoom percentage", None))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(StartZoomInput), cx);
+                }),
+        )
+        .child(
+            div()
+                .id("header-zoom-menu")
+                .w(px(22.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .child(icon(Icon::ChevronDown, 12.0, rgb(TEXT_MUTED)))
+                .tooltip(editor_tooltip("Zoom options", None))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleZoomMenu), cx);
+                }),
+        )
+        .child(zoom_icon_button(
+            "header-zoom-in",
+            Icon::Plus,
+            "Zoom in",
+            ZoomIn,
+        ))
+}
+
+fn zoom_icon_button<A: Action + Clone>(
+    id: &'static str,
+    icon_kind: Icon,
+    label: &'static str,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(26.0))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor_pointer()
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
-        .text_color(rgb(TEXT))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .child(format!("{:.0}%", zoom * 100.0))
-        .child(icon(Icon::ChevronDown, 13.0, rgb(TEXT_MUTED)))
-        .tooltip(editor_tooltip("Zoom options", None))
-        .on_click(|_, window, cx| {
-            window.dispatch_action(Box::new(ToggleZoomMenu), cx);
+        .child(icon(icon_kind, 13.0, rgb(TEXT_MUTED)))
+        .tooltip(editor_tooltip(label, None))
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
         })
 }
 

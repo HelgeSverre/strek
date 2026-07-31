@@ -74,6 +74,7 @@ actions!(
         ZoomResetAll,
         ZoomToFit,
         ZoomToSelection,
+        StartZoomInput,
         ToggleLayerPanel,
         ToggleDesignPanel,
         ToggleMainMenu,
@@ -157,6 +158,13 @@ struct PropertyColorInput {
     invalid: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ZoomInput {
+    value: String,
+    replace_on_type: bool,
+    invalid: bool,
+}
+
 /// Main application state as a GPUI Entity.
 struct VectorEditor {
     editor: Editor,
@@ -169,6 +177,7 @@ struct VectorEditor {
     recent_commands: Vec<commands::CommandTarget>,
     command_palette: Option<Entity<command_palette::CommandPalette>>,
     property_color_input: Option<PropertyColorInput>,
+    zoom_input: Option<ZoomInput>,
     focus_handle: FocusHandle,
     show_layers_panel: bool,
     show_design_panel: bool,
@@ -195,6 +204,7 @@ impl VectorEditor {
             recent_commands: Vec::new(),
             command_palette: None,
             property_color_input: None,
+            zoom_input: None,
             focus_handle: cx.focus_handle(),
             show_layers_panel: true,
             show_design_panel: true,
@@ -470,6 +480,7 @@ impl VectorEditor {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.property_color_input = None;
+        self.zoom_input = None;
         self.finish_layer_rename(true, cx);
         self.open_menu = None;
         let entries = commands::COMMANDS
@@ -945,6 +956,7 @@ impl VectorEditor {
 
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
         self.property_color_input = None;
+        self.zoom_input = None;
         let menu_closed = self.open_menu.take().is_some();
         let executed = self.editor.execute_action(action);
         if executed {
@@ -1212,6 +1224,26 @@ impl VectorEditor {
         cx: &mut Context<Self>,
     ) {
         self.execute_editor_action(EditorAction::ZoomToSelection, cx);
+    }
+
+    fn start_zoom_input(
+        &mut self,
+        _: &StartZoomInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        self.property_color_input = None;
+        self.open_menu = None;
+        self.zoom_input = Some(ZoomInput {
+            value: format_zoom_percentage(self.editor.view().zoom),
+            replace_on_type: true,
+            invalid: false,
+        });
+        self.focus_handle.focus(window);
+        cx.notify();
     }
 
     fn toggle_layer_panel(
@@ -1538,6 +1570,7 @@ impl VectorEditor {
             })
             .cloned()
             .unwrap_or_else(editor_core::Paint::black);
+        self.zoom_input = None;
         self.property_color_input = Some(PropertyColorInput {
             target,
             value: properties_panel::format_paint(&paint),
@@ -1812,6 +1845,7 @@ impl VectorEditor {
     }
 
     fn toggle_menu(&mut self, menu: toolbar::MenuKind, cx: &mut Context<Self>) {
+        self.zoom_input = None;
         self.open_menu = (self.open_menu != Some(menu)).then_some(menu);
         cx.notify();
     }
@@ -1827,13 +1861,13 @@ impl VectorEditor {
         }
     }
 
-    fn dismiss_property_color_from_mouse(
+    fn dismiss_inline_input_from_mouse(
         &mut self,
         _: &MouseDownEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.property_color_input.take().is_some() {
+        if self.property_color_input.take().is_some() || self.zoom_input.take().is_some() {
             cx.notify();
         }
     }
@@ -1862,6 +1896,7 @@ impl VectorEditor {
         cx: &mut Context<Self>,
     ) {
         self.property_color_input = None;
+        self.zoom_input = None;
         self.focus_handle.focus(window);
         let position = canvas_position(
             event.position,
@@ -2066,7 +2101,90 @@ impl VectorEditor {
         cx.stop_propagation();
     }
 
+    fn handle_zoom_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let primary = if cfg!(target_os = "macos") {
+            event.keystroke.modifiers.platform
+        } else {
+            event.keystroke.modifiers.control
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.zoom_input = None;
+                cx.notify();
+            }
+            "enter" => {
+                let Some(input) = self.zoom_input.as_ref() else {
+                    return;
+                };
+                let Some(percentage) = parse_zoom_percentage(&input.value) else {
+                    if let Some(input) = &mut self.zoom_input {
+                        input.invalid = true;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                };
+                self.zoom_input = None;
+                self.editor.set_zoom(percentage / 100.0);
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if let Some(input) = &mut self.zoom_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                    } else {
+                        input.value.pop();
+                    }
+                    input.replace_on_type = false;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "a" if primary => {
+                if let Some(input) = &mut self.zoom_input {
+                    input.replace_on_type = true;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "v" if primary => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if let Some(input) = &mut self.zoom_input {
+                        input.value = sanitize_zoom_input(&text);
+                        input.replace_on_type = false;
+                        input.invalid = false;
+                        cx.notify();
+                    }
+                }
+            }
+            _ if !primary
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt =>
+            {
+                let Some(text) = event.keystroke.key_char.as_deref() else {
+                    cx.stop_propagation();
+                    return;
+                };
+                if let Some(input) = &mut self.zoom_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                        input.replace_on_type = false;
+                    }
+                    append_zoom_input(&mut input.value, text);
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoom_input.is_some() {
+            self.handle_zoom_key(event, cx);
+            return;
+        }
         if self.property_color_input.is_some() {
             self.handle_property_color_key(event, cx);
             return;
@@ -2092,6 +2210,7 @@ impl VectorEditor {
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.is_some()
+            || self.zoom_input.is_some()
             || self.property_color_input.is_some()
             || event.keystroke.key != "space"
         {
@@ -2128,7 +2247,8 @@ impl Render for VectorEditor {
         let key_context = editor_key_context(
             self.command_palette.is_some()
                 || self.layer_name_input.is_some()
-                || self.property_color_input.is_some(),
+                || self.property_color_input.is_some()
+                || self.zoom_input.is_some(),
             self.open_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
@@ -2183,6 +2303,13 @@ impl Render for VectorEditor {
                     invalid: input.invalid,
                 });
         let properties_snapshot = properties_panel::snapshot(&mut self.editor, color_input);
+        let zoom_input = self
+            .zoom_input
+            .as_ref()
+            .map(|input| toolbar::ZoomInputSnapshot {
+                value: input.value.as_str(),
+                invalid: input.invalid,
+            });
 
         // Build display list for canvas
         let display_list = self.editor.build_display_list();
@@ -2241,6 +2368,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::zoom_reset_all))
             .on_action(cx.listener(Self::zoom_to_fit))
             .on_action(cx.listener(Self::zoom_to_selection))
+            .on_action(cx.listener(Self::start_zoom_input))
             .on_action(cx.listener(Self::toggle_layer_panel))
             .on_action(cx.listener(Self::toggle_design_panel))
             .on_action(cx.listener(Self::toggle_main_menu))
@@ -2300,7 +2428,7 @@ impl Render for VectorEditor {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(Self::dismiss_property_color_from_mouse),
+                cx.listener(Self::dismiss_inline_input_from_mouse),
             )
             .size_full()
             .relative()
@@ -2314,7 +2442,10 @@ impl Render for VectorEditor {
                     dirty: self.editor.is_dirty(),
                 },
                 tool,
-                zoom,
+                toolbar::ZoomState {
+                    level: zoom,
+                    input: zoom_input,
+                },
                 panel_visibility,
                 toolbar::HistoryAvailability {
                     undo: self.editor.can_undo_in_context(),
@@ -2460,6 +2591,39 @@ fn append_hex_input(value: &mut String, text: &str) {
             && value.chars().filter(|character| *character != '#').count() < 8
         {
             value.push(character.to_ascii_uppercase());
+        }
+    }
+}
+
+fn format_zoom_percentage(zoom: f32) -> String {
+    let percentage = zoom * 100.0;
+    if percentage.fract().abs() < 0.01 {
+        format!("{percentage:.0}")
+    } else {
+        format!("{percentage:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned()
+    }
+}
+
+fn parse_zoom_percentage(value: &str) -> Option<f32> {
+    let percentage: f32 = value.trim().trim_end_matches('%').trim().parse().ok()?;
+    (percentage.is_finite() && percentage > 0.0).then_some(percentage)
+}
+
+fn sanitize_zoom_input(value: &str) -> String {
+    let mut sanitized = String::with_capacity(8);
+    append_zoom_input(&mut sanitized, value);
+    sanitized
+}
+
+fn append_zoom_input(value: &mut String, text: &str) {
+    for character in text.chars() {
+        if character.is_ascii_digit() && value.len() < 8 {
+            value.push(character);
+        } else if matches!(character, '.' | ',') && !value.contains('.') && value.len() < 8 {
+            value.push('.');
         }
     }
 }
@@ -2675,5 +2839,20 @@ mod layout_tests {
         let mut value = "#12".to_owned();
         append_hex_input(&mut value, "g3f");
         assert_eq!(value, "#123F");
+    }
+
+    #[test]
+    fn zoom_input_accepts_decimal_percentages_and_ignores_decoration() {
+        assert_eq!(sanitize_zoom_input(" 125.5% "), "125.5");
+        assert_eq!(sanitize_zoom_input("12,25x"), "12.25");
+        assert_eq!(parse_zoom_percentage(" 125.5% "), Some(125.5));
+        assert_eq!(parse_zoom_percentage("0"), None);
+        assert_eq!(parse_zoom_percentage("nan"), None);
+    }
+
+    #[test]
+    fn zoom_percentage_format_is_compact() {
+        assert_eq!(format_zoom_percentage(1.0), "100");
+        assert_eq!(format_zoom_percentage(1.255), "125.5");
     }
 }
