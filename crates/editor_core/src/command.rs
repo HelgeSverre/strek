@@ -1,6 +1,6 @@
 use glam::Affine2;
 
-use crate::node::{FrameData, Node, NodeId, TextData};
+use crate::node::{FrameData, Layout, Node, NodeId, TextData};
 use crate::path::PathData;
 use crate::style::Style;
 use crate::Document;
@@ -79,6 +79,13 @@ pub enum Patch {
         id: NodeId,
         before: bool,
         after: bool,
+    },
+
+    /// Change how a group lays out its children.
+    SetLayout {
+        id: NodeId,
+        before: Layout,
+        after: Layout,
     },
 
     /// Move a node to a different parent
@@ -179,6 +186,13 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.locked = *after;
                 }
+            }
+
+            Patch::SetLayout { id, after, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    node.layout = after.clone();
+                }
+                doc.mark_layout_dirty();
             }
 
             Patch::Reparent {
@@ -328,6 +342,13 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.locked = *before;
                 }
+            }
+
+            Patch::SetLayout { id, before, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    node.layout = before.clone();
+                }
+                doc.mark_layout_dirty();
             }
 
             Patch::Reparent {

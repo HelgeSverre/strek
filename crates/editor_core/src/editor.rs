@@ -12,7 +12,8 @@ use crate::command::{Command, Patch};
 use crate::history::History;
 use crate::input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
 use crate::layers::{LayerEntry, LayerIcon, LayerPanelState};
-use crate::node::{Node, NodeId, NodeKind, TextData, TextSizing};
+use crate::layout::{AlignCross, AlignMain, AutoLayout, Direction};
+use crate::node::{Layout, Node, NodeId, NodeKind, TextData, TextSizing};
 use crate::path::{HandleMode, PathAnchor, PathContour, PathData, Rect};
 use crate::selection::{Selection, SelectionAction};
 use crate::snap::{SnapEngine, SnapKind, SnapPoint, SnapResult};
@@ -33,6 +34,68 @@ pub enum Tool {
     Pen,
     Text,
     VectorEdit,
+}
+
+/// Layout mode exposed by the single-group design inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupLayoutMode {
+    Free,
+    Horizontal,
+    Vertical,
+}
+
+/// Stable affine components suitable for displaying in a transform inspector.
+///
+/// The decomposition uses the transformed x-axis as the rotation basis and
+/// reports any remaining x-shear separately. Singular and non-finite matrices
+/// do not have a useful inspector representation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransformComponents {
+    pub translation: Vec2,
+    pub scale: Vec2,
+    pub rotation_radians: f32,
+    pub skew_radians: f32,
+}
+
+impl TransformComponents {
+    /// Decompose an affine transform without panicking on invalid matrices.
+    pub fn from_affine(transform: Affine2) -> Option<Self> {
+        if !transform.matrix2.is_finite() || !transform.translation.is_finite() {
+            return None;
+        }
+
+        let determinant = transform.matrix2.determinant();
+        let scale_x = transform.matrix2.x_axis.length();
+        if !determinant.is_finite()
+            || determinant.abs() <= f32::EPSILON
+            || !scale_x.is_finite()
+            || scale_x <= f32::EPSILON
+        {
+            return None;
+        }
+
+        let x_axis = transform.matrix2.x_axis / scale_x;
+        let shear = x_axis.dot(transform.matrix2.y_axis);
+        let orthogonal_y = transform.matrix2.y_axis - x_axis * shear;
+        let scale_y_magnitude = orthogonal_y.length();
+        if !scale_y_magnitude.is_finite() || scale_y_magnitude <= f32::EPSILON {
+            return None;
+        }
+
+        let scale_y = scale_y_magnitude.copysign(determinant);
+        let rotation_radians = x_axis.y.atan2(x_axis.x);
+        let skew_radians = shear.atan2(scale_y_magnitude);
+        if !rotation_radians.is_finite() || !skew_radians.is_finite() {
+            return None;
+        }
+
+        Some(Self {
+            translation: transform.translation,
+            scale: Vec2::new(scale_x, scale_y),
+            rotation_radians,
+            skew_radians,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5939,6 +6002,167 @@ impl Editor {
         })
     }
 
+    /// Return the selected group's current layout configuration.
+    pub fn selected_group_layout(&self) -> Option<Layout> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        let id = self.selection.primary()?;
+        self.document
+            .get(id)
+            .and_then(|node| matches!(node.kind, NodeKind::Group).then(|| node.layout.clone()))
+    }
+
+    /// Return world-space affine components for a single selected layer.
+    pub fn selected_transform_components(&mut self) -> Option<TransformComponents> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        let id = self.selection.primary()?;
+        TransformComponents::from_affine(self.document.world_transform(id))
+    }
+
+    /// Change the selected group between free, horizontal, and vertical layout.
+    ///
+    /// Crossing the free/automatic boundary bakes or removes derived layout
+    /// offsets in the child author transforms so merely enabling or disabling
+    /// layout does not visually move existing artwork.
+    pub fn set_selected_group_layout_mode(&mut self, mode: GroupLayoutMode) -> bool {
+        self.settle_interaction();
+        let Some(before) = self.selected_group_layout() else {
+            return false;
+        };
+        let after = match (mode, &before) {
+            (GroupLayoutMode::Free, _) => Layout::Free,
+            (GroupLayoutMode::Horizontal, Layout::Auto(layout)) => {
+                let mut layout = layout.clone();
+                layout.direction = Direction::Horizontal;
+                Layout::Auto(layout)
+            }
+            (GroupLayoutMode::Vertical, Layout::Auto(layout)) => {
+                let mut layout = layout.clone();
+                layout.direction = Direction::Vertical;
+                Layout::Auto(layout)
+            }
+            (GroupLayoutMode::Horizontal, Layout::Free) => Layout::Auto(AutoLayout::horizontal()),
+            (GroupLayoutMode::Vertical, Layout::Free) => Layout::Auto(AutoLayout::vertical()),
+        };
+        let preserve_children = before.is_auto() != after.is_auto();
+        self.apply_selected_group_layout("Change Layout Mode", after, preserve_children)
+    }
+
+    /// Set nonnegative spacing for the selected auto-layout group.
+    pub fn set_selected_group_spacing(&mut self, spacing: f32) -> bool {
+        if !spacing.is_finite() || spacing < 0.0 {
+            return false;
+        }
+        self.update_selected_auto_layout("Change Layout Spacing", |layout| {
+            layout.spacing = spacing;
+        })
+    }
+
+    /// Set equal, nonnegative padding on every edge of the selected group.
+    pub fn set_selected_group_uniform_padding(&mut self, padding: f32) -> bool {
+        if !padding.is_finite() || padding < 0.0 {
+            return false;
+        }
+        self.update_selected_auto_layout("Change Layout Padding", |layout| {
+            layout.padding = crate::Edges::uniform(padding);
+        })
+    }
+
+    /// Set main-axis alignment for the selected auto-layout group.
+    pub fn set_selected_group_main_alignment(&mut self, alignment: AlignMain) -> bool {
+        self.update_selected_auto_layout("Change Main Alignment", |layout| {
+            layout.align_main = alignment;
+        })
+    }
+
+    /// Set cross-axis alignment for the selected auto-layout group.
+    pub fn set_selected_group_cross_alignment(&mut self, alignment: AlignCross) -> bool {
+        self.update_selected_auto_layout("Change Cross Alignment", |layout| {
+            layout.align_cross = alignment;
+        })
+    }
+
+    fn update_selected_auto_layout(
+        &mut self,
+        description: &'static str,
+        update: impl FnOnce(&mut AutoLayout),
+    ) -> bool {
+        self.settle_interaction();
+        let Some(Layout::Auto(mut after)) = self.selected_group_layout() else {
+            return false;
+        };
+        update(&mut after);
+        self.apply_selected_group_layout(description, Layout::Auto(after), false)
+    }
+
+    fn apply_selected_group_layout(
+        &mut self,
+        description: &'static str,
+        after: Layout,
+        preserve_children: bool,
+    ) -> bool {
+        self.settle_interaction();
+        let Some(id) = self.selection.primary() else {
+            return false;
+        };
+        if self.selection.len() != 1 || !self.document.is_effectively_editable(id) {
+            return false;
+        }
+        let Some((before, children)) = self.document.get(id).and_then(|node| {
+            matches!(node.kind, NodeKind::Group)
+                .then(|| (node.layout.clone(), node.children.clone()))
+        }) else {
+            return false;
+        };
+        if before == after {
+            return false;
+        }
+
+        let mut preserved = Vec::new();
+        if preserve_children && !children.is_empty() {
+            let group_world = self.document.world_transform(id);
+            let determinant = group_world.matrix2.determinant();
+            if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+                return false;
+            }
+            preserved.reserve(children.len());
+            for child in children {
+                let Some(transform) = self.document.get(child).map(|node| node.transform) else {
+                    return false;
+                };
+                let world = self.document.world_transform(child);
+                preserved.push((child, transform, world));
+            }
+        }
+
+        let mut patches = vec![Patch::SetLayout { id, before, after }];
+        if !preserved.is_empty() {
+            let mut simulated = self.document.clone();
+            patches[0].apply_forward(&mut simulated);
+            for (child, before, world) in preserved {
+                let after = simulated.author_transform_from_world(child, world);
+                if before != after {
+                    let patch = Patch::SetTransform {
+                        id: child,
+                        before,
+                        after,
+                    };
+                    patch.apply_forward(&mut simulated);
+                    patches.push(patch);
+                }
+            }
+        }
+
+        let command = Command::new(description).with_patches(patches);
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.needs_redraw = true;
+        true
+    }
+
     /// Move the current selection by a world-space delta.
     pub fn move_selection_by(&mut self, delta: Vec2) -> bool {
         self.settle_interaction();
@@ -7238,6 +7462,139 @@ mod tests {
         assert!(editor.history.redo(&mut editor.document));
         assert_affine_approx_eq(editor.document.world_transform(first), first_world);
         assert_affine_approx_eq(editor.document.world_transform(last), last_world);
+    }
+
+    #[test]
+    fn layout_mode_transitions_preserve_existing_child_world_transforms() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Group").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(1.5, 0.75),
+                    0.35,
+                    Vec2::new(40.0, 25.0),
+                )),
+            )
+            .unwrap();
+        let first = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("A", PathData::rect(0.0, 0.0, 10.0, 8.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(3.0, 7.0))),
+            )
+            .unwrap();
+        let second = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("B", PathData::rect(0.0, 0.0, 12.0, 6.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(28.0, 4.0))),
+            )
+            .unwrap();
+        let first_world = editor.document.world_transform(first);
+        let second_world = editor.document.world_transform(second);
+        editor.selection.select(group);
+
+        assert!(editor.set_selected_group_layout_mode(GroupLayoutMode::Horizontal));
+        assert!(matches!(
+            editor.selected_group_layout(),
+            Some(Layout::Auto(AutoLayout {
+                direction: Direction::Horizontal,
+                ..
+            }))
+        ));
+        assert_affine_approx_eq(editor.document.world_transform(first), first_world);
+        assert_affine_approx_eq(editor.document.world_transform(second), second_world);
+
+        assert!(editor.set_selected_group_layout_mode(GroupLayoutMode::Free));
+        assert_eq!(editor.selected_group_layout(), Some(Layout::Free));
+        assert_affine_approx_eq(editor.document.world_transform(first), first_world);
+        assert_affine_approx_eq(editor.document.world_transform(second), second_world);
+
+        assert!(editor.history.undo(&mut editor.document));
+        assert!(matches!(
+            editor.selected_group_layout(),
+            Some(Layout::Auto(_))
+        ));
+        assert_affine_approx_eq(editor.document.world_transform(first), first_world);
+        assert_affine_approx_eq(editor.document.world_transform(second), second_world);
+
+        assert!(editor.history.redo(&mut editor.document));
+        assert_eq!(editor.selected_group_layout(), Some(Layout::Free));
+        assert_affine_approx_eq(editor.document.world_transform(first), first_world);
+        assert_affine_approx_eq(editor.document.world_transform(second), second_world);
+    }
+
+    #[test]
+    fn auto_layout_inspector_edits_are_validated_and_undoable() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Group").with_layout(Layout::Auto(AutoLayout::horizontal())),
+            )
+            .unwrap();
+        editor.selection.select(group);
+
+        assert!(!editor.set_selected_group_spacing(f32::NAN));
+        assert!(!editor.set_selected_group_spacing(-1.0));
+        assert!(!editor.set_selected_group_uniform_padding(f32::INFINITY));
+        assert!(!editor.set_selected_group_uniform_padding(-0.5));
+        assert_eq!(editor.history.undo_count(), 0);
+
+        assert!(editor.set_selected_group_spacing(12.0));
+        assert!(editor.set_selected_group_uniform_padding(8.0));
+        assert!(editor.set_selected_group_main_alignment(AlignMain::SpaceBetween));
+        assert!(editor.set_selected_group_cross_alignment(AlignCross::End));
+        let Some(Layout::Auto(layout)) = editor.selected_group_layout() else {
+            panic!("selected group should use auto layout");
+        };
+        assert_eq!(layout.spacing, 12.0);
+        assert_eq!(layout.padding, crate::Edges::uniform(8.0));
+        assert_eq!(layout.align_main, AlignMain::SpaceBetween);
+        assert_eq!(layout.align_cross, AlignCross::End);
+
+        assert!(editor.history.undo(&mut editor.document));
+        let Some(Layout::Auto(layout)) = editor.selected_group_layout() else {
+            panic!("selected group should use auto layout");
+        };
+        assert_eq!(layout.align_cross, AlignCross::Start);
+        assert!(editor.history.redo(&mut editor.document));
+        let Some(Layout::Auto(layout)) = editor.selected_group_layout() else {
+            panic!("selected group should use auto layout");
+        };
+        assert_eq!(layout.align_cross, AlignCross::End);
+    }
+
+    #[test]
+    fn transform_components_report_rotation_scale_reflection_and_skew_safely() {
+        let transform =
+            Affine2::from_scale_angle_translation(Vec2::new(2.0, -3.0), 0.4, Vec2::new(12.0, 18.0));
+        let components = TransformComponents::from_affine(transform).unwrap();
+        assert!((components.rotation_radians - 0.4).abs() < 0.0001);
+        assert!((components.scale.x - 2.0).abs() < 0.0001);
+        assert!((components.scale.y + 3.0).abs() < 0.0001);
+        assert!(components.skew_radians.abs() < 0.0001);
+        assert_eq!(components.translation, Vec2::new(12.0, 18.0));
+
+        let sheared = Affine2::from_mat2_translation(
+            glam::Mat2::from_cols(Vec2::new(2.0, 0.0), Vec2::new(1.0, 3.0)),
+            Vec2::ZERO,
+        );
+        let components = TransformComponents::from_affine(sheared).unwrap();
+        assert!((components.skew_radians - 1.0f32.atan2(3.0)).abs() < 0.0001);
+
+        assert!(TransformComponents::from_affine(Affine2::from_scale(Vec2::ZERO)).is_none());
+        assert!(
+            TransformComponents::from_affine(Affine2::from_translation(Vec2::splat(f32::NAN)))
+                .is_none()
+        );
     }
 
     #[test]
