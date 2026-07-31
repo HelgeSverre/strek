@@ -56,12 +56,10 @@ just run
 
 ## Install
 
-Tagged releases provide macOS binaries for Apple Silicon and Intel. After the
-first release, install Strek from Homebrew:
-
-```sh
-brew install helgesverre/tap/strek
-```
+Strek is currently a private preview. Collaborators can download the Apple
+Silicon or Intel macOS archive from the repository's private GitHub Releases.
+There is no public installer or Homebrew formula yet. Everyone else should run
+from source or create a local app bundle as described below.
 
 ## Automation
 
@@ -150,10 +148,10 @@ just lint    # Clippy with warnings denied
 just format  # format the workspace
 ```
 
-Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and
-publish the `strek` formula to `helgesverre/homebrew-tap`. The repository needs
-a `HOMEBREW_TAP_TOKEN` Actions secret with write access to that tap before the
-first release.
+Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
+Apple Silicon and Intel archives to a private GitHub Release. The workflow does
+not publish package-manager or shell installers while the repository remains
+private.
 
 ## Package for macOS
 
