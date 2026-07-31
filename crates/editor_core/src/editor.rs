@@ -1597,6 +1597,7 @@ impl Editor {
             || id == after_parent
             || self.document.is_ancestor_of(id, after_parent)
             || !self.document.is_effectively_editable(id)
+            || !self.document.is_effectively_editable(after_parent)
         {
             return false;
         }
@@ -9197,6 +9198,37 @@ mod tests {
             .unwrap();
 
         assert!(!editor.reparent_layer(child, singular_parent, 0));
+        assert_eq!(
+            editor.document.get(child).and_then(|node| node.parent),
+            Some(root)
+        );
+        assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn layer_reparent_rejects_locked_and_hidden_destinations() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let child = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let locked = editor
+            .document
+            .add_child(root, Node::group("Locked"))
+            .unwrap();
+        editor.document.get_mut(locked).unwrap().locked = true;
+        let hidden = editor
+            .document
+            .add_child(root, Node::group("Hidden"))
+            .unwrap();
+        editor.document.get_mut(hidden).unwrap().visible = false;
+
+        assert!(!editor.reparent_layer(child, locked, 0));
+        assert!(!editor.reparent_layer(child, hidden, 0));
         assert_eq!(
             editor.document.get(child).and_then(|node| node.parent),
             Some(root)

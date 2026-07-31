@@ -506,29 +506,31 @@ fn render_layer_entry(
         })
         .text_color(text_color)
         .text_size(px(12.0))
-        .on_drag(drag_payload, |dragged, _, _, cx| {
-            cx.new(|_| DraggedLayerPreview {
-                name: dragged.name.clone(),
+        .when(entry.editable, |row| {
+            row.on_drag(drag_payload, |dragged, _, _, cx| {
+                cx.new(|_| DraggedLayerPreview {
+                    name: dragged.name.clone(),
+                })
             })
-        })
-        .drag_over::<DraggedLayer>(move |style, dragged, _, _| {
-            if dragged.id == drop_target {
-                style
-            } else {
-                style
-                    .bg(rgb(0x164f73))
-                    .border_1()
-                    .border_color(rgb(0x0c8ce9))
-            }
-        })
-        .on_drop(
-            cx.listener(move |editor, dragged: &DraggedLayer, _window, cx| {
-                if editor.drop_layer_on(dragged.id, drop_target) {
-                    cx.notify();
+            .drag_over::<DraggedLayer>(move |style, dragged, _, _| {
+                if dragged.id == drop_target {
+                    style
+                } else {
+                    style
+                        .bg(rgb(0x164f73))
+                        .border_1()
+                        .border_color(rgb(0x0c8ce9))
                 }
-                cx.stop_propagation();
-            }),
-        )
+            })
+            .on_drop(cx.listener(
+                move |editor, dragged: &DraggedLayer, _window, cx| {
+                    if editor.drop_layer_on(dragged.id, drop_target) {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                },
+            ))
+        })
         .when(context_menu_enabled, |row| {
             row.on_mouse_down(
                 MouseButton::Right,
