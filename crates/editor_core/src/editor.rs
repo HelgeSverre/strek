@@ -578,11 +578,15 @@ impl Editor {
         match action {
             // Selection
             EditorAction::SelectAll => {
-                let all_nodes: Vec<_> = self
+                let scope = self.selection_scope();
+                let all_nodes = self
                     .document
-                    .descendants(self.document.root)
+                    .get(scope)
+                    .map(|node| node.children.clone())
+                    .unwrap_or_default()
+                    .into_iter()
                     .filter(|id| self.document.is_effectively_editable(*id))
-                    .collect();
+                    .collect::<Vec<_>>();
                 self.selection.set(all_nodes);
                 self.needs_redraw = true;
             }
@@ -591,14 +595,18 @@ impl Editor {
                 self.needs_redraw = true;
             }
             EditorAction::InvertSelection => {
+                let scope = self.selection_scope();
                 let selected: HashSet<_> = self.selection.iter().collect();
-                let inverted: Vec<_> = self
+                let inverted = self
                     .document
-                    .descendants(self.document.root)
+                    .get(scope)
+                    .map(|node| node.children.clone())
+                    .unwrap_or_default()
+                    .into_iter()
                     .filter(|id| {
                         !selected.contains(id) && self.document.is_effectively_editable(*id)
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 self.selection.set(inverted);
                 self.needs_redraw = true;
             }
@@ -811,10 +819,10 @@ impl Editor {
             | EditorAction::AlignRight
             | EditorAction::AlignTop
             | EditorAction::AlignMiddle
-            | EditorAction::AlignBottom => self.transform_selection_count() >= 2,
+            | EditorAction::AlignBottom => self.can_transform_selection(2),
 
             EditorAction::DistributeHorizontal | EditorAction::DistributeVertical => {
-                self.transform_selection_count() >= 3
+                self.can_transform_selection(3)
             }
 
             // Ungroup requires grouped selection
@@ -846,11 +854,27 @@ impl Editor {
         }
     }
 
-    fn transform_selection_count(&self) -> usize {
+    fn can_transform_selection(&self, minimum: usize) -> bool {
         let selected: Vec<_> = self.selection.iter().collect();
+        let nodes = self.document.filter_selection_for_transform(&selected);
+        nodes.len() >= minimum
+            && nodes
+                .into_iter()
+                .all(|id| self.node_has_transform_bounds(id))
+    }
+
+    fn node_has_transform_bounds(&self, id: NodeId) -> bool {
+        let Some(node) = self.document.get(id) else {
+            return false;
+        };
+        if matches!(node.kind, NodeKind::Group) {
+            return node.children.iter().copied().any(|child| {
+                self.document.is_effectively_visible(child) && self.node_has_transform_bounds(child)
+            });
+        }
         self.document
-            .filter_selection_for_transform(&selected)
-            .len()
+            .local_bounds(id)
+            .is_some_and(|bounds| !bounds.is_empty())
     }
 
     /// Find the action for a key press.
@@ -1283,7 +1307,7 @@ impl Editor {
         }
         self.settle_interaction();
         if toggle_selection {
-            self.selection.toggle(id);
+            self.toggle_selection_target(id);
         } else {
             self.selection.select(id);
         }
@@ -1490,6 +1514,29 @@ impl Editor {
             current = parent;
         }
         None
+    }
+
+    fn add_selection_target(&mut self, id: NodeId) {
+        let conflicts = self
+            .selection
+            .iter()
+            .filter(|selected| {
+                self.document.is_ancestor_of(*selected, id)
+                    || self.document.is_ancestor_of(id, *selected)
+            })
+            .collect::<Vec<_>>();
+        for conflict in conflicts {
+            self.selection.remove(conflict);
+        }
+        self.selection.add(id);
+    }
+
+    fn toggle_selection_target(&mut self, id: NodeId) {
+        if self.selection.contains(id) {
+            self.selection.remove(id);
+        } else {
+            self.add_selection_target(id);
+        }
     }
 
     fn select_one_level_toward(&mut self, descendant: NodeId) -> bool {
@@ -1700,7 +1747,7 @@ impl Editor {
                                 };
                             }
                             SelectionAction::ToggleNode(id) => {
-                                self.selection.toggle(id);
+                                self.toggle_selection_target(id);
                                 self.needs_redraw = true;
                             }
                             SelectionAction::StartMarquee => {
@@ -2031,7 +2078,7 @@ impl Editor {
                     if modifiers.shift {
                         // Selection depth and additive selection are independent.
                         for id in selected {
-                            self.selection.add(id);
+                            self.add_selection_target(id);
                         }
                     } else {
                         // No modifiers: Replace selection
@@ -2110,7 +2157,17 @@ impl Editor {
         let max_y = start.y.max(end.y);
         let marquee = Rect::new(Vec2::new(min_x, min_y), Vec2::new(max_x, max_y));
 
-        let scope = self.selection_scope();
+        let active_scope = self.selection_scope();
+        let scope = if active_scope == self.document.root
+            || self
+                .document
+                .world_bounds(active_scope)
+                .is_some_and(|bounds| bounds.contains(start))
+        {
+            active_scope
+        } else {
+            self.document.root
+        };
         let candidates = if deep_select {
             self.document.descendants(scope).collect::<Vec<_>>()
         } else {
@@ -4123,7 +4180,8 @@ impl Editor {
         self.record_vector_edit(before);
     }
 
-    fn selection_world_bounds(&mut self) -> Option<Rect> {
+    /// Return the union of the current selection's world-space bounds.
+    pub fn selection_world_bounds(&mut self) -> Option<Rect> {
         let mut bounds = Rect::empty();
         for id in self.selection.iter() {
             let node_bounds = self.document.world_bounds(id)?;
@@ -5866,6 +5924,33 @@ mod tests {
         (editor, ids)
     }
 
+    fn editor_with_grouped_shapes() -> (Editor, NodeId, NodeId, NodeId) {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(root, Node::group("Group"))
+            .unwrap();
+        let first = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("First", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::black())),
+            )
+            .unwrap();
+        let second = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Second", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::black()))
+                    .with_transform(Affine2::from_translation(Vec2::new(40.0, 0.0))),
+            )
+            .unwrap();
+        (editor, group, first, second)
+    }
+
     fn child_names(editor: &Editor, parent: NodeId) -> Vec<&str> {
         editor
             .document
@@ -5920,35 +6005,44 @@ mod tests {
     }
 
     #[test]
-    fn canvas_click_selects_group_while_primary_modifier_deep_selects_child() {
-        let mut editor = Editor::new();
-        let root = editor.document.root;
-        let group = editor
-            .document
-            .add_child(root, Node::group("Group"))
-            .unwrap();
-        let child = editor
-            .document
-            .add_child(
-                group,
-                Node::shape("Child", PathData::rect(0.0, 0.0, 20.0, 20.0))
-                    .with_style(Style::fill(Paint::black())),
-            )
-            .unwrap();
-
+    fn canvas_drag_selects_and_moves_the_group_by_default() {
+        let (mut editor, group, first, second) = editor_with_grouped_shapes();
+        let group_before = editor.document.world_transform(group);
+        let first_local_before = editor.document.get(first).unwrap().transform;
+        let first_before = editor.document.world_transform(first);
+        let second_before = editor.document.world_transform(second);
         editor.handle_event(InputEvent::PointerDown {
             position: Vec2::splat(10.0),
             button: MouseButton::Left,
             modifiers: Modifiers::default(),
         });
-
         assert_eq!(editor.selection.primary(), Some(group));
-
         editor.handle_event(InputEvent::PointerUp {
-            position: Vec2::splat(10.0),
+            position: Vec2::splat(20.0),
             button: MouseButton::Left,
             modifiers: Modifiers::default(),
         });
+
+        let delta = Affine2::from_translation(Vec2::splat(10.0));
+        assert_affine_approx_eq(editor.document.world_transform(group), delta * group_before);
+        assert_affine_approx_eq(
+            editor.document.get(first).unwrap().transform,
+            first_local_before,
+        );
+        assert_affine_approx_eq(editor.document.world_transform(first), delta * first_before);
+        assert_affine_approx_eq(
+            editor.document.world_transform(second),
+            delta * second_before,
+        );
+    }
+
+    #[test]
+    fn primary_modifier_drag_deep_selects_and_moves_only_the_child() {
+        let (mut editor, group, first, second) = editor_with_grouped_shapes();
+        let group_before = editor.document.world_transform(group);
+        let first_before = editor.document.world_transform(first);
+        let second_before = editor.document.world_transform(second);
+
         editor.handle_event(InputEvent::PointerDown {
             position: Vec2::splat(10.0),
             button: MouseButton::Left,
@@ -5957,8 +6051,154 @@ mod tests {
                 ..Modifiers::default()
             },
         });
+        assert_eq!(editor.selection.primary(), Some(first));
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(20.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+        });
 
-        assert_eq!(editor.selection.primary(), Some(child));
+        let delta = Affine2::from_translation(Vec2::new(10.0, 0.0));
+        assert_affine_approx_eq(editor.document.world_transform(group), group_before);
+        assert_affine_approx_eq(editor.document.world_transform(first), delta * first_before);
+        assert_affine_approx_eq(editor.document.world_transform(second), second_before);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(20.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.selection.primary(), Some(first));
+    }
+
+    #[test]
+    fn shift_click_toggles_the_resolved_container_or_deep_child() {
+        let (mut editor, group, first, _) = editor_with_grouped_shapes();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: shift,
+        });
+        assert_eq!(editor.selection.to_vec(), vec![group]);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: shift,
+        });
+        assert!(editor.selection.is_empty());
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers {
+                shift: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+        });
+        assert_eq!(editor.selection.to_vec(), vec![first]);
+    }
+
+    #[test]
+    fn select_all_and_invert_stay_within_the_active_hierarchy_scope() {
+        let (mut editor, group, first, second) = editor_with_grouped_shapes();
+        let root_sibling = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Root sibling", PathData::rect(80.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+
+        assert!(editor.execute_action(EditorAction::SelectAll));
+        assert_eq!(editor.selection.to_vec(), vec![group, root_sibling]);
+
+        editor.selection.select(first);
+        assert!(editor.execute_action(EditorAction::SelectAll));
+        assert_eq!(editor.selection.to_vec(), vec![first, second]);
+
+        editor.selection.select(first);
+        assert!(editor.execute_action(EditorAction::InvertSelection));
+        assert_eq!(editor.selection.to_vec(), vec![second]);
+    }
+
+    #[test]
+    fn double_click_and_enter_descend_one_level_and_shift_enter_goes_up() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let outer = editor
+            .document
+            .add_child(root, Node::group("Outer"))
+            .unwrap();
+        let inner = editor
+            .document
+            .add_child(outer, Node::group("Inner"))
+            .unwrap();
+        let leaf = editor
+            .document
+            .add_child(
+                inner,
+                Node::shape("Leaf", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::black())),
+            )
+            .unwrap();
+
+        editor.handle_pointer_down_with_click_count(
+            Vec2::splat(10.0),
+            MouseButton::Left,
+            Modifiers::default(),
+            1,
+        );
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.selection.primary(), Some(outer));
+
+        editor.handle_pointer_down_with_click_count(
+            Vec2::splat(10.0),
+            MouseButton::Left,
+            Modifiers::default(),
+            2,
+        );
+        assert_eq!(editor.selection.primary(), Some(inner));
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.selection.primary(), Some(leaf));
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        });
+        assert_eq!(editor.selection.primary(), Some(inner));
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.selection.primary(), Some(leaf));
+        assert_eq!(editor.interaction_kind(), InteractionKind::VectorEditing);
     }
 
     #[test]
@@ -6291,6 +6531,26 @@ mod tests {
         assert!(editor.execute_action(EditorAction::Undo));
         assert_affine_approx_eq(editor.document.world_transform(child), child_before);
         assert_affine_approx_eq(editor.document.world_transform(sibling), sibling_before);
+    }
+
+    #[test]
+    fn arrangement_actions_are_disabled_when_a_transform_root_has_no_bounds() {
+        let (mut editor, ids) = editor_with_named_shapes(&["A", "B", "C"]);
+        let empty_group = editor
+            .document
+            .add_child(editor.document.root, Node::group("Empty"))
+            .unwrap();
+
+        editor.selection.set([empty_group, ids[0]]);
+        assert!(!editor.can_execute(EditorAction::AlignLeft));
+
+        editor.selection.set([empty_group, ids[0], ids[1]]);
+        assert!(!editor.can_execute(EditorAction::DistributeHorizontal));
+
+        editor.selection.set([ids[0], ids[1]]);
+        assert!(editor.can_execute(EditorAction::AlignLeft));
+        editor.selection.set(ids);
+        assert!(editor.can_execute(EditorAction::DistributeHorizontal));
     }
 
     #[test]
@@ -7112,6 +7372,55 @@ mod tests {
         assert!(!selected.contains(&hidden_child));
         assert!(!selected.contains(&locked_child));
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn marquee_uses_selection_scope_and_deep_mode_returns_only_leaves() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let frame = editor
+            .document
+            .add_child(root, Node::frame("Frame", 100.0, 100.0))
+            .unwrap();
+        let group = editor
+            .document
+            .add_child(frame, Node::group("Group"))
+            .unwrap();
+        let first = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("First", PathData::rect(0.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+        let second = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Second", PathData::rect(30.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+        let start = Vec2::splat(-5.0);
+        let end = Vec2::new(105.0, 105.0);
+
+        assert_eq!(
+            editor.compute_marquee_selection(start, end, false),
+            vec![frame]
+        );
+        assert_eq!(
+            editor.compute_marquee_selection(start, end, true),
+            vec![first, second]
+        );
+
+        editor.selection.select(first);
+        assert_eq!(
+            editor.compute_marquee_selection(Vec2::new(5.0, 5.0), Vec2::new(55.0, 25.0), false),
+            vec![first, second]
+        );
+        assert_eq!(
+            editor.compute_marquee_selection(start, end, false),
+            vec![frame]
+        );
     }
 
     #[test]
