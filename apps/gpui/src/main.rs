@@ -482,6 +482,7 @@ impl VectorEditor {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        let menu_closed = self.open_menu.take().is_some();
         if let Some(snapshot) = self.editor.text_input_snapshot() {
             if let Some(selected) = snapshot.text.get(snapshot.selection) {
                 if !selected.is_empty() {
@@ -495,38 +496,51 @@ impl VectorEditor {
                 cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             }
         }
+        if menu_closed {
+            cx.notify();
+        }
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
+        let menu_closed = self.open_menu.take().is_some();
+        let mut changed = false;
         if let Some(snapshot) = self.editor.text_input_snapshot() {
             if let Some(selected) = snapshot.text.get(snapshot.selection.clone()) {
                 if !selected.is_empty() {
                     self.object_clipboard = None;
                     cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
                     self.editor.replace_text(Some(snapshot.selection), "");
-                    cx.notify();
+                    changed = true;
                 }
             }
         } else if let Some(clipboard) = self.editor.copy_selection() {
             self.object_clipboard = Some(clipboard);
             cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             self.editor.delete_selection();
+            changed = true;
+        }
+        if changed || menu_closed {
             cx.notify();
         }
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let menu_closed = self.open_menu.take().is_some();
+        let mut changed = false;
         if self.editor.text_input_snapshot().is_some() {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 if self.editor.replace_text(None, &text) {
-                    cx.notify();
+                    changed = true;
                 }
             }
         } else if let Some(mut clipboard) = self.object_clipboard.take() {
             if self.editor.paste_clipboard(&mut clipboard) {
-                cx.notify();
+                changed = true;
             }
             self.object_clipboard = Some(clipboard);
+        }
+        if changed || menu_closed {
+            cx.notify();
         }
     }
 
@@ -757,6 +771,14 @@ impl Render for VectorEditor {
         let show_layer_panel = self.show_layer_panel;
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
+        let can_paste = match open_menu {
+            Some(toolbar::MenuKind::Main) if self.editor.text_input_snapshot().is_some() => cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty()),
+            Some(toolbar::MenuKind::Main) => self.object_clipboard.is_some(),
+            _ => false,
+        };
 
         let window_size = window.viewport_size();
         let panel_width = if show_layer_panel {
@@ -912,6 +934,7 @@ impl Render for VectorEditor {
                     menu,
                     &self.editor,
                     show_layer_panel,
+                    can_paste,
                     window_size.width.0,
                     cx,
                 ))

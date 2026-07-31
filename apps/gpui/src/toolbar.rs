@@ -8,12 +8,13 @@ use gpui::{
 
 use crate::{
     assets::{icon, Icon},
-    AlignTextCenter, AlignTextLeft, AlignTextRight, BringForward, BringToFront, Delete,
+    AlignTextCenter, AlignTextLeft, AlignTextRight, BringForward, BringToFront, Copy, Cut, Delete,
     DeselectAll, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
-    InvertSelection, JoinPaths, PenTool, RectangleTool, Redo, ReversePath, SelectAll, SelectTool,
-    SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground,
-    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup,
-    VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    InvertSelection, JoinPaths, Paste, PenTool, RectangleTool, Redo, ReversePath, SelectAll,
+    SelectTool, SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool,
+    ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu,
+    Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
+    ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -357,6 +358,7 @@ pub fn render_menu(
     kind: MenuKind,
     editor: &Editor,
     show_layer_panel: bool,
+    can_paste: bool,
     viewport_width: f32,
     cx: &mut Context<VectorEditor>,
 ) -> impl IntoElement {
@@ -364,7 +366,7 @@ pub fn render_menu(
         MenuKind::Main => (
             point(px(8.0), px(HEADER_HEIGHT + 6.0)),
             Corner::TopLeft,
-            render_main_menu(editor, show_layer_panel).into_any_element(),
+            render_main_menu(editor, show_layer_panel, can_paste).into_any_element(),
         ),
         MenuKind::Zoom => (
             point(px(viewport_width - 44.0), px(HEADER_HEIGHT + 6.0)),
@@ -398,7 +400,12 @@ pub fn render_menu(
         )
 }
 
-fn render_main_menu(editor: &Editor, show_layer_panel: bool) -> impl IntoElement {
+fn render_main_menu(editor: &Editor, show_layer_panel: bool, can_paste: bool) -> impl IntoElement {
+    let can_copy_or_cut = editor.text_input_snapshot().map_or_else(
+        || !editor.selection().is_empty(),
+        |snapshot| !snapshot.selection.is_empty(),
+    );
+
     menu_panel("Main menu", 272.0)
         .child(menu_section("Tools"))
         .child(menu_item(
@@ -441,6 +448,9 @@ fn render_main_menu(editor: &Editor, show_layer_panel: bool) -> impl IntoElement
         .child(menu_section("Edit"))
         .child(menu_item("Undo", "⌘Z", editor.can_undo_in_context(), Undo))
         .child(menu_item("Redo", "⇧⌘Z", editor.can_redo_in_context(), Redo))
+        .child(menu_item("Cut", "⌘X", can_copy_or_cut, Cut))
+        .child(menu_item("Copy", "⌘C", can_copy_or_cut, Copy))
+        .child(menu_item("Paste", "⌘V", can_paste, Paste))
         .child(menu_separator())
         .child(menu_section("Selection"))
         .child(menu_item(
