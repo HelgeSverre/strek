@@ -21,6 +21,7 @@ pub mod layers;
 pub mod layout;
 pub mod node;
 pub mod path;
+mod property_scrub;
 pub mod render;
 pub mod selection;
 pub mod snap;
@@ -44,6 +45,7 @@ pub use node::{
     FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData, TextSizing,
 };
 pub use path::{HandleMode, PathAnchor, PathCmd, PathContour, PathData, Rect};
+pub use property_scrub::{NumericPropertyScrubSession, NumericPropertyTarget};
 pub use selection::{Selection, SelectionAction};
 pub use snap::{
     AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult,

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use editor_render::DisplayList;
 use glam::{Affine2, Vec2};
@@ -15,6 +16,10 @@ use crate::layers::{LayerEntry, LayerIcon, LayerPanelState};
 use crate::layout::{AlignCross, AlignMain, AutoLayout, Direction};
 use crate::node::{Layout, Node, NodeId, NodeKind, TextData, TextSizing};
 use crate::path::{HandleMode, PathAnchor, PathContour, PathData, Rect};
+use crate::property_scrub::{
+    NumericPropertyScrubSession, NumericPropertyScrubState, NumericPropertySnapshot,
+    NumericPropertyTarget, StyleSnapshot, TransformSnapshot,
+};
 use crate::selection::{Selection, SelectionAction};
 use crate::snap::{SnapEngine, SnapKind, SnapPoint, SnapResult};
 use crate::style::{Paint, Stroke, Style};
@@ -478,6 +483,11 @@ fn canonical_font_weight(weight: u16) -> u16 {
     ((weight.clamp(100, 900) + 50) / 100) * 100
 }
 
+fn bounded_numeric_sum(value: f32, delta: f32, minimum: f32, maximum: f32) -> Option<f32> {
+    let sum = value + delta;
+    sum.is_finite().then(|| sum.clamp(minimum, maximum))
+}
+
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
@@ -597,6 +607,15 @@ pub struct Editor {
     /// Non-document style presets for newly created vector objects.
     creation_styles: CreationStyleDefaults,
 
+    /// Live numeric property edit, kept outside document history until commit.
+    numeric_property_scrub: Option<NumericPropertyScrubState>,
+
+    /// Per-editor identity carried by opaque numeric property scrub tokens.
+    numeric_property_scrub_owner: Arc<()>,
+
+    /// Monotonic identity for opaque numeric property scrub tokens.
+    next_numeric_property_scrub_id: u64,
+
     /// Drag state
     drag: DragState,
 
@@ -624,6 +643,9 @@ impl Editor {
             viewport_size: Vec2::new(800.0, 600.0),
             tool: Tool::Select,
             creation_styles: CreationStyleDefaults::default(),
+            numeric_property_scrub: None,
+            numeric_property_scrub_owner: Arc::new(()),
+            next_numeric_property_scrub_id: 1,
             drag: DragState::None,
             needs_redraw: true,
             snap_engine: SnapEngine::new(),
@@ -1061,6 +1083,7 @@ impl Editor {
     }
 
     fn settle_interaction(&mut self) {
+        self.cancel_active_numeric_property_scrub();
         if matches!(self.drag, DragState::Panning { .. }) {
             let DragState::Panning { resume, .. } = std::mem::take(&mut self.drag) else {
                 unreachable!("interaction was checked as panning");
@@ -6099,6 +6122,544 @@ impl Editor {
         true
     }
 
+    /// Begin a live numeric-property scrub for the current selection.
+    ///
+    /// Starting a scrub settles pointer/text interactions and cancels any
+    /// existing scrub before capturing a fresh immutable snapshot.
+    pub fn begin_numeric_property_scrub(
+        &mut self,
+        target: NumericPropertyTarget,
+    ) -> Option<NumericPropertyScrubSession> {
+        self.settle_interaction();
+        let selection = self.selection.to_vec();
+        let snapshot = self.capture_numeric_property_snapshot(target)?;
+        let id = self.next_numeric_property_scrub_id;
+        self.next_numeric_property_scrub_id = self.next_numeric_property_scrub_id.wrapping_add(1);
+        if self.next_numeric_property_scrub_id == 0 {
+            self.next_numeric_property_scrub_id = 1;
+        }
+        self.numeric_property_scrub = Some(NumericPropertyScrubState {
+            id,
+            target,
+            selection,
+            revision: self.history.current_revision(),
+            snapshot,
+        });
+        Some(NumericPropertyScrubSession::new(
+            Arc::clone(&self.numeric_property_scrub_owner),
+            id,
+        ))
+    }
+
+    /// Preview an absolute delta from the values captured when the scrub began.
+    ///
+    /// Repeated calls never accumulate from the preceding preview. Invalid
+    /// deltas leave the current preview unchanged and return `false`.
+    pub fn preview_numeric_property_scrub(
+        &mut self,
+        session: &NumericPropertyScrubSession,
+        delta: f32,
+    ) -> bool {
+        if !session.belongs_to(&self.numeric_property_scrub_owner)
+            || !delta.is_finite()
+            || self
+                .numeric_property_scrub
+                .as_ref()
+                .is_none_or(|state| state.id != session.id())
+        {
+            return false;
+        }
+        if !self.numeric_property_scrub_is_valid() {
+            self.cancel_active_numeric_property_scrub();
+            return false;
+        }
+
+        let state = self
+            .numeric_property_scrub
+            .take()
+            .expect("the scrub was validated above");
+        let changed = self
+            .apply_numeric_property_preview(&state, delta)
+            .unwrap_or(false);
+        self.numeric_property_scrub = Some(state);
+        if changed {
+            self.needs_redraw = true;
+        }
+        changed
+    }
+
+    /// Commit the current preview as exactly one undoable command.
+    ///
+    /// A no-op or invalidated session is consumed without adding history.
+    pub fn commit_numeric_property_scrub(&mut self, session: NumericPropertyScrubSession) -> bool {
+        if !session.belongs_to(&self.numeric_property_scrub_owner)
+            || self
+                .numeric_property_scrub
+                .as_ref()
+                .is_none_or(|state| state.id != session.id())
+        {
+            return false;
+        }
+        if !self.numeric_property_scrub_is_valid() {
+            self.cancel_active_numeric_property_scrub();
+            return false;
+        }
+
+        let state = self
+            .numeric_property_scrub
+            .take()
+            .expect("the scrub was validated above");
+        let patches = self.numeric_property_scrub_patches(&state);
+        if patches.is_empty() {
+            return false;
+        }
+        self.history
+            .push(Command::new(state.target.description()).with_patches(patches));
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Cancel a scrub and restore its original property values without history.
+    pub fn cancel_numeric_property_scrub(&mut self, session: NumericPropertyScrubSession) -> bool {
+        if !session.belongs_to(&self.numeric_property_scrub_owner)
+            || self
+                .numeric_property_scrub
+                .as_ref()
+                .is_none_or(|state| state.id != session.id())
+        {
+            return false;
+        }
+        self.cancel_active_numeric_property_scrub()
+    }
+
+    fn capture_numeric_property_snapshot(
+        &mut self,
+        target: NumericPropertyTarget,
+    ) -> Option<NumericPropertySnapshot> {
+        match target {
+            NumericPropertyTarget::WorldX | NumericPropertyTarget::WorldY => {
+                let selected = self
+                    .document
+                    .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+                let mut snapshots = Vec::new();
+                for id in selected {
+                    if !self.document.is_effectively_editable(id) {
+                        continue;
+                    }
+                    let node = self.document.get(id)?;
+                    let snapshot = TransformSnapshot {
+                        id,
+                        parent: node.parent,
+                        before: node.transform,
+                        world: self.document.world_transform(id),
+                    };
+                    if snapshot.before.matrix2.is_finite()
+                        && snapshot.before.translation.is_finite()
+                        && snapshot.world.matrix2.is_finite()
+                        && snapshot.world.translation.is_finite()
+                    {
+                        snapshots.push(snapshot);
+                    }
+                }
+                (!snapshots.is_empty()).then_some(NumericPropertySnapshot::Transforms(snapshots))
+            }
+            NumericPropertyTarget::Opacity | NumericPropertyTarget::StrokeWidth => {
+                let selected = self
+                    .document
+                    .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+                let snapshots = selected
+                    .into_iter()
+                    .filter(|id| self.document.is_effectively_editable(*id))
+                    .filter_map(|id| {
+                        let before = self.document.get(id)?.style.clone();
+                        let valid = match target {
+                            NumericPropertyTarget::Opacity => before.opacity.is_finite(),
+                            NumericPropertyTarget::StrokeWidth => before
+                                .stroke
+                                .as_ref()
+                                .is_some_and(|stroke| stroke.width.is_finite()),
+                            NumericPropertyTarget::WorldX
+                            | NumericPropertyTarget::WorldY
+                            | NumericPropertyTarget::TextSize
+                            | NumericPropertyTarget::AutoLayoutSpacing
+                            | NumericPropertyTarget::AutoLayoutPadding => false,
+                        };
+                        valid.then_some(StyleSnapshot { id, before })
+                    })
+                    .collect::<Vec<_>>();
+                (!snapshots.is_empty()).then_some(NumericPropertySnapshot::Styles(snapshots))
+            }
+            NumericPropertyTarget::TextSize => {
+                let id = self.single_editable_selection()?;
+                let before = self.document.get(id).and_then(|node| match &node.kind {
+                    NodeKind::Text(text) if text.font_size.is_finite() => Some(text.clone()),
+                    _ => None,
+                })?;
+                Some(NumericPropertySnapshot::Text { id, before })
+            }
+            NumericPropertyTarget::AutoLayoutSpacing | NumericPropertyTarget::AutoLayoutPadding => {
+                let id = self.single_editable_selection()?;
+                let before = self.document.get(id).and_then(|node| {
+                    matches!(node.kind, NodeKind::Group).then(|| node.layout.clone())
+                })?;
+                let Layout::Auto(layout) = &before else {
+                    return None;
+                };
+                let valid = match target {
+                    NumericPropertyTarget::AutoLayoutSpacing => layout.spacing.is_finite(),
+                    NumericPropertyTarget::AutoLayoutPadding => [
+                        layout.padding.left,
+                        layout.padding.top,
+                        layout.padding.right,
+                        layout.padding.bottom,
+                    ]
+                    .into_iter()
+                    .all(f32::is_finite),
+                    NumericPropertyTarget::WorldX
+                    | NumericPropertyTarget::WorldY
+                    | NumericPropertyTarget::Opacity
+                    | NumericPropertyTarget::StrokeWidth
+                    | NumericPropertyTarget::TextSize => false,
+                };
+                valid.then_some(NumericPropertySnapshot::Layout { id, before })
+            }
+        }
+    }
+
+    fn single_editable_selection(&self) -> Option<NodeId> {
+        (self.selection.len() == 1)
+            .then(|| self.selection.primary())
+            .flatten()
+            .filter(|id| self.document.is_effectively_editable(*id))
+    }
+
+    fn numeric_property_scrub_is_valid(&self) -> bool {
+        let Some(state) = &self.numeric_property_scrub else {
+            return false;
+        };
+        if state.revision != self.history.current_revision()
+            || state.selection != self.selection.to_vec()
+        {
+            return false;
+        }
+        match &state.snapshot {
+            NumericPropertySnapshot::Transforms(snapshots) => snapshots.iter().all(|snapshot| {
+                self.document.get(snapshot.id).is_some_and(|node| {
+                    !node.deleted
+                        && node.parent == snapshot.parent
+                        && self.document.is_effectively_editable(snapshot.id)
+                })
+            }),
+            NumericPropertySnapshot::Styles(snapshots) => snapshots.iter().all(|snapshot| {
+                self.document
+                    .get(snapshot.id)
+                    .is_some_and(|node| !node.deleted)
+                    && self.document.is_effectively_editable(snapshot.id)
+            }),
+            NumericPropertySnapshot::Text { id, .. } => {
+                self.document.get(*id).is_some_and(|node| {
+                    !node.deleted
+                        && matches!(node.kind, NodeKind::Text(_))
+                        && self.document.is_effectively_editable(*id)
+                })
+            }
+            NumericPropertySnapshot::Layout { id, .. } => {
+                self.document.get(*id).is_some_and(|node| {
+                    !node.deleted
+                        && matches!(node.kind, NodeKind::Group)
+                        && matches!(node.layout, Layout::Auto(_))
+                        && self.document.is_effectively_editable(*id)
+                })
+            }
+        }
+    }
+
+    fn apply_numeric_property_preview(
+        &mut self,
+        state: &NumericPropertyScrubState,
+        delta: f32,
+    ) -> Option<bool> {
+        match (&state.target, &state.snapshot) {
+            (
+                NumericPropertyTarget::WorldX | NumericPropertyTarget::WorldY,
+                NumericPropertySnapshot::Transforms(snapshots),
+            ) => self.preview_numeric_world_position(state.target, snapshots, delta),
+            (
+                NumericPropertyTarget::Opacity | NumericPropertyTarget::StrokeWidth,
+                NumericPropertySnapshot::Styles(snapshots),
+            ) => self.preview_numeric_style(state.target, snapshots, delta),
+            (NumericPropertyTarget::TextSize, NumericPropertySnapshot::Text { id, before }) => {
+                self.preview_numeric_text(*id, before, delta)
+            }
+            (
+                NumericPropertyTarget::AutoLayoutSpacing | NumericPropertyTarget::AutoLayoutPadding,
+                NumericPropertySnapshot::Layout { id, before },
+            ) => self.preview_numeric_layout(state.target, *id, before, delta),
+            _ => None,
+        }
+    }
+
+    fn preview_numeric_world_position(
+        &mut self,
+        target: NumericPropertyTarget,
+        snapshots: &[TransformSnapshot],
+        delta: f32,
+    ) -> Option<bool> {
+        let translation = match target {
+            NumericPropertyTarget::WorldX => Vec2::new(delta, 0.0),
+            NumericPropertyTarget::WorldY => Vec2::new(0.0, delta),
+            NumericPropertyTarget::Opacity
+            | NumericPropertyTarget::StrokeWidth
+            | NumericPropertyTarget::TextSize
+            | NumericPropertyTarget::AutoLayoutSpacing
+            | NumericPropertyTarget::AutoLayoutPadding => return None,
+        };
+        let desired = snapshots
+            .iter()
+            .map(|snapshot| {
+                let world = Affine2::from_translation(translation) * snapshot.world;
+                (world.translation.is_finite() && world.matrix2.is_finite())
+                    .then_some((snapshot.id, world))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let current = snapshots
+            .iter()
+            .map(|snapshot| Some((snapshot.id, self.document.get(snapshot.id)?.transform)))
+            .collect::<Option<Vec<_>>>()?;
+
+        self.restore_numeric_transforms(snapshots);
+        if delta != 0.0 {
+            self.document.restore_world_transforms(&desired);
+        }
+
+        Some(current.into_iter().any(|(id, before)| {
+            self.document
+                .get(id)
+                .is_some_and(|node| node.transform != before)
+        }))
+    }
+
+    fn preview_numeric_style(
+        &mut self,
+        target: NumericPropertyTarget,
+        snapshots: &[StyleSnapshot],
+        delta: f32,
+    ) -> Option<bool> {
+        let after = snapshots
+            .iter()
+            .map(|snapshot| {
+                let mut style = snapshot.before.clone();
+                match target {
+                    NumericPropertyTarget::Opacity => {
+                        style.opacity = bounded_numeric_sum(style.opacity, delta, 0.0, 1.0)?;
+                    }
+                    NumericPropertyTarget::StrokeWidth => {
+                        let stroke = style.stroke.as_mut()?;
+                        stroke.width = bounded_numeric_sum(stroke.width, delta, 0.1, 1000.0)?;
+                    }
+                    NumericPropertyTarget::WorldX
+                    | NumericPropertyTarget::WorldY
+                    | NumericPropertyTarget::TextSize
+                    | NumericPropertyTarget::AutoLayoutSpacing
+                    | NumericPropertyTarget::AutoLayoutPadding => return None,
+                }
+                Some((snapshot.id, style))
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut changed = false;
+        for (id, after) in after {
+            let node = self.document.get_mut(id)?;
+            if node.style != after {
+                node.style = after;
+                self.document.mark_bounds_dirty(id);
+                changed = true;
+            }
+        }
+        Some(changed)
+    }
+
+    fn preview_numeric_text(&mut self, id: NodeId, before: &TextData, delta: f32) -> Option<bool> {
+        let mut after = before.clone();
+        after.font_size = bounded_numeric_sum(before.font_size, delta, 1.0, 512.0)?;
+        let node = self.document.get_mut(id)?;
+        let NodeKind::Text(current) = &mut node.kind else {
+            return None;
+        };
+        if *current == after {
+            return Some(false);
+        }
+        *current = after;
+        self.document.mark_bounds_dirty(id);
+        self.document.mark_layout_dirty();
+        Some(true)
+    }
+
+    fn preview_numeric_layout(
+        &mut self,
+        target: NumericPropertyTarget,
+        id: NodeId,
+        before: &Layout,
+        delta: f32,
+    ) -> Option<bool> {
+        let Layout::Auto(mut after) = before.clone() else {
+            return None;
+        };
+        match target {
+            NumericPropertyTarget::AutoLayoutSpacing => {
+                after.spacing = bounded_numeric_sum(after.spacing, delta, 0.0, f32::MAX)?;
+            }
+            NumericPropertyTarget::AutoLayoutPadding => {
+                after.padding.left = bounded_numeric_sum(after.padding.left, delta, 0.0, f32::MAX)?;
+                after.padding.top = bounded_numeric_sum(after.padding.top, delta, 0.0, f32::MAX)?;
+                after.padding.right =
+                    bounded_numeric_sum(after.padding.right, delta, 0.0, f32::MAX)?;
+                after.padding.bottom =
+                    bounded_numeric_sum(after.padding.bottom, delta, 0.0, f32::MAX)?;
+            }
+            NumericPropertyTarget::WorldX
+            | NumericPropertyTarget::WorldY
+            | NumericPropertyTarget::Opacity
+            | NumericPropertyTarget::StrokeWidth
+            | NumericPropertyTarget::TextSize => return None,
+        }
+        let after = Layout::Auto(after);
+        let node = self.document.get_mut(id)?;
+        if node.layout == after {
+            return Some(false);
+        }
+        node.layout = after;
+        self.document.mark_layout_dirty();
+        Some(true)
+    }
+
+    fn numeric_property_scrub_patches(&self, state: &NumericPropertyScrubState) -> Vec<Patch> {
+        match &state.snapshot {
+            NumericPropertySnapshot::Transforms(snapshots) => snapshots
+                .iter()
+                .filter_map(|snapshot| {
+                    let after = self.document.get(snapshot.id)?.transform;
+                    (after != snapshot.before).then_some(Patch::SetTransform {
+                        id: snapshot.id,
+                        before: snapshot.before,
+                        after,
+                    })
+                })
+                .collect(),
+            NumericPropertySnapshot::Styles(snapshots) => snapshots
+                .iter()
+                .filter_map(|snapshot| {
+                    let after = self.document.get(snapshot.id)?.style.clone();
+                    (after != snapshot.before).then(|| Patch::SetStyle {
+                        id: snapshot.id,
+                        before: snapshot.before.clone(),
+                        after,
+                    })
+                })
+                .collect(),
+            NumericPropertySnapshot::Text { id, before } => self
+                .document
+                .get(*id)
+                .and_then(|node| match &node.kind {
+                    NodeKind::Text(after) if after != before => Some(Patch::SetText {
+                        id: *id,
+                        before: before.clone(),
+                        after: after.clone(),
+                    }),
+                    _ => None,
+                })
+                .into_iter()
+                .collect(),
+            NumericPropertySnapshot::Layout { id, before } => self
+                .document
+                .get(*id)
+                .and_then(|node| {
+                    (node.layout != *before).then(|| Patch::SetLayout {
+                        id: *id,
+                        before: before.clone(),
+                        after: node.layout.clone(),
+                    })
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn cancel_active_numeric_property_scrub(&mut self) -> bool {
+        let Some(state) = self.numeric_property_scrub.take() else {
+            return false;
+        };
+        if self.restore_numeric_property_snapshot(&state.snapshot) {
+            self.needs_redraw = true;
+        }
+        true
+    }
+
+    fn restore_numeric_property_snapshot(&mut self, snapshot: &NumericPropertySnapshot) -> bool {
+        match snapshot {
+            NumericPropertySnapshot::Transforms(snapshots) => {
+                self.restore_numeric_transforms(snapshots)
+            }
+            NumericPropertySnapshot::Styles(snapshots) => {
+                let mut changed = false;
+                for snapshot in snapshots {
+                    let Some(node) = self.document.get_mut(snapshot.id) else {
+                        continue;
+                    };
+                    if node.deleted || node.style == snapshot.before {
+                        continue;
+                    }
+                    node.style = snapshot.before.clone();
+                    self.document.mark_bounds_dirty(snapshot.id);
+                    changed = true;
+                }
+                changed
+            }
+            NumericPropertySnapshot::Text { id, before } => {
+                let Some(node) = self.document.get_mut(*id) else {
+                    return false;
+                };
+                let NodeKind::Text(current) = &mut node.kind else {
+                    return false;
+                };
+                if node.deleted || current == before {
+                    return false;
+                }
+                *current = before.clone();
+                self.document.mark_bounds_dirty(*id);
+                self.document.mark_layout_dirty();
+                true
+            }
+            NumericPropertySnapshot::Layout { id, before } => {
+                let Some(node) = self.document.get_mut(*id) else {
+                    return false;
+                };
+                if node.deleted || node.layout == *before {
+                    return false;
+                }
+                node.layout = before.clone();
+                self.document.mark_layout_dirty();
+                true
+            }
+        }
+    }
+
+    fn restore_numeric_transforms(&mut self, snapshots: &[TransformSnapshot]) -> bool {
+        let mut changed = false;
+        for snapshot in snapshots {
+            let Some(node) = self.document.get_mut(snapshot.id) else {
+                continue;
+            };
+            if node.deleted || node.transform == snapshot.before {
+                continue;
+            }
+            node.transform = snapshot.before;
+            self.document.mark_transform_dirty(snapshot.id);
+            changed = true;
+        }
+        changed
+    }
+
     /// Return the selected text properties used by contextual desktop controls.
     pub fn selected_text_data(&self) -> Option<TextData> {
         let id = self.selection.primary()?;
@@ -9955,5 +10516,272 @@ mod tests {
         assert_eq!(editor.document.get(ids[0]).unwrap().transform, original);
         assert_eq!(editor.tool, Tool::Ellipse);
         assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn numeric_world_scrub_is_absolute_nested_and_one_history_entry() {
+        let mut editor = Editor::new();
+        let group = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::group("Parent").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(1.5, 0.75),
+                    0.35,
+                    Vec2::new(80.0, 40.0),
+                )),
+            )
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 20.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(12.0, 8.0))),
+            )
+            .unwrap();
+        editor.selection.select(child);
+        let original = editor.document.world_transform(child);
+
+        let x_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::WorldX)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&x_scrub, 10.0));
+        let first = editor.document.world_transform(child);
+        assert!((first.translation.x - original.translation.x - 10.0).abs() < 0.001);
+        assert!((first.translation.y - original.translation.y).abs() < 0.001);
+        assert!(editor.preview_numeric_property_scrub(&x_scrub, 25.0));
+        let second = editor.document.world_transform(child);
+        assert!((second.translation.x - original.translation.x - 25.0).abs() < 0.001);
+        assert_eq!(editor.history.undo_count(), 0);
+        assert_eq!(editor.current_revision(), 0);
+        assert!(!editor.is_dirty());
+
+        assert!(editor.commit_numeric_property_scrub(x_scrub));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert_eq!(editor.history.undo_description(), Some("Move X"));
+        assert_eq!(editor.current_revision(), 1);
+        assert!(editor.is_dirty());
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_affine_approx_eq(editor.document.world_transform(child), original);
+        assert!(!editor.is_dirty());
+
+        let y_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::WorldY)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&y_scrub, -12.0));
+        let moved = editor.document.world_transform(child);
+        assert!((moved.translation.x - original.translation.x).abs() < 0.001);
+        assert!((moved.translation.y - original.translation.y + 12.0).abs() < 0.001);
+        assert!(editor.commit_numeric_property_scrub(y_scrub));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert_eq!(editor.history.undo_description(), Some("Move Y"));
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_affine_approx_eq(editor.document.world_transform(child), original);
+    }
+
+    #[test]
+    fn numeric_style_scrubs_clamp_without_preview_drift() {
+        let mut editor = Editor::new();
+        let shape = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(Style::fill_and_stroke(Paint::white(), Stroke::black(2.0))),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+
+        let opacity = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&opacity, -0.25));
+        assert_eq!(editor.document.get(shape).unwrap().style.opacity, 0.75);
+        assert!(editor.preview_numeric_property_scrub(&opacity, -2.0));
+        assert_eq!(editor.document.get(shape).unwrap().style.opacity, 0.0);
+        assert!(!editor.preview_numeric_property_scrub(&opacity, -2.0));
+        assert_eq!(editor.history.undo_count(), 0);
+        assert!(editor.commit_numeric_property_scrub(opacity));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.document.get(shape).unwrap().style.opacity, 1.0);
+
+        let stroke = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::StrokeWidth)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&stroke, -20.0));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(0.1))
+        );
+        assert!(editor.preview_numeric_property_scrub(&stroke, 3.0));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(5.0))
+        );
+        assert!(editor.commit_numeric_property_scrub(stroke));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert_eq!(
+            editor.history.undo_description(),
+            Some("Change Stroke Width")
+        );
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(2.0))
+        );
+    }
+
+    #[test]
+    fn numeric_text_and_layout_scrubs_commit_or_cancel_cleanly() {
+        let mut editor = Editor::new();
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Text", "Hello"))
+            .unwrap();
+        editor.selection.select(text);
+
+        let text_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::TextSize)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&text_scrub, 800.0));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 512.0);
+        assert!(editor.preview_numeric_property_scrub(&text_scrub, -20.0));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 1.0);
+        assert!(editor.cancel_numeric_property_scrub(text_scrub));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 16.0);
+        assert_eq!(editor.history.undo_count(), 0);
+        assert!(!editor.is_dirty());
+
+        let text_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::TextSize)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&text_scrub, 4.0));
+        assert!(editor.commit_numeric_property_scrub(text_scrub));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 20.0);
+        assert_eq!(editor.history.undo_count(), 1);
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 16.0);
+
+        let layout = AutoLayout::horizontal()
+            .with_spacing(10.0)
+            .with_uniform_padding(5.0);
+        let group = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::group("Stack").with_layout(Layout::Auto(layout)),
+            )
+            .unwrap();
+        editor.selection.select(group);
+
+        let spacing = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::AutoLayoutSpacing)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&spacing, -100.0));
+        let Layout::Auto(preview) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(preview.spacing, 0.0);
+        assert!(editor.preview_numeric_property_scrub(&spacing, 3.0));
+        let Layout::Auto(preview) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(preview.spacing, 13.0);
+        assert!(editor.commit_numeric_property_scrub(spacing));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert!(editor.execute_action(EditorAction::Undo));
+        let Layout::Auto(restored) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(restored.spacing, 10.0);
+
+        let padding = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::AutoLayoutPadding)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&padding, -100.0));
+        let Layout::Auto(preview) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(preview.padding, crate::Edges::uniform(0.0));
+        assert!(editor.preview_numeric_property_scrub(&padding, 3.0));
+        let Layout::Auto(preview) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(preview.padding, crate::Edges::uniform(8.0));
+        assert!(editor.cancel_numeric_property_scrub(padding));
+        let Layout::Auto(restored) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(restored.padding, crate::Edges::uniform(5.0));
+        assert_eq!(editor.history.undo_count(), 0);
+        assert!(!editor.is_dirty());
+    }
+
+    #[test]
+    fn numeric_scrubs_reject_noops_and_invalidate_safely() {
+        let (mut editor, ids) = editor_with_named_shapes(&["A", "B"]);
+        editor.selection.select(ids[0]);
+        assert!(editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::StrokeWidth)
+            .is_none());
+
+        let no_op = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(!editor.preview_numeric_property_scrub(&no_op, 0.0));
+        assert!(!editor.preview_numeric_property_scrub(&no_op, f32::NAN));
+        assert!(!editor.preview_numeric_property_scrub(&no_op, f32::INFINITY));
+        assert!(!editor.commit_numeric_property_scrub(no_op));
+        assert_eq!(editor.history.undo_count(), 0);
+        assert_eq!(editor.current_revision(), 0);
+        assert!(!editor.is_dirty());
+
+        let changed_selection = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&changed_selection, -0.4));
+        editor.selection.select(ids[1]);
+        assert!(!editor.preview_numeric_property_scrub(&changed_selection, -0.6));
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 1.0);
+        assert!(!editor.commit_numeric_property_scrub(changed_selection));
+        assert_eq!(editor.history.undo_count(), 0);
+
+        editor.selection.select(ids[0]);
+        let deleted = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&deleted, -0.3));
+        assert!(editor.document.remove(ids[0]));
+        assert!(!editor.commit_numeric_property_scrub(deleted));
+        assert!(editor.document.get(ids[0]).unwrap().deleted);
+        assert_eq!(editor.history.undo_count(), 0);
+    }
+
+    #[test]
+    fn beginning_numeric_scrub_settles_incompatible_move_preview() {
+        let (mut editor, ids) = editor_with_named_shapes(&["A"]);
+        let original = editor.document.get(ids[0]).unwrap().transform;
+        editor.selection.select(ids[0]);
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(5.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(25.0, 15.0),
+            modifiers: Modifiers::default(),
+        });
+        assert_ne!(editor.document.get(ids[0]).unwrap().transform, original);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+
+        assert_eq!(editor.document.get(ids[0]).unwrap().transform, original);
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.history.undo_count(), 0);
+        assert!(editor.cancel_numeric_property_scrub(scrub));
     }
 }
