@@ -4,19 +4,24 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{Document, DocumentLoadError};
 
 const DOCUMENT_EXTENSION: &str = "strek.json";
+const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECENT_FILES: usize = 8;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Failure while loading or persisting an editor document.
 #[derive(Debug)]
 pub enum DocumentIoError {
+    TooLarge {
+        path: PathBuf,
+        limit: u64,
+    },
     Read {
         path: PathBuf,
         source: io::Error,
@@ -37,6 +42,11 @@ pub enum DocumentIoError {
 impl fmt::Display for DocumentIoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TooLarge { path, limit } => write!(
+                formatter,
+                "could not open {}: document exceeds the {limit}-byte limit",
+                path.display()
+            ),
             Self::Read { path, source } => {
                 write!(formatter, "could not read {}: {source}", path.display())
             }
@@ -54,6 +64,7 @@ impl fmt::Display for DocumentIoError {
 impl Error for DocumentIoError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::TooLarge { .. } => None,
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source } => Some(source),
@@ -63,10 +74,34 @@ impl Error for DocumentIoError {
 
 /// Read and validate a document from disk.
 pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
-    let json = fs::read_to_string(path).map_err(|source| DocumentIoError::Read {
+    let file = File::open(path).map_err(|source| DocumentIoError::Read {
         path: path.to_path_buf(),
         source,
     })?;
+    let metadata = file.metadata().map_err(|source| DocumentIoError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(DocumentIoError::TooLarge {
+            path: path.to_path_buf(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
+
+    let mut json = String::new();
+    file.take(MAX_DOCUMENT_BYTES + 1)
+        .read_to_string(&mut json)
+        .map_err(|source| DocumentIoError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if json.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(DocumentIoError::TooLarge {
+            path: path.to_path_buf(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
     Document::from_json(&json).map_err(|source| DocumentIoError::Decode {
         path: path.to_path_buf(),
         source,
@@ -289,5 +324,20 @@ mod tests {
             normalize_document_path(PathBuf::from("/tmp/drawing.json")),
             PathBuf::from("/tmp/drawing.json")
         );
+    }
+
+    #[test]
+    fn oversized_documents_are_rejected_before_decoding() {
+        let directory = temporary_test_directory("oversized-document");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("oversized.strek.json");
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_DOCUMENT_BYTES + 1).unwrap();
+
+        assert!(matches!(
+            read_document(&path),
+            Err(DocumentIoError::TooLarge { limit, .. }) if limit == MAX_DOCUMENT_BYTES
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 }
