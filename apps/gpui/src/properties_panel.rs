@@ -38,10 +38,16 @@ pub(crate) struct PropertiesSnapshot {
     bounds: Option<Rect>,
     transform: Option<TransformComponents>,
     group_layout: Option<Layout>,
-    style: Option<Style>,
+    style: Option<SelectionStyle>,
     text: Option<TextData>,
     frame: Option<FrameData>,
     color_input: Option<ColorInputSnapshot>,
+}
+
+#[derive(Clone)]
+enum SelectionStyle {
+    Uniform(Style),
+    Mixed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,16 +120,18 @@ pub(crate) fn snapshot(
     };
     let style = selected.first().and_then(|first| {
         let style = editor.document().get(*first)?.style.clone();
-        selected
-            .iter()
-            .skip(1)
-            .all(|id| {
+        Some(
+            if selected.iter().skip(1).all(|id| {
                 editor
                     .document()
                     .get(*id)
                     .is_some_and(|node| node.style == style)
-            })
-            .then_some(style)
+            }) {
+                SelectionStyle::Uniform(style)
+            } else {
+                SelectionStyle::Mixed
+            },
+        )
     });
     let text = (selection_count == 1)
         .then(|| editor.selected_text_data())
@@ -175,7 +183,11 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
             .into_any_element();
     }
 
-    let style = snapshot.style.clone();
+    let (style, mixed_style) = match snapshot.style.clone() {
+        Some(SelectionStyle::Uniform(style)) => (Some(style), false),
+        Some(SelectionStyle::Mixed) => (None, true),
+        None => (None, false),
+    };
     let fill = style.as_ref().and_then(|style| style.fill.as_ref());
     let stroke_paint = style
         .as_ref()
@@ -291,6 +303,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                 .child(color_value_editor(
                     "fill-color",
                     fill,
+                    mixed_style,
                     snapshot
                         .color_input
                         .as_ref()
@@ -309,7 +322,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         .child(color_swatch(
                             "fill-none",
                             None,
-                            fill.is_none(),
+                            !mixed_style && fill.is_none(),
                             "Remove fill",
                             PropertyFillNone,
                         ))
@@ -360,7 +373,13 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         .child(row_label("Stroke"))
                         .child(property_button(
                             "stroke-toggle",
-                            if stroke_width.is_some() { "On" } else { "Off" },
+                            if mixed_style {
+                                "Mixed"
+                            } else if stroke_width.is_some() {
+                                "On"
+                            } else {
+                                "Off"
+                            },
                             "Toggle stroke",
                             PropertyToggleStroke,
                         ))
@@ -372,9 +391,9 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                             PropertyStrokeDown,
                         ))
                         .child(numeric_value(
-                            stroke_width
-                                .map(format_number)
-                                .unwrap_or_else(|| "—".to_owned()),
+                            stroke_width.map(format_number).unwrap_or_else(|| {
+                                if mixed_style { "Mixed" } else { "—" }.to_owned()
+                            }),
                             stroke_width
                                 .map(|_| (NumericPropertyTarget::StrokeWidth, &editor_entity)),
                         ))
@@ -385,10 +404,11 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                             PropertyStrokeUp,
                         )),
                 )
-                .when(stroke_width.is_some(), |appearance| {
+                .when(mixed_style || stroke_width.is_some(), |appearance| {
                     appearance.child(color_value_editor(
                         "stroke-color",
                         stroke_paint,
+                        mixed_style,
                         snapshot
                             .color_input
                             .as_ref()
@@ -866,16 +886,20 @@ fn color_swatch<A: Action + Clone>(
 fn color_value_editor<A: Action + Clone>(
     id: &'static str,
     paint: Option<&Paint>,
+    mixed: bool,
     active: Option<&ColorInputSnapshot>,
     tooltip: &'static str,
     action: A,
 ) -> impl IntoElement {
     let active_paint = active.and_then(|input| parse_hex_paint(&input.value));
-    let preview = active_paint.as_ref().or(paint);
-    let value = active
-        .map(|input| input.value.clone())
-        .or_else(|| paint.map(format_paint))
-        .unwrap_or_else(|| "None".to_owned());
+    let preview = active_paint.as_ref().or(if mixed { None } else { paint });
+    let value = active.map(|input| input.value.clone()).unwrap_or_else(|| {
+        if mixed {
+            "Mixed".to_owned()
+        } else {
+            paint.map(format_paint).unwrap_or_else(|| "None".to_owned())
+        }
+    });
     let border = if active.is_some_and(|input| input.invalid) {
         0xf24822
     } else if active.is_some() {
@@ -1017,7 +1041,7 @@ fn format_percent(scale: f32) -> String {
 mod tests {
     use super::{
         format_degrees, format_paint, format_percent, numeric_property_delta, parse_hex_paint,
-        snapshot, uniform_padding,
+        snapshot, uniform_padding, SelectionStyle,
     };
     use editor_core::{
         AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, NumericPropertyTarget,
@@ -1083,6 +1107,42 @@ mod tests {
         assert_eq!(typography.family, "monospace");
         assert_eq!(typography.weight, 700);
         assert!(typography.italic);
+    }
+
+    #[test]
+    fn snapshot_distinguishes_mixed_style_from_no_fill() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let red = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Red", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(editor_core::Style::fill(Paint::rgb(1.0, 0.0, 0.0))),
+            )
+            .unwrap();
+        let blue = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Blue", PathData::rect(20.0, 0.0, 10.0, 10.0))
+                    .with_style(editor_core::Style::fill(Paint::rgb(0.0, 0.0, 1.0))),
+            )
+            .unwrap();
+        editor.selection.select(red);
+        editor.selection.add(blue);
+
+        assert!(matches!(
+            snapshot(&mut editor, None).style,
+            Some(SelectionStyle::Mixed)
+        ));
+
+        editor.document.get_mut(blue).unwrap().style =
+            editor.document.get(red).unwrap().style.clone();
+        assert!(matches!(
+            snapshot(&mut editor, None).style,
+            Some(SelectionStyle::Uniform(_))
+        ));
     }
 
     #[test]
