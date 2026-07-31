@@ -1294,7 +1294,7 @@ fn zoom_control(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .hover(|style| style.bg(rgb(SURFACE_HOVER)))
                 .child(input.map_or_else(
-                    || format!("{:.0}%", zoom * 100.0),
+                    || format_zoom_label(zoom),
                     |input| format!("{}%", input.value),
                 ))
                 .tooltip(editor_tooltip("Enter zoom percentage", None))
@@ -1324,6 +1324,22 @@ fn zoom_control(
             "Zoom in",
             ZoomIn,
         ))
+}
+
+pub(crate) fn format_zoom_percentage(zoom: f32) -> String {
+    let percentage = zoom * 100.0;
+    if percentage.fract().abs() < 0.01 {
+        format!("{percentage:.0}")
+    } else {
+        format!("{percentage:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned()
+    }
+}
+
+fn format_zoom_label(zoom: f32) -> String {
+    format!("{}%", format_zoom_percentage(zoom))
 }
 
 fn zoom_icon_button<A: Action + Clone>(
@@ -1474,4 +1490,16 @@ fn menu_item<A: Action + Clone>(
 
 fn menu_separator() -> impl IntoElement {
     div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(BORDER))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_zoom_label, format_zoom_percentage};
+
+    #[test]
+    fn zoom_labels_preserve_decimal_percentages() {
+        assert_eq!(format_zoom_percentage(1.0), "100");
+        assert_eq!(format_zoom_percentage(1.255), "125.5");
+        assert_eq!(format_zoom_label(1.255), "125.5%");
+    }
 }

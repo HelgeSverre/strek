@@ -1238,7 +1238,7 @@ impl VectorEditor {
         self.property_color_input = None;
         self.open_menu = None;
         self.zoom_input = Some(ZoomInput {
-            value: format_zoom_percentage(self.editor.view().zoom),
+            value: toolbar::format_zoom_percentage(self.editor.view().zoom),
             replace_on_type: true,
             invalid: false,
         });
@@ -2591,18 +2591,6 @@ fn append_hex_input(value: &mut String, text: &str) {
     }
 }
 
-fn format_zoom_percentage(zoom: f32) -> String {
-    let percentage = zoom * 100.0;
-    if percentage.fract().abs() < 0.01 {
-        format!("{percentage:.0}")
-    } else {
-        format!("{percentage:.2}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_owned()
-    }
-}
-
 fn parse_zoom_percentage(value: &str) -> Option<f32> {
     let percentage: f32 = value.trim().trim_end_matches('%').trim().parse().ok()?;
     (percentage.is_finite() && percentage > 0.0).then_some(percentage)
@@ -2844,11 +2832,5 @@ mod layout_tests {
         assert_eq!(parse_zoom_percentage(" 125.5% "), Some(125.5));
         assert_eq!(parse_zoom_percentage("0"), None);
         assert_eq!(parse_zoom_percentage("nan"), None);
-    }
-
-    #[test]
-    fn zoom_percentage_format_is_compact() {
-        assert_eq!(format_zoom_percentage(1.0), "100");
-        assert_eq!(format_zoom_percentage(1.255), "125.5");
     }
 }
