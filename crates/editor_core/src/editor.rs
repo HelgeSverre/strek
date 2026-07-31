@@ -5413,6 +5413,48 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_container_keeps_saved_document_loadable_and_undo_restores_subtree() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(root, Node::group("Group"))
+            .unwrap();
+        let nested = editor
+            .document
+            .add_child(group, Node::group("Nested"))
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                nested,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+
+        editor.selection.select(group);
+        editor.delete_selection();
+
+        for id in [group, nested, child] {
+            assert!(editor.document.get(id).unwrap().deleted);
+        }
+        let deleted_json = editor.document.to_json().unwrap();
+        assert!(Document::from_json(&deleted_json).is_ok());
+
+        assert!(editor.undo_in_context());
+        for id in [group, nested, child] {
+            assert!(!editor.document.get(id).unwrap().deleted);
+        }
+        assert_eq!(editor.document.get(root).unwrap().children, vec![group]);
+        assert_eq!(editor.document.get(group).unwrap().children, vec![nested]);
+        assert_eq!(editor.document.get(nested).unwrap().children, vec![child]);
+
+        assert!(editor.redo_in_context());
+        let redone_json = editor.document.to_json().unwrap();
+        assert!(Document::from_json(&redone_json).is_ok());
+    }
+
+    #[test]
     fn pointer_up_applies_final_move_position() {
         let (mut editor, ids) = editor_with_named_shapes(&["A"]);
 

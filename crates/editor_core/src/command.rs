@@ -5,6 +5,23 @@ use crate::path::PathData;
 use crate::style::Style;
 use crate::Document;
 
+fn set_subtree_deleted(doc: &mut Document, root: NodeId, deleted: bool) {
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let children = doc
+            .nodes
+            .get(id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        pending.extend(children);
+
+        if let Some(node) = doc.nodes.get_mut(id) {
+            node.deleted = deleted;
+        }
+        doc.cache.invalidate(id);
+    }
+}
+
 /// An atomic change to the document that can be applied forward or backward.
 #[derive(Debug, Clone)]
 pub enum Patch {
@@ -230,11 +247,9 @@ impl Patch {
                     parent_node.children.retain(|&c| c != *id);
                 }
 
-                // Soft-delete: mark as deleted but keep in slotmap to preserve ID
-                if let Some(node) = doc.nodes.get_mut(*id) {
-                    node.deleted = true;
-                }
-                doc.cache.invalidate(*id);
+                // Soft-delete the complete reachable subtree while keeping its
+                // internal links intact for undo.
+                set_subtree_deleted(doc, *id, true);
                 doc.mark_bounds_dirty(*parent);
                 doc.mark_layout_dirty();
             }
@@ -361,10 +376,10 @@ impl Patch {
                 parent,
                 index,
             } => {
-                // Undo delete = restore soft-deleted node
-                if let Some(n) = doc.nodes.get_mut(*id) {
-                    n.deleted = false;
-                    n.parent = Some(*parent);
+                // Undo delete = restore the complete soft-deleted subtree
+                set_subtree_deleted(doc, *id, false);
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    node.parent = Some(*parent);
                 }
 
                 // Add back to parent's children at original index
