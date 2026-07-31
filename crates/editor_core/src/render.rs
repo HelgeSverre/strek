@@ -1,7 +1,8 @@
 //! Display list generation from the document.
 
 use editor_render::{
-    DisplayItem, DisplayList, Paint, PathCmd, PathData, Stroke, TextAlignment, TextItem,
+    DisplayItem, DisplayList, Paint, PathCmd, PathData, ResolvedTextLayout, ResolvedTextLine,
+    Stroke, TextAlignment, TextItem,
 };
 
 use crate::node::NodeKind;
@@ -21,7 +22,7 @@ impl Document {
                     return None;
                 };
                 let fill = node.style.fill.clone().unwrap_or_else(crate::Paint::black);
-                Some((id, convert_text_item(text, &fill)))
+                Some((id, convert_text_item(text, &fill, None)))
             })
             .collect()
     }
@@ -86,8 +87,9 @@ impl Document {
                 }
                 NodeKind::Text(text) => {
                     if let Some(fill) = &style.fill {
+                        let layout = self.text_layout(id).map(convert_text_layout);
                         items.push(DisplayItem::Text {
-                            text: convert_text_item(&text, fill),
+                            text: convert_text_item(&text, fill, layout),
                             transform: screen_transform,
                             opacity,
                         });
@@ -127,7 +129,11 @@ impl Document {
     }
 }
 
-fn convert_text_item(text: &crate::TextData, fill: &crate::Paint) -> TextItem {
+fn convert_text_item(
+    text: &crate::TextData,
+    fill: &crate::Paint,
+    layout: Option<ResolvedTextLayout>,
+) -> TextItem {
     TextItem {
         content: text.content.clone(),
         font_family: text.font_family().to_string(),
@@ -142,6 +148,22 @@ fn convert_text_item(text: &crate::TextData, fill: &crate::Paint) -> TextItem {
             crate::TextAlign::Right => TextAlignment::Right,
         },
         wrap_width: text.fixed_width(),
+        layout,
+    }
+}
+
+fn convert_text_layout(layout: crate::TextLayout) -> ResolvedTextLayout {
+    ResolvedTextLayout {
+        lines: layout
+            .lines
+            .into_iter()
+            .map(|line| ResolvedTextLine {
+                range: line.range,
+                x: line.x,
+            })
+            .collect(),
+        line_height: layout.line_height,
+        width: layout.width,
     }
 }
 
@@ -229,6 +251,46 @@ mod tests {
         let list = doc.build_display_list(&view);
         // Should have both fill and stroke
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn display_list_preserves_resolved_text_layout() {
+        let mut doc = Document::new();
+        let view = View::default();
+        let text = doc
+            .add_child(doc.root, Node::text("Label", "iW"))
+            .expect("text node should be added");
+        doc.set_text_layouts(std::collections::HashMap::from([(
+            text,
+            crate::TextLayout {
+                lines: vec![crate::TextLayoutLine {
+                    range: 0..2,
+                    x: 4.0,
+                    character_count: 2,
+                    hard_break: false,
+                    positions: vec![(0, 0.0), (1, 3.0), (2, 15.0)],
+                }],
+                character_width: 7.5,
+                line_height: 12.0,
+                width: 23.0,
+            },
+        )]));
+
+        let list = doc.build_display_list(&view);
+        let DisplayItem::Text { text, .. } = &list.items[0] else {
+            panic!("expected text display item");
+        };
+        let layout = text.layout.as_ref().expect("resolved layout should be set");
+
+        assert_eq!(
+            layout.lines,
+            [ResolvedTextLine {
+                range: 0..2,
+                x: 4.0,
+            }]
+        );
+        assert_eq!(layout.line_height, 12.0);
+        assert_eq!(layout.width, 23.0);
     }
 
     #[test]

@@ -368,30 +368,60 @@ fn write_text(
     transform: &Affine2,
     opacity: f32,
 ) {
-    let approximate_character_width = (text.font_size * 0.6).max(1.0);
-    let wrap_limit = text
-        .wrap_width
-        .map(|width| (width / approximate_character_width).floor().max(1.0) as usize);
-    let mut lines = Vec::new();
-    for explicit_line in text.content.split('\n') {
-        let graphemes = explicit_line.graphemes(true).collect::<Vec<_>>();
-        match wrap_limit {
-            Some(limit) if graphemes.len() > limit => {
-                lines.extend(graphemes.chunks(limit).map(|chunk| chunk.concat()));
-            }
-            _ => lines.push(explicit_line.to_owned()),
-        }
-    }
-    let width = text.wrap_width.unwrap_or_else(|| {
-        lines
+    let resolved_lines = text.layout.as_ref().and_then(|layout| {
+        layout
+            .lines
             .iter()
-            .map(|line| line.graphemes(true).count() as f32 * approximate_character_width)
-            .fold(0.0, f32::max)
+            .map(|line| {
+                text.content
+                    .get(line.range.clone())
+                    .map(|content| (content.to_owned(), line.x))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|lines| (lines, layout.line_height))
     });
-    let (x, anchor) = match text.alignment {
-        TextAlignment::Left => (0.0, "start"),
-        TextAlignment::Center => (width * 0.5, "middle"),
-        TextAlignment::Right => (width, "end"),
+    let (lines, line_height, uses_resolved_layout) = resolved_lines
+        .map(|(lines, line_height)| (lines, line_height, true))
+        .unwrap_or_else(|| {
+            let approximate_character_width = (text.font_size * 0.6).max(1.0);
+            let wrap_limit = text
+                .wrap_width
+                .map(|width| (width / approximate_character_width).floor().max(1.0) as usize);
+            let mut lines = Vec::new();
+            for explicit_line in text.content.split('\n') {
+                let graphemes = explicit_line.graphemes(true).collect::<Vec<_>>();
+                match wrap_limit {
+                    Some(limit) if graphemes.len() > limit => {
+                        lines.extend(graphemes.chunks(limit).map(|chunk| chunk.concat()));
+                    }
+                    _ => lines.push(explicit_line.to_owned()),
+                }
+            }
+            let width = text.wrap_width.unwrap_or_else(|| {
+                lines
+                    .iter()
+                    .map(|line| line.graphemes(true).count() as f32 * approximate_character_width)
+                    .fold(0.0, f32::max)
+            });
+            let x = match text.alignment {
+                TextAlignment::Left => 0.0,
+                TextAlignment::Center => width * 0.5,
+                TextAlignment::Right => width,
+            };
+            (
+                lines.into_iter().map(|line| (line, x)).collect(),
+                text.font_size * text.line_height.max(0.1),
+                false,
+            )
+        });
+    let anchor = if uses_resolved_layout {
+        "start"
+    } else {
+        match text.alignment {
+            TextAlignment::Left => "start",
+            TextAlignment::Center => "middle",
+            TextAlignment::Right => "end",
+        }
     };
     let font_style = if text.font_italic { "italic" } else { "normal" };
     write!(
@@ -408,8 +438,7 @@ fn write_text(
         transform_to_matrix(transform),
     )
     .unwrap();
-    let line_height = text.font_size * text.line_height.max(0.1);
-    for (line_index, line) in lines.iter().enumerate() {
+    for (line_index, (line, x)) in lines.iter().enumerate() {
         write!(
             output,
             r#"<tspan x="{}" y="{}">{}</tspan>"#,
@@ -525,7 +554,7 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_render::{Paint, Stroke, TextItem};
+    use editor_render::{Paint, ResolvedTextLayout, ResolvedTextLine, Stroke, TextItem};
     use glam::Vec2;
 
     #[test]
@@ -657,6 +686,39 @@ mod tests {
         assert!(svg.contains("font-size=\"16\""));
         assert!(svg.contains("font-weight=\"700\""));
         assert!(svg.contains("Hello World"));
+    }
+
+    #[test]
+    fn resolved_text_layout_controls_svg_lines_and_alignment() {
+        let mut text = TextItem::new("WWW iii", 16.0);
+        text.wrap_width = Some(20.0);
+        text.layout = Some(ResolvedTextLayout {
+            lines: vec![
+                ResolvedTextLine {
+                    range: 0..1,
+                    x: 3.0,
+                },
+                ResolvedTextLine {
+                    range: 1..7,
+                    x: 7.0,
+                },
+            ],
+            line_height: 24.0,
+            width: 20.0,
+        });
+
+        let mut list = DisplayList::new();
+        list.push(DisplayItem::Text {
+            text,
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+        });
+
+        let svg = to_svg_string_export(&list, 800.0, 600.0);
+
+        assert!(svg.contains(r#"text-anchor="start""#));
+        assert!(svg.contains(r#"<tspan x="3" y="16">W</tspan>"#));
+        assert!(svg.contains(r#"<tspan x="7" y="40">WW iii</tspan>"#));
     }
 
     #[test]

@@ -298,6 +298,29 @@ pub enum TextAlignment {
     Right,
 }
 
+/// One line from a frontend-resolved text layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTextLine {
+    /// UTF-8 byte range within the text item's content.
+    pub range: std::ops::Range<usize>,
+
+    /// Horizontal line origin in text-local coordinates.
+    pub x: f32,
+}
+
+/// Frontend-resolved text layout shared with export renderers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTextLayout {
+    /// Visual lines in paint order.
+    pub lines: Vec<ResolvedTextLine>,
+
+    /// Distance between consecutive baselines.
+    pub line_height: f32,
+
+    /// Width of the text container in local coordinates.
+    pub width: f32,
+}
+
 /// Text item for rendering.
 #[derive(Debug, Clone)]
 pub struct TextItem {
@@ -327,6 +350,9 @@ pub struct TextItem {
 
     /// Explicit wrapping width in local units.
     pub wrap_width: Option<f32>,
+
+    /// Resolved line breaks and alignment from the active text shaper.
+    pub layout: Option<ResolvedTextLayout>,
 }
 
 impl TextItem {
@@ -342,6 +368,7 @@ impl TextItem {
             line_height: 1.2,
             alignment: TextAlignment::Left,
             wrap_width: None,
+            layout: None,
         }
     }
 
