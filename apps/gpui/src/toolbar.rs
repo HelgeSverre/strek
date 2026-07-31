@@ -183,9 +183,9 @@ pub fn render_header(
             show_layer_panel,
             true,
             if show_layer_panel {
-                "Hide layers"
+                "Hide sidebar"
             } else {
-                "Show layers"
+                "Show sidebar"
             },
             Some("⌘\\"),
             ToggleLayerPanel,
@@ -948,9 +948,9 @@ fn render_main_menu(
         .child(menu_section("View"))
         .child(menu_item(
             if show_layer_panel {
-                "Hide layers panel"
+                "Hide sidebar"
             } else {
-                "Show layers panel"
+                "Show sidebar"
             },
             "⌘\\",
             true,

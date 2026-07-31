@@ -96,6 +96,10 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/distribute-vertical.svg",
         include_bytes!("../assets/icons/distribute-vertical.svg"),
     ),
+    (
+        "icons/properties.svg",
+        include_bytes!("../assets/icons/properties.svg"),
+    ),
 ];
 
 pub struct Assets;
@@ -146,6 +150,7 @@ pub enum Icon {
     ObjectAlignBottom,
     DistributeHorizontal,
     DistributeVertical,
+    Properties,
 }
 
 impl Icon {
@@ -179,6 +184,7 @@ impl Icon {
             Self::ObjectAlignBottom => "icons/object-align-bottom.svg",
             Self::DistributeHorizontal => "icons/distribute-horizontal.svg",
             Self::DistributeVertical => "icons/distribute-vertical.svg",
+            Self::Properties => "icons/properties.svg",
         }
     }
 }

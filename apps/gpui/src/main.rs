@@ -7,6 +7,7 @@ mod canvas;
 mod document_io;
 mod layer_name_input;
 mod layer_panel;
+mod properties_panel;
 mod status_bar;
 mod text_input;
 mod toolbar;
@@ -87,6 +88,23 @@ actions!(
         AlignTextCenter,
         AlignTextRight,
         ToggleFrameBackground,
+        PropertyMoveLeft,
+        PropertyMoveRight,
+        PropertyMoveUp,
+        PropertyMoveDown,
+        PropertyRotateLeft,
+        PropertyRotateRight,
+        PropertyOpacityDown,
+        PropertyOpacityUp,
+        PropertyFillNone,
+        PropertyFillWhite,
+        PropertyFillBlack,
+        PropertyFillBlue,
+        PropertyFillRed,
+        PropertyFillGreen,
+        PropertyToggleStroke,
+        PropertyStrokeDown,
+        PropertyStrokeUp,
         TextLeft,
         TextRight,
         TextSelectLeft,
@@ -119,6 +137,13 @@ enum FileOperation {
     Saving,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SidebarTab {
+    Layers,
+    #[default]
+    Design,
+}
+
 /// Main application state as a GPUI Entity.
 struct VectorEditor {
     editor: Editor,
@@ -129,6 +154,7 @@ struct VectorEditor {
     object_clipboard: Option<editor_core::EditorClipboard>,
     focus_handle: FocusHandle,
     show_layer_panel: bool,
+    sidebar_tab: SidebarTab,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
@@ -148,6 +174,7 @@ impl VectorEditor {
             object_clipboard: None,
             focus_handle: cx.focus_handle(),
             show_layer_panel: true,
+            sidebar_tab: SidebarTab::Design,
             layer_name_input: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
@@ -1044,6 +1071,206 @@ impl VectorEditor {
         }
     }
 
+    pub(crate) fn set_sidebar_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
+        self.sidebar_tab = tab;
+        cx.notify();
+    }
+
+    fn property_move_left(
+        &mut self,
+        _: &PropertyMoveLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.move_selection_by(glam::Vec2::new(-1.0, 0.0)) {
+            cx.notify();
+        }
+    }
+
+    fn property_move_right(
+        &mut self,
+        _: &PropertyMoveRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.move_selection_by(glam::Vec2::new(1.0, 0.0)) {
+            cx.notify();
+        }
+    }
+
+    fn property_move_up(
+        &mut self,
+        _: &PropertyMoveUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.move_selection_by(glam::Vec2::new(0.0, -1.0)) {
+            cx.notify();
+        }
+    }
+
+    fn property_move_down(
+        &mut self,
+        _: &PropertyMoveDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.move_selection_by(glam::Vec2::new(0.0, 1.0)) {
+            cx.notify();
+        }
+    }
+
+    fn property_rotate_left(
+        &mut self,
+        _: &PropertyRotateLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .rotate_selection_by(-std::f32::consts::PI / 12.0)
+        {
+            cx.notify();
+        }
+    }
+
+    fn property_rotate_right(
+        &mut self,
+        _: &PropertyRotateRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.rotate_selection_by(std::f32::consts::PI / 12.0) {
+            cx.notify();
+        }
+    }
+
+    fn selected_opacity(&self) -> f32 {
+        self.editor
+            .selection()
+            .primary()
+            .and_then(|id| self.editor.document().get(id))
+            .map(|node| node.style.opacity)
+            .unwrap_or(1.0)
+    }
+
+    fn property_opacity_down(
+        &mut self,
+        _: &PropertyOpacityDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opacity = self.selected_opacity() - 0.1;
+        if self.editor.set_selected_opacity(opacity) {
+            cx.notify();
+        }
+    }
+
+    fn property_opacity_up(
+        &mut self,
+        _: &PropertyOpacityUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opacity = self.selected_opacity() + 0.1;
+        if self.editor.set_selected_opacity(opacity) {
+            cx.notify();
+        }
+    }
+
+    fn set_property_fill(&mut self, fill: Option<editor_core::Paint>, cx: &mut Context<Self>) {
+        if self.editor.set_selected_fill(fill) {
+            cx.notify();
+        }
+    }
+
+    fn property_fill_none(
+        &mut self,
+        _: &PropertyFillNone,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(None, cx);
+    }
+
+    fn property_fill_white(
+        &mut self,
+        _: &PropertyFillWhite,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(Some(editor_core::Paint::white()), cx);
+    }
+
+    fn property_fill_black(
+        &mut self,
+        _: &PropertyFillBlack,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(Some(editor_core::Paint::black()), cx);
+    }
+
+    fn property_fill_blue(
+        &mut self,
+        _: &PropertyFillBlue,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(Some(editor_core::Paint::rgb(0.047, 0.55, 0.91)), cx);
+    }
+
+    fn property_fill_red(
+        &mut self,
+        _: &PropertyFillRed,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(Some(editor_core::Paint::rgb(0.95, 0.28, 0.13)), cx);
+    }
+
+    fn property_fill_green(
+        &mut self,
+        _: &PropertyFillGreen,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_property_fill(Some(editor_core::Paint::rgb(0.08, 0.68, 0.36)), cx);
+    }
+
+    fn property_toggle_stroke(
+        &mut self,
+        _: &PropertyToggleStroke,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.toggle_selected_stroke() {
+            cx.notify();
+        }
+    }
+
+    fn property_stroke_down(
+        &mut self,
+        _: &PropertyStrokeDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.adjust_selected_stroke_width(-1.0) {
+            cx.notify();
+        }
+    }
+
+    fn property_stroke_up(
+        &mut self,
+        _: &PropertyStrokeUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.adjust_selected_stroke_width(1.0) {
+            cx.notify();
+        }
+    }
+
     fn text_left(&mut self, _: &TextLeft, _window: &mut Window, cx: &mut Context<Self>) {
         if self
             .editor
@@ -1410,6 +1637,7 @@ impl Render for VectorEditor {
         let selection_count = self.editor.selection().len();
         let zoom = self.editor.view().zoom;
         let show_layer_panel = self.show_layer_panel;
+        let sidebar_tab = self.sidebar_tab;
         let layer_name_input = self.layer_name_input.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
@@ -1440,6 +1668,7 @@ impl Render for VectorEditor {
         let text_layouts =
             canvas::shape_text_layouts(self.editor.document().text_items_for_layout(), window);
         self.editor.set_text_layouts(text_layouts);
+        let properties_snapshot = properties_panel::snapshot(&mut self.editor);
 
         // Build display list for canvas
         let display_list = self.editor.build_display_list();
@@ -1513,6 +1742,23 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::align_text_center))
             .on_action(cx.listener(Self::align_text_right))
             .on_action(cx.listener(Self::toggle_frame_background))
+            .on_action(cx.listener(Self::property_move_left))
+            .on_action(cx.listener(Self::property_move_right))
+            .on_action(cx.listener(Self::property_move_up))
+            .on_action(cx.listener(Self::property_move_down))
+            .on_action(cx.listener(Self::property_rotate_left))
+            .on_action(cx.listener(Self::property_rotate_right))
+            .on_action(cx.listener(Self::property_opacity_down))
+            .on_action(cx.listener(Self::property_opacity_up))
+            .on_action(cx.listener(Self::property_fill_none))
+            .on_action(cx.listener(Self::property_fill_white))
+            .on_action(cx.listener(Self::property_fill_black))
+            .on_action(cx.listener(Self::property_fill_blue))
+            .on_action(cx.listener(Self::property_fill_red))
+            .on_action(cx.listener(Self::property_fill_green))
+            .on_action(cx.listener(Self::property_toggle_stroke))
+            .on_action(cx.listener(Self::property_stroke_down))
+            .on_action(cx.listener(Self::property_stroke_up))
             .on_action(cx.listener(Self::text_left))
             .on_action(cx.listener(Self::text_right))
             .on_action(cx.listener(Self::text_select_left))
@@ -1587,6 +1833,8 @@ impl Render for VectorEditor {
                         this.child(layer_panel::render_layer_panel(
                             layer_entries,
                             layer_name_input,
+                            sidebar_tab,
+                            properties_snapshot,
                             cx,
                         ))
                     }),
