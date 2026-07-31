@@ -2,7 +2,7 @@
 
 use editor_core::{LayerEntry, LayerIcon, NodeId};
 use gpui::{
-    div, prelude::*, px, rgb, rgba, Context, Entity, Render, SharedString,
+    div, prelude::*, px, rgb, rgba, Context, Entity, MouseButton, Render, SharedString,
     StatefulInteractiveElement, Window,
 };
 
@@ -14,13 +14,37 @@ use crate::{
     VectorEditor,
 };
 
-pub const LAYERS_WIDTH: f32 = 248.0;
-pub const DESIGN_WIDTH: f32 = 248.0;
+pub const DEFAULT_PANEL_WIDTH: f32 = 248.0;
+pub const MIN_PANEL_WIDTH: f32 = 180.0;
+pub const MAX_PANEL_WIDTH: f32 = 420.0;
+pub const MIN_CANVAS_WIDTH: f32 = 320.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelSide {
+    Layers,
+    Design,
+}
+
+#[derive(Clone)]
+pub(crate) struct PanelResizeDrag(PanelSide);
+
+impl PanelResizeDrag {
+    pub(crate) fn side(&self) -> PanelSide {
+        self.0
+    }
+}
+
+impl Render for PanelResizeDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 /// Render the persistent layer tree on the left side of the window.
 pub fn render_layers_panel(
     layer_entries: Vec<LayerEntry>,
     layer_name_input: Option<(NodeId, Entity<LayerNameInput>)>,
+    width: f32,
     cx: &mut Context<VectorEditor>,
 ) -> impl IntoElement {
     let rows = layer_entries
@@ -36,7 +60,8 @@ pub fn render_layers_panel(
 
     div()
         .id("layers-panel")
-        .w(px(LAYERS_WIDTH))
+        .relative()
+        .w(px(width))
         .h_full()
         .flex_none()
         .flex()
@@ -70,13 +95,15 @@ pub fn render_layers_panel(
                 .py(px(5.0))
                 .children(rows),
         )
+        .child(panel_resize_handle(PanelSide::Layers))
 }
 
 /// Render the persistent design inspector on the right side of the window.
-pub fn render_design_panel(properties: PropertiesSnapshot) -> impl IntoElement {
+pub fn render_design_panel(properties: PropertiesSnapshot, width: f32) -> impl IntoElement {
     div()
         .id("design-panel")
-        .w(px(DESIGN_WIDTH))
+        .relative()
+        .w(px(width))
         .h_full()
         .flex_none()
         .flex()
@@ -87,6 +114,34 @@ pub fn render_design_panel(properties: PropertiesSnapshot) -> impl IntoElement {
         .border_color(rgb(0x414349))
         .child(sidebar_section_header("Design", Icon::Properties))
         .child(properties_panel::render(properties))
+        .child(panel_resize_handle(PanelSide::Design))
+}
+
+fn panel_resize_handle(side: PanelSide) -> impl IntoElement {
+    let handle = div()
+        .id(SharedString::from(match side {
+            PanelSide::Layers => "layers-panel-resize-handle",
+            PanelSide::Design => "design-panel-resize-handle",
+        }))
+        .absolute()
+        .top_0()
+        .h_full()
+        .w(px(6.0))
+        .cursor_col_resize()
+        .occlude()
+        .hover(|style| style.bg(rgba(0x0c8ce955)))
+        .on_drag(PanelResizeDrag(side), |drag, _, _, cx| {
+            cx.stop_propagation();
+            cx.new(|_| drag.clone())
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        });
+
+    match side {
+        PanelSide::Layers => handle.right_0(),
+        PanelSide::Design => handle.left_0(),
+    }
 }
 
 fn sidebar_section_header(label: &'static str, icon_kind: Icon) -> gpui::Div {

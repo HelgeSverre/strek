@@ -28,8 +28,8 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/undo.svg", include_bytes!("../assets/icons/undo.svg")),
     ("icons/redo.svg", include_bytes!("../assets/icons/redo.svg")),
     (
-        "icons/panel-right.svg",
-        include_bytes!("../assets/icons/panel-right.svg"),
+        "icons/search.svg",
+        include_bytes!("../assets/icons/search.svg"),
     ),
     (
         "icons/chevron-down.svg",
@@ -133,7 +133,7 @@ pub enum Icon {
     Text,
     Undo,
     Redo,
-    PanelRight,
+    Search,
     ChevronDown,
     Eye,
     EyeOff,
@@ -168,7 +168,7 @@ impl Icon {
             Self::Text => "icons/text.svg",
             Self::Undo => "icons/undo.svg",
             Self::Redo => "icons/redo.svg",
-            Self::PanelRight => "icons/panel-right.svg",
+            Self::Search => "icons/search.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",

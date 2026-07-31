@@ -4,6 +4,8 @@
 
 mod assets;
 mod canvas;
+mod command_palette;
+mod commands;
 mod document_io;
 mod export;
 mod layer_name_input;
@@ -19,8 +21,8 @@ use std::path::{Path, PathBuf};
 use editor_core::{Editor, EditorAction, NodeId};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu,
+    MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds, WindowOptions,
 };
 
@@ -33,6 +35,8 @@ actions!(
         SaveDocumentAs,
         ExportSvg,
         ExportPng,
+        OpenKeyboardShortcuts,
+        ShowCommandPalette,
         QuitApplication,
         Undo,
         Redo,
@@ -71,6 +75,7 @@ actions!(
         ZoomToFit,
         ZoomToSelection,
         ToggleLayerPanel,
+        ToggleDesignPanel,
         ToggleMainMenu,
         ToggleZoomMenu,
         SelectTool,
@@ -150,8 +155,14 @@ struct VectorEditor {
     file_operation: FileOperation,
     allow_window_close: bool,
     object_clipboard: Option<editor_core::EditorClipboard>,
+    keymap: commands::Keymap,
+    recent_commands: Vec<commands::CommandTarget>,
+    command_palette: Option<Entity<command_palette::CommandPalette>>,
     focus_handle: FocusHandle,
-    show_layer_panel: bool,
+    show_layers_panel: bool,
+    show_design_panel: bool,
+    layers_panel_width: f32,
+    design_panel_width: f32,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
@@ -161,7 +172,7 @@ struct VectorEditor {
 }
 
 impl VectorEditor {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
         Self {
             editor: Editor::new(),
             document_path: None,
@@ -169,8 +180,14 @@ impl VectorEditor {
             file_operation: FileOperation::Idle,
             allow_window_close: false,
             object_clipboard: None,
+            keymap,
+            recent_commands: Vec::new(),
+            command_palette: None,
             focus_handle: cx.focus_handle(),
-            show_layer_panel: true,
+            show_layers_panel: true,
+            show_design_panel: true,
+            layers_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
+            design_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             layer_name_input: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
@@ -399,6 +416,135 @@ impl VectorEditor {
 
     fn export_png(&mut self, _: &ExportPng, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_export_dialog(export::ExportFormat::Png, window, cx);
+    }
+
+    fn open_keyboard_shortcuts(
+        &mut self,
+        _: &OpenKeyboardShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match commands::Keymap::ensure_user_file() {
+            Ok(path) => cx.open_url(&commands::file_url(&path)),
+            Err(error) => {
+                let prompt = window.prompt(
+                    PromptLevel::Critical,
+                    "Could not open keyboard shortcuts",
+                    Some(&error),
+                    &["OK"],
+                    cx,
+                );
+                cx.spawn(async move |_, _| {
+                    let _ = prompt.await;
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn show_command_palette(
+        &mut self,
+        _: &ShowCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.command_palette.take().is_some() {
+            self.focus_handle.focus(window);
+            cx.notify();
+            return;
+        }
+
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        self.finish_layer_rename(true, cx);
+        self.open_menu = None;
+        let entries = commands::COMMANDS
+            .iter()
+            .filter(|spec| {
+                spec.target
+                    != commands::CommandTarget::App(commands::AppCommand::ShowCommandPalette)
+            })
+            .map(|spec| command_palette::PaletteEntry {
+                target: spec.target,
+                label: spec.label,
+                description: spec.description,
+                category: spec.category,
+                shortcut: self.keymap.shortcut_label(spec.target),
+                enabled: self.command_is_enabled(spec.target),
+                recent_rank: self
+                    .recent_commands
+                    .iter()
+                    .position(|target| *target == spec.target),
+            })
+            .collect();
+        let palette = cx.new(|cx| command_palette::CommandPalette::new(entries, cx));
+        cx.subscribe_in(
+            &palette,
+            window,
+            |editor, _, event: &command_palette::CommandPaletteEvent, window, cx| {
+                editor.command_palette = None;
+                editor.focus_handle.focus(window);
+                if let command_palette::CommandPaletteEvent::Execute(target) = event {
+                    editor.recent_commands.retain(|recent| recent != target);
+                    editor.recent_commands.insert(0, *target);
+                    editor.recent_commands.truncate(8);
+                    window.dispatch_action(commands::action_for(*target), cx);
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        self.command_palette = Some(palette.clone());
+        cx.defer_in(window, move |_, window, cx| {
+            palette.read(cx).focus(window);
+            cx.notify();
+        });
+    }
+
+    fn command_is_enabled(&self, target: commands::CommandTarget) -> bool {
+        use commands::{AppCommand, CommandTarget};
+
+        match target {
+            CommandTarget::Editor(action) => self.editor.can_execute(action),
+            CommandTarget::App(
+                AppCommand::NewDocument
+                | AppCommand::OpenDocument
+                | AppCommand::SaveDocument
+                | AppCommand::SaveDocumentAs
+                | AppCommand::ExportSvg
+                | AppCommand::ExportPng
+                | AppCommand::QuitApplication,
+            ) => self.file_operation == FileOperation::Idle,
+            CommandTarget::App(AppCommand::Copy | AppCommand::Cut) => {
+                self.editor
+                    .text_input_snapshot()
+                    .is_some_and(|snapshot| !snapshot.selection.is_empty())
+                    || !self.editor.selection().is_empty()
+            }
+            CommandTarget::App(AppCommand::DeleteBackward) => {
+                self.editor.text_input_snapshot().is_some() || !self.editor.selection().is_empty()
+            }
+            CommandTarget::App(AppCommand::Paste) => {
+                self.editor.text_input_snapshot().is_some() || self.object_clipboard.is_some()
+            }
+            CommandTarget::App(
+                AppCommand::TextSmaller
+                | AppCommand::TextLarger
+                | AppCommand::AlignTextLeft
+                | AppCommand::AlignTextCenter
+                | AppCommand::AlignTextRight,
+            ) => self.editor.selected_text_data().is_some(),
+            CommandTarget::App(AppCommand::ToggleFrameBackground) => {
+                self.editor.selected_frame_data().is_some()
+            }
+            CommandTarget::App(
+                AppCommand::OpenKeyboardShortcuts
+                | AppCommand::ToggleLayerPanel
+                | AppCommand::ToggleDesignPanel
+                | AppCommand::ShowCommandPalette,
+            ) => true,
+        }
     }
 
     fn quit_application(
@@ -1063,9 +1209,60 @@ impl VectorEditor {
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
-        self.show_layer_panel = !self.show_layer_panel;
+        self.show_layers_panel = !self.show_layers_panel;
+        self.canvas_input_bounds = None;
         self.open_menu = None;
         cx.notify();
+    }
+
+    fn toggle_design_panel(
+        &mut self,
+        _: &ToggleDesignPanel,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        self.show_design_panel = !self.show_design_panel;
+        self.canvas_input_bounds = None;
+        self.open_menu = None;
+        cx.notify();
+    }
+
+    fn resize_panel(
+        &mut self,
+        event: &DragMoveEvent<layer_panel::PanelResizeDrag>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let side = event.drag(cx).side();
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+
+        let viewport_width = window.viewport_size().width.0;
+        let pointer_x = event.event.position.x.0;
+        let requested_width = match side {
+            layer_panel::PanelSide::Layers => pointer_x,
+            layer_panel::PanelSide::Design => viewport_width - pointer_x,
+        };
+        let opposite_width = match side {
+            layer_panel::PanelSide::Layers if self.show_design_panel => self.design_panel_width,
+            layer_panel::PanelSide::Design if self.show_layers_panel => self.layers_panel_width,
+            _ => 0.0,
+        };
+        let width = clamp_panel_width(requested_width, opposite_width, viewport_width);
+        let current_width = match side {
+            layer_panel::PanelSide::Layers => &mut self.layers_panel_width,
+            layer_panel::PanelSide::Design => &mut self.design_panel_width,
+        };
+        if (*current_width - width).abs() > f32::EPSILON {
+            *current_width = width;
+            self.canvas_input_bounds = None;
+            cx.notify();
+        }
+        cx.stop_propagation();
     }
 
     fn select_tool(&mut self, _: &SelectTool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1588,7 +1785,11 @@ impl VectorEditor {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window);
-        let position = canvas_position(event.position, self.show_layer_panel);
+        let position = canvas_position(
+            event.position,
+            self.canvas_input_bounds,
+            visible_panel_width(self.show_layers_panel, self.layers_panel_width),
+        );
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
         let effects = self.editor.handle_pointer_down_with_click_count(
@@ -1607,7 +1808,11 @@ impl VectorEditor {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let position = canvas_position(event.position, self.show_layer_panel);
+        let position = canvas_position(
+            event.position,
+            self.canvas_input_bounds,
+            visible_panel_width(self.show_layers_panel, self.layers_panel_width),
+        );
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
 
@@ -1633,7 +1838,11 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let position = canvas_position(event.position, self.show_layer_panel);
+        let position = canvas_position(
+            event.position,
+            self.canvas_input_bounds,
+            visible_panel_width(self.show_layers_panel, self.layers_panel_width),
+        );
         let modifiers = convert_modifiers(&event.modifiers);
 
         let input = editor_core::InputEvent::PointerMove {
@@ -1652,7 +1861,11 @@ impl VectorEditor {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let position = canvas_position(event.position, self.show_layer_panel);
+        let position = canvas_position(
+            event.position,
+            self.canvas_input_bounds,
+            visible_panel_width(self.show_layers_panel, self.layers_panel_width),
+        );
         let pixel_delta = event.delta.pixel_delta(window.line_height());
         let delta = glam::Vec2::new(pixel_delta.x.0, pixel_delta.y.0);
         let modifiers = convert_modifiers(&event.modifiers);
@@ -1686,7 +1899,8 @@ impl VectorEditor {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.open_menu.is_some()
+        if self.command_palette.is_some()
+            || self.open_menu.is_some()
             || event.keystroke.key != "space"
             || self.editor.text_input_snapshot().is_some()
         {
@@ -1705,7 +1919,7 @@ impl VectorEditor {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key != "space" {
+        if self.command_palette.is_some() || event.keystroke.key != "space" {
             return;
         }
         let effects = self.editor.handle_event(editor_core::InputEvent::KeyUp {
@@ -1736,17 +1950,23 @@ impl Render for VectorEditor {
         self.update_window_title(window);
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
-        let key_context = if self.open_menu.is_some() {
-            "VectorMenu"
-        } else if self.editor.text_input_snapshot().is_some() {
-            "VectorTextEditor"
-        } else {
-            "VectorEditor"
-        };
+        let key_context = editor_key_context(
+            self.command_palette.is_some() || self.layer_name_input.is_some(),
+            self.open_menu.is_some(),
+            self.editor.text_input_snapshot().is_some(),
+        );
         let selection_count = self.editor.selection().len();
         let zoom = self.editor.view().zoom;
-        let show_layer_panel = self.show_layer_panel;
+        let show_layers_panel = self.show_layers_panel;
+        let show_design_panel = self.show_design_panel;
+        let layers_panel_width = self.layers_panel_width;
+        let design_panel_width = self.design_panel_width;
+        let panel_visibility = toolbar::PanelVisibility {
+            layers: show_layers_panel,
+            design: show_design_panel,
+        };
         let layer_name_input = self.layer_name_input.clone();
+        let command_palette = self.command_palette.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
         let document_name = self.document_name();
@@ -1764,7 +1984,13 @@ impl Render for VectorEditor {
 
         let window_size = window.viewport_size();
         self.editor.set_viewport_size(glam::Vec2::new(
-            canvas_viewport_width(window_size.width.0, show_layer_panel),
+            canvas_viewport_width(
+                window_size.width.0,
+                show_layers_panel,
+                layers_panel_width,
+                show_design_panel,
+                design_panel_width,
+            ),
             (window_size.height.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT).max(1.0),
         ));
 
@@ -1778,6 +2004,8 @@ impl Render for VectorEditor {
 
         // Build layer entries for panel
         let layer_entries = self.editor.build_layer_tree();
+        let canvas_child_index = usize::from(show_layers_panel);
+        let editor_entity = cx.entity().downgrade();
 
         div()
             .id("vector-editor")
@@ -1789,6 +2017,8 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::save_document_as))
             .on_action(cx.listener(Self::export_svg))
             .on_action(cx.listener(Self::export_png))
+            .on_action(cx.listener(Self::open_keyboard_shortcuts))
+            .on_action(cx.listener(Self::show_command_palette))
             .on_action(cx.listener(Self::quit_application))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
@@ -1827,6 +2057,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::zoom_to_fit))
             .on_action(cx.listener(Self::zoom_to_selection))
             .on_action(cx.listener(Self::toggle_layer_panel))
+            .on_action(cx.listener(Self::toggle_design_panel))
             .on_action(cx.listener(Self::toggle_main_menu))
             .on_action(cx.listener(Self::toggle_zoom_menu))
             .on_action(cx.listener(Self::select_tool))
@@ -1893,10 +2124,13 @@ impl Render for VectorEditor {
                 },
                 tool,
                 zoom,
-                show_layer_panel,
-                self.editor.can_undo_in_context(),
-                self.editor.can_redo_in_context(),
+                panel_visibility,
+                toolbar::HistoryAvailability {
+                    undo: self.editor.can_undo_in_context(),
+                    redo: self.editor.can_redo_in_context(),
+                },
                 open_menu,
+                &self.keymap,
             ))
             // Main content area
             .child(
@@ -1905,11 +2139,23 @@ impl Render for VectorEditor {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    .on_drag_move(cx.listener(Self::resize_panel))
+                    .on_children_prepainted(move |children_bounds, _window, cx| {
+                        let Some(bounds) = children_bounds.get(canvas_child_index).copied() else {
+                            return;
+                        };
+                        editor_entity
+                            .update(cx, |editor, _| {
+                                editor.canvas_input_bounds = Some(bounds);
+                            })
+                            .ok();
+                    })
                     // Layers panel (conditionally shown)
-                    .when(show_layer_panel, |this| {
+                    .when(show_layers_panel, |this| {
                         this.child(layer_panel::render_layers_panel(
                             layer_entries,
                             layer_name_input,
+                            layers_panel_width,
                             cx,
                         ))
                     })
@@ -1938,13 +2184,17 @@ impl Render for VectorEditor {
                                 self.text_image_cache.clone(),
                             ))
                             .child(text_input::canvas_text_input(cx.entity().clone()))
-                            .when_some(toolbar::render_context_bar(&self.editor), |canvas, bar| {
-                                canvas.child(bar)
-                            }),
+                            .when_some(
+                                toolbar::render_context_bar(&self.editor, &self.keymap),
+                                |canvas, bar| canvas.child(bar),
+                            ),
                     )
                     // Design panel (conditionally shown)
-                    .when(show_layer_panel, |this| {
-                        this.child(layer_panel::render_design_panel(properties_snapshot))
+                    .when(show_design_panel, |this| {
+                        this.child(layer_panel::render_design_panel(
+                            properties_snapshot,
+                            design_panel_width,
+                        ))
                     }),
             )
             // Status bar at bottom
@@ -1959,37 +2209,71 @@ impl Render for VectorEditor {
                     menu,
                     &self.editor,
                     toolbar::MenuState {
-                        show_layer_panel,
+                        panels: panel_visibility,
                         can_paste,
                         recent_files: &recent_files,
                         file_busy,
+                        keymap: &self.keymap,
                     },
                     window_size.width.0,
                     cx,
                 ))
             })
+            .when_some(command_palette, |root, palette| root.child(palette))
     }
 }
 
-fn canvas_position(position: gpui::Point<gpui::Pixels>, show_layer_panel: bool) -> glam::Vec2 {
-    let canvas_left = if show_layer_panel {
-        layer_panel::LAYERS_WIDTH
+fn visible_panel_width(visible: bool, width: f32) -> f32 {
+    if visible {
+        width
     } else {
         0.0
-    };
-    glam::Vec2::new(
-        position.x.0 - canvas_left,
-        position.y.0 - toolbar::HEADER_HEIGHT,
-    )
+    }
 }
 
-fn canvas_viewport_width(window_width: f32, show_layer_panel: bool) -> f32 {
-    let panels_width = if show_layer_panel {
-        layer_panel::LAYERS_WIDTH + layer_panel::DESIGN_WIDTH
+fn canvas_position(
+    position: gpui::Point<gpui::Pixels>,
+    canvas_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    fallback_left: f32,
+) -> glam::Vec2 {
+    let origin = canvas_bounds.map_or_else(
+        || gpui::point(px(fallback_left), px(toolbar::HEADER_HEIGHT)),
+        |bounds| bounds.origin,
+    );
+    glam::Vec2::new(position.x.0 - origin.x.0, position.y.0 - origin.y.0)
+}
+
+fn editor_key_context(has_modal: bool, has_menu: bool, editing_text: bool) -> &'static str {
+    if has_modal {
+        "VectorModal"
+    } else if has_menu {
+        "VectorMenu"
+    } else if editing_text {
+        "VectorTextEditor"
     } else {
-        0.0
-    };
+        "VectorEditor"
+    }
+}
+
+fn canvas_viewport_width(
+    window_width: f32,
+    show_layers_panel: bool,
+    layers_panel_width: f32,
+    show_design_panel: bool,
+    design_panel_width: f32,
+) -> f32 {
+    let panels_width = visible_panel_width(show_layers_panel, layers_panel_width)
+        + visible_panel_width(show_design_panel, design_panel_width);
     (window_width - panels_width).max(1.0)
+}
+
+fn clamp_panel_width(requested: f32, opposite_width: f32, window_width: f32) -> f32 {
+    let available_width = window_width - opposite_width - layer_panel::MIN_CANVAS_WIDTH;
+    let maximum_width =
+        available_width.clamp(layer_panel::MIN_PANEL_WIDTH, layer_panel::MAX_PANEL_WIDTH);
+    requested
+        .round()
+        .clamp(layer_panel::MIN_PANEL_WIDTH, maximum_width)
 }
 
 fn convert_modifiers(mods: &gpui::Modifiers) -> editor_core::Modifiers {
@@ -2026,98 +2310,21 @@ fn convert_cursor(cursor: editor_core::Cursor) -> gpui::CursorStyle {
     }
 }
 
-fn register_keybindings(cx: &mut App) {
+fn register_keybindings(cx: &mut App, keymap: &commands::Keymap) {
+    commands::register_keybindings(cx, keymap);
     cx.bind_keys([
-        KeyBinding::new("secondary-n", NewDocument, Some("VectorEditor")),
-        KeyBinding::new("secondary-o", OpenDocument, Some("VectorEditor")),
-        KeyBinding::new("secondary-s", SaveDocument, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-s", SaveDocumentAs, Some("VectorEditor")),
-        KeyBinding::new("secondary-q", QuitApplication, Some("VectorEditor")),
-        KeyBinding::new("secondary-z", Undo, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-z", Redo, Some("VectorEditor")),
-        KeyBinding::new("secondary-y", Redo, Some("VectorEditor")),
-        KeyBinding::new("secondary-a", SelectAll, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-a", DeselectAll, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-i", InvertSelection, Some("VectorEditor")),
-        KeyBinding::new("backspace", Backspace, Some("VectorEditor")),
-        KeyBinding::new("delete", Delete, Some("VectorEditor")),
-        KeyBinding::new("secondary-d", Duplicate, Some("VectorEditor")),
-        KeyBinding::new("secondary-g", Group, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-g", Ungroup, Some("VectorEditor")),
-        KeyBinding::new("secondary-]", BringForward, Some("VectorEditor")),
-        KeyBinding::new("secondary-[", SendBackward, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-]", BringToFront, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-[", SendToBack, Some("VectorEditor")),
-        KeyBinding::new("secondary-=", ZoomIn, Some("VectorEditor")),
-        KeyBinding::new("secondary-+", ZoomIn, Some("VectorEditor")),
-        KeyBinding::new("secondary--", ZoomOut, Some("VectorEditor")),
-        KeyBinding::new("secondary-0", ZoomResetAll, Some("VectorEditor")),
-        KeyBinding::new("secondary-1", ZoomReset, Some("VectorEditor")),
-        KeyBinding::new("secondary-shift-1", ZoomToFit, Some("VectorEditor")),
-        KeyBinding::new("secondary-2", ZoomToSelection, Some("VectorEditor")),
-        KeyBinding::new("secondary-\\", ToggleLayerPanel, Some("VectorEditor")),
-        KeyBinding::new("v", SelectTool, Some("VectorEditor")),
-        KeyBinding::new("f", FrameTool, Some("VectorEditor")),
-        KeyBinding::new("r", RectangleTool, Some("VectorEditor")),
-        KeyBinding::new("o", EllipseTool, Some("VectorEditor")),
-        KeyBinding::new("l", LineTool, Some("VectorEditor")),
-        KeyBinding::new("p", PenTool, Some("VectorEditor")),
-        KeyBinding::new("t", TextTool, Some("VectorEditor")),
-        KeyBinding::new("secondary-enter", FinishEditing, Some("VectorEditor")),
-        KeyBinding::new("secondary-j", JoinPaths, Some("VectorEditor")),
-        KeyBinding::new("up", NudgeUp, Some("VectorEditor")),
-        KeyBinding::new("down", NudgeDown, Some("VectorEditor")),
-        KeyBinding::new("left", NudgeLeft, Some("VectorEditor")),
-        KeyBinding::new("right", NudgeRight, Some("VectorEditor")),
-        KeyBinding::new("shift-up", NudgeUpLarge, Some("VectorEditor")),
-        KeyBinding::new("shift-down", NudgeDownLarge, Some("VectorEditor")),
-        KeyBinding::new("shift-left", NudgeLeftLarge, Some("VectorEditor")),
-        KeyBinding::new("shift-right", NudgeRightLarge, Some("VectorEditor")),
-        KeyBinding::new("secondary-c", Copy, Some("VectorEditor")),
-        KeyBinding::new("secondary-x", Cut, Some("VectorEditor")),
-        KeyBinding::new("secondary-v", Paste, Some("VectorEditor")),
         KeyBinding::new("enter", Enter, Some("VectorEditor")),
         KeyBinding::new("shift-enter", SelectParent, Some("VectorEditor")),
         KeyBinding::new("escape", Escape, Some("VectorEditor")),
-        KeyBinding::new("secondary-n", NewDocument, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-o", OpenDocument, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-s", SaveDocument, Some("VectorTextEditor")),
-        KeyBinding::new(
-            "secondary-shift-s",
-            SaveDocumentAs,
-            Some("VectorTextEditor"),
-        ),
-        KeyBinding::new("secondary-q", QuitApplication, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-z", Undo, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-shift-z", Redo, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-y", Redo, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-a", SelectAll, Some("VectorTextEditor")),
-        KeyBinding::new("backspace", Backspace, Some("VectorTextEditor")),
-        KeyBinding::new("delete", Delete, Some("VectorTextEditor")),
         KeyBinding::new("left", TextLeft, Some("VectorTextEditor")),
         KeyBinding::new("right", TextRight, Some("VectorTextEditor")),
         KeyBinding::new("shift-left", TextSelectLeft, Some("VectorTextEditor")),
         KeyBinding::new("shift-right", TextSelectRight, Some("VectorTextEditor")),
         KeyBinding::new("home", TextHome, Some("VectorTextEditor")),
         KeyBinding::new("end", TextEnd, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-c", Copy, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-x", Cut, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-v", Paste, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-enter", FinishEditing, Some("VectorTextEditor")),
         KeyBinding::new("enter", Enter, Some("VectorTextEditor")),
         KeyBinding::new("escape", Escape, Some("VectorTextEditor")),
-        KeyBinding::new("secondary-n", NewDocument, Some("VectorMenu")),
-        KeyBinding::new("secondary-o", OpenDocument, Some("VectorMenu")),
-        KeyBinding::new("secondary-s", SaveDocument, Some("VectorMenu")),
-        KeyBinding::new("secondary-shift-s", SaveDocumentAs, Some("VectorMenu")),
-        KeyBinding::new("secondary-q", QuitApplication, Some("VectorMenu")),
         KeyBinding::new("escape", Escape, Some("VectorMenu")),
-    ]);
-
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([
-        KeyBinding::new("ctrl-g", Group, Some("VectorEditor")),
-        KeyBinding::new("ctrl-shift-g", Ungroup, Some("VectorEditor")),
     ]);
 }
 
@@ -2127,12 +2334,18 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
-            register_keybindings(cx);
+            let keymap = commands::Keymap::load();
+            register_keybindings(cx, &keymap);
+            command_palette::register_keybindings(cx);
             layer_name_input::register_keybindings(cx);
             cx.set_menus(vec![
                 Menu {
                     name: "Vector Editor".into(),
-                    items: vec![MenuItem::action("Quit Vector Editor", QuitApplication)],
+                    items: vec![
+                        MenuItem::action("Keyboard Shortcuts…", OpenKeyboardShortcuts),
+                        MenuItem::separator(),
+                        MenuItem::action("Quit Vector Editor", QuitApplication),
+                    ],
                 },
                 Menu {
                     name: "File".into(),
@@ -2147,6 +2360,15 @@ fn main() {
                         MenuItem::action("Export PNG…", ExportPng),
                     ],
                 },
+                Menu {
+                    name: "View".into(),
+                    items: vec![
+                        MenuItem::action("Command Palette…", ShowCommandPalette),
+                        MenuItem::separator(),
+                        MenuItem::action("Toggle Layers Panel", ToggleLayerPanel),
+                        MenuItem::action("Toggle Design Panel", ToggleDesignPanel),
+                    ],
+                },
             ]);
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
@@ -2156,8 +2378,8 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |window, cx| {
-                    let editor = cx.new(VectorEditor::new);
+                move |window, cx| {
+                    let editor = cx.new(|editor_cx| VectorEditor::new(keymap.clone(), editor_cx));
                     let weak_editor = editor.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         weak_editor
@@ -2183,31 +2405,56 @@ mod layout_tests {
     use super::*;
 
     #[test]
-    fn visible_side_panels_offset_input_by_the_left_panel() {
-        let position = canvas_position(gpui::point(px(340.0), px(140.0)), true);
+    fn canvas_input_uses_the_rendered_canvas_origin() {
+        let bounds = gpui::Bounds::new(
+            gpui::point(px(220.0), px(48.0)),
+            gpui::size(px(800.0), px(700.0)),
+        );
+        let position = canvas_position(gpui::point(px(340.0), px(140.0)), Some(bounds), 999.0);
 
+        assert_eq!(position, glam::Vec2::new(120.0, 92.0));
+    }
+
+    #[test]
+    fn canvas_input_falls_back_to_the_current_layers_width() {
+        let position = canvas_position(gpui::point(px(340.0), px(140.0)), None, 220.0);
+
+        assert_eq!(position, glam::Vec2::new(120.0, 92.0));
+    }
+
+    #[test]
+    fn viewport_width_accounts_for_each_visible_panel() {
         assert_eq!(
-            position,
-            glam::Vec2::new(
-                340.0 - layer_panel::LAYERS_WIDTH,
-                140.0 - toolbar::HEADER_HEIGHT,
-            )
+            canvas_viewport_width(1280.0, true, 240.0, true, 300.0),
+            740.0
+        );
+        assert_eq!(
+            canvas_viewport_width(1280.0, true, 240.0, false, 300.0),
+            1040.0
+        );
+        assert_eq!(
+            canvas_viewport_width(1280.0, false, 240.0, true, 300.0),
+            980.0
+        );
+        assert_eq!(
+            canvas_viewport_width(1280.0, false, 240.0, false, 300.0),
+            1280.0
         );
     }
 
     #[test]
-    fn hidden_side_panels_leave_horizontal_input_unchanged() {
-        let position = canvas_position(gpui::point(px(340.0), px(140.0)), false);
-
-        assert_eq!(
-            position,
-            glam::Vec2::new(340.0, 140.0 - toolbar::HEADER_HEIGHT)
-        );
+    fn panel_width_is_bounded_and_preserves_canvas_space() {
+        assert_eq!(clamp_panel_width(90.0, 248.0, 1280.0), 180.0);
+        assert_eq!(clamp_panel_width(900.0, 248.0, 1280.0), 420.0);
+        assert_eq!(clamp_panel_width(420.0, 420.0, 920.0), 180.0);
     }
 
     #[test]
-    fn viewport_width_accounts_for_both_side_panels() {
-        assert_eq!(canvas_viewport_width(1280.0, true), 784.0);
-        assert_eq!(canvas_viewport_width(1280.0, false), 1280.0);
+    fn modal_context_blocks_canvas_shortcuts_while_typing() {
+        assert_eq!(editor_key_context(true, false, false), "VectorModal");
+        assert_eq!(editor_key_context(true, true, true), "VectorModal");
+        assert_eq!(editor_key_context(false, true, true), "VectorMenu");
+        assert_eq!(editor_key_context(false, false, true), "VectorTextEditor");
+        assert_eq!(editor_key_context(false, false, false), "VectorEditor");
     }
 }

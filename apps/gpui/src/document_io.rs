@@ -162,7 +162,12 @@ impl RecentFiles {
 }
 
 fn recent_files_path() -> Option<PathBuf> {
-    config_root().map(|root| root.join("vector-editor").join("recent-files.json"))
+    app_config_directory().map(|root| root.join("recent-files.json"))
+}
+
+/// Per-user directory for editor preferences and recent state.
+pub(crate) fn app_config_directory() -> Option<PathBuf> {
+    config_root().map(|root| root.join("vector-editor"))
 }
 
 #[cfg(target_os = "macos")]
