@@ -395,7 +395,7 @@ impl Strek {
         self.object_clipboard = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
-        self.open_menu = None;
+        self.dismiss_menus();
     }
 
     fn replace_document(&mut self, document: editor_core::Document, path: PathBuf) {
@@ -405,7 +405,7 @@ impl Strek {
         self.object_clipboard = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
-        self.open_menu = None;
+        self.dismiss_menus();
     }
 
     fn new_document(&mut self, _: &NewDocument, window: &mut Window, cx: &mut Context<Self>) {
@@ -422,7 +422,7 @@ impl Strek {
 
     fn save_document(&mut self, _: &SaveDocument, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_layer_rename(true, cx);
-        self.open_menu = None;
+        self.dismiss_menus();
         if self.file_operation != FileOperation::Idle {
             return;
         }
@@ -440,7 +440,7 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.finish_layer_rename(true, cx);
-        self.open_menu = None;
+        self.dismiss_menus();
         if self.file_operation == FileOperation::Idle {
             self.begin_save_dialog(None, window, cx);
         }
@@ -477,6 +477,7 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_menus();
         match commands::Keymap::ensure_user_file() {
             Ok(path) => cx.open_url(&commands::file_url(&path)),
             Err(error) => {
@@ -513,7 +514,7 @@ impl Strek {
         self.property_color_input = None;
         self.zoom_input = None;
         self.finish_layer_rename(true, cx);
-        self.open_menu = None;
+        self.dismiss_menus();
         let entries = commands::COMMANDS
             .iter()
             .filter(|spec| {
@@ -625,7 +626,7 @@ impl Strek {
         }
 
         self.finish_layer_rename(true, cx);
-        self.open_menu = None;
+        self.dismiss_menus();
         self.editor.settle_for_document_io();
         if !self.editor.is_dirty() {
             self.perform_document_action(action, window, cx);
@@ -803,7 +804,7 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.finish_layer_rename(true, cx);
-        self.open_menu = None;
+        self.dismiss_menus();
         if self.file_operation != FileOperation::Idle {
             return;
         }
@@ -988,29 +989,34 @@ impl Strek {
         }
     }
 
+    fn dismiss_menus(&mut self) -> bool {
+        let main_menu_closed = self.open_menu.take().is_some();
+        let layer_menu_closed = self.layer_context_menu.take().is_some();
+        main_menu_closed || layer_menu_closed
+    }
+
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
         self.property_color_input = None;
         self.zoom_input = None;
-        let menu_closed = self.open_menu.take().is_some();
-        let layer_menu_closed = self.layer_context_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         let executed = self.editor.execute_action(action);
         if executed {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
-        if executed || menu_closed || layer_menu_closed {
+        if executed || menu_closed {
             cx.notify();
         }
     }
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
-        let menu_closed = self.open_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         if self.editor.undo_in_context() || menu_closed {
             cx.notify();
         }
     }
 
     fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
-        let menu_closed = self.open_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         if self.editor.redo_in_context() || menu_closed {
             cx.notify();
         }
@@ -1271,7 +1277,7 @@ impl Strek {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.property_color_input = None;
-        self.open_menu = None;
+        self.dismiss_menus();
         self.zoom_input = Some(ZoomInput {
             value: toolbar::format_zoom_percentage(self.editor.view().zoom),
             replace_on_type: true,
@@ -1292,7 +1298,7 @@ impl Strek {
         }
         self.show_layers_panel = !self.show_layers_panel;
         self.canvas_input_bounds = None;
-        self.open_menu = None;
+        self.dismiss_menus();
         cx.notify();
     }
 
@@ -1307,7 +1313,7 @@ impl Strek {
         }
         self.show_design_panel = !self.show_design_panel;
         self.canvas_input_bounds = None;
-        self.open_menu = None;
+        self.dismiss_menus();
         cx.notify();
     }
 
@@ -1950,7 +1956,7 @@ impl Strek {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        let menu_closed = self.open_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         if let Some(snapshot) = self.editor.text_input_snapshot() {
             if let Some(selected) = snapshot.text.get(snapshot.selection) {
                 if !selected.is_empty() {
@@ -1970,7 +1976,7 @@ impl Strek {
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
-        let menu_closed = self.open_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         let mut changed = false;
         if let Some(snapshot) = self.editor.text_input_snapshot() {
             if let Some(selected) = snapshot.text.get(snapshot.selection.clone()) {
@@ -1993,7 +1999,7 @@ impl Strek {
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        let menu_closed = self.open_menu.take().is_some();
+        let menu_closed = self.dismiss_menus();
         let mut changed = false;
         if self.editor.text_input_snapshot().is_some() {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -2055,7 +2061,9 @@ impl Strek {
 
     fn toggle_menu(&mut self, menu: toolbar::MenuKind, cx: &mut Context<Self>) {
         self.zoom_input = None;
-        self.open_menu = (self.open_menu != Some(menu)).then_some(menu);
+        let was_open = self.open_menu == Some(menu);
+        self.dismiss_menus();
+        self.open_menu = (!was_open).then_some(menu);
         cx.notify();
     }
 
@@ -2065,7 +2073,7 @@ impl Strek {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.open_menu.take().is_some() {
+        if self.dismiss_menus() {
             cx.notify();
         }
     }
@@ -2082,7 +2090,7 @@ impl Strek {
     }
 
     fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.layer_context_menu.take().is_some() || self.open_menu.take().is_some() {
+        if self.dismiss_menus() {
             cx.notify();
         } else {
             let effects = self.editor.handle_event(editor_core::InputEvent::KeyDown {
