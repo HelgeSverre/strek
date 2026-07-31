@@ -869,7 +869,7 @@ impl WgpuRenderer {
     fn tessellate_ui_shapes(&mut self, draw_list: &ui::DrawList) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        let (width, height) = self.size();
+        let viewport = self.size();
 
         for command in &draw_list.commands {
             match command {
@@ -884,8 +884,7 @@ impl WgpuRenderer {
                         rect,
                         color,
                         *corner_radius,
-                        width,
-                        height,
+                        viewport,
                     );
                 }
                 ui::DrawCommand::StrokeRect {
@@ -903,8 +902,7 @@ impl WgpuRenderer {
                         &ui::Rect::new(rect.x, rect.y, rect.width, sw),
                         color,
                         0.0,
-                        width,
-                        height,
+                        viewport,
                     );
                     // Bottom
                     self.add_ui_rect(
@@ -913,8 +911,7 @@ impl WgpuRenderer {
                         &ui::Rect::new(rect.x, rect.y + rect.height - sw, rect.width, sw),
                         color,
                         0.0,
-                        width,
-                        height,
+                        viewport,
                     );
                     // Left
                     self.add_ui_rect(
@@ -923,8 +920,7 @@ impl WgpuRenderer {
                         &ui::Rect::new(rect.x, rect.y + sw, sw, rect.height - 2.0 * sw),
                         color,
                         0.0,
-                        width,
-                        height,
+                        viewport,
                     );
                     // Right
                     self.add_ui_rect(
@@ -938,12 +934,11 @@ impl WgpuRenderer {
                         ),
                         color,
                         0.0,
-                        width,
-                        height,
+                        viewport,
                     );
                 }
                 ui::DrawCommand::Icon { kind, rect, color } => {
-                    self.add_ui_icon(&mut vertices, &mut indices, *kind, rect, color, width, height);
+                    self.add_ui_icon(&mut vertices, &mut indices, *kind, rect, color, viewport);
                 }
                 _ => {}
             }
@@ -956,19 +951,14 @@ impl WgpuRenderer {
     fn tessellate_ui_text(&mut self, draw_list: &ui::DrawList) -> (Vec<TextVertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        let (width, height) = self.size();
+        let viewport = self.size();
 
         for command in &draw_list.commands {
-            if let ui::DrawCommand::Text { text, rect, style, .. } = command {
-                self.add_ui_text(
-                    &mut vertices,
-                    &mut indices,
-                    text,
-                    rect,
-                    style,
-                    width,
-                    height,
-                );
+            if let ui::DrawCommand::Text {
+                text, rect, style, ..
+            } = command
+            {
+                self.add_ui_text(&mut vertices, &mut indices, text, rect, style, viewport);
             }
         }
 
@@ -983,9 +973,9 @@ impl WgpuRenderer {
         rect: &ui::Rect,
         color: &ui::Color,
         _corner_radius: f32,
-        width: u32,
-        height: u32,
+        viewport: (u32, u32),
     ) {
+        let (width, height) = viewport;
         let base = vertices.len() as u32;
 
         // Convert to NDC
@@ -997,10 +987,22 @@ impl WgpuRenderer {
         let c = color.to_array();
 
         vertices.extend_from_slice(&[
-            Vertex { position: [x1, y1], color: c },
-            Vertex { position: [x2, y1], color: c },
-            Vertex { position: [x2, y2], color: c },
-            Vertex { position: [x1, y2], color: c },
+            Vertex {
+                position: [x1, y1],
+                color: c,
+            },
+            Vertex {
+                position: [x2, y1],
+                color: c,
+            },
+            Vertex {
+                position: [x2, y2],
+                color: c,
+            },
+            Vertex {
+                position: [x1, y2],
+                color: c,
+            },
         ]);
 
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1014,9 +1016,9 @@ impl WgpuRenderer {
         text: &str,
         rect: &ui::Rect,
         style: &ui::TextStyle,
-        width: u32,
-        height: u32,
+        viewport: (u32, u32),
     ) {
+        let (width, height) = viewport;
         let color = style.color.to_array();
         let font_size = style.font_size;
         let char_width = font_size * 0.6;
@@ -1031,7 +1033,10 @@ impl WgpuRenderer {
 
         // We need to get a raw pointer to avoid borrowing issues
         // This is safe because font_cache is not modified during glyph_atlas operations
-        let font_ptr = self.font_cache.get_font(&font_family).map(|f| f as *const Font);
+        let font_ptr = self
+            .font_cache
+            .get_font(&font_family)
+            .map(|f| f as *const Font);
 
         let Some(font_ptr) = font_ptr else {
             // No font available - use fallback rectangles
@@ -1053,7 +1058,9 @@ impl WgpuRenderer {
             let font = unsafe { &*font_ptr };
 
             // Get or create glyph
-            let glyph = self.glyph_atlas.get_or_insert(font, &font_family, c, font_size);
+            let glyph = self
+                .glyph_atlas
+                .get_or_insert(font, &font_family, c, font_size);
 
             if let Some(glyph) = glyph {
                 let base = vertices.len() as u32;
@@ -1072,10 +1079,26 @@ impl WgpuRenderer {
                 let [u1, v1, u2, v2] = glyph.uv;
 
                 vertices.extend_from_slice(&[
-                    TextVertex { position: [x1, y1], tex_coords: [u1, v1], color },
-                    TextVertex { position: [x2, y1], tex_coords: [u2, v1], color },
-                    TextVertex { position: [x2, y2], tex_coords: [u2, v2], color },
-                    TextVertex { position: [x1, y2], tex_coords: [u1, v2], color },
+                    TextVertex {
+                        position: [x1, y1],
+                        tex_coords: [u1, v1],
+                        color,
+                    },
+                    TextVertex {
+                        position: [x2, y1],
+                        tex_coords: [u2, v1],
+                        color,
+                    },
+                    TextVertex {
+                        position: [x2, y2],
+                        tex_coords: [u2, v2],
+                        color,
+                    },
+                    TextVertex {
+                        position: [x1, y2],
+                        tex_coords: [u1, v2],
+                        color,
+                    },
                 ]);
 
                 indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1095,8 +1118,7 @@ impl WgpuRenderer {
         kind: ui::IconKind,
         rect: &ui::Rect,
         color: &ui::Color,
-        width: u32,
-        height: u32,
+        viewport: (u32, u32),
     ) {
         let c = color.to_array();
 
@@ -1110,14 +1132,23 @@ impl WgpuRenderer {
 
                 let base = vertices.len() as u32;
 
-                let p1 = self.to_ndc(cx - size * 0.3, cy - size, width, height);
-                let p2 = self.to_ndc(cx + size * 0.5, cy, width, height);
-                let p3 = self.to_ndc(cx - size * 0.3, cy + size, width, height);
+                let p1 = self.to_ndc(cx - size * 0.3, cy - size, viewport);
+                let p2 = self.to_ndc(cx + size * 0.5, cy, viewport);
+                let p3 = self.to_ndc(cx - size * 0.3, cy + size, viewport);
 
                 vertices.extend_from_slice(&[
-                    Vertex { position: p1, color: c },
-                    Vertex { position: p2, color: c },
-                    Vertex { position: p3, color: c },
+                    Vertex {
+                        position: p1,
+                        color: c,
+                    },
+                    Vertex {
+                        position: p2,
+                        color: c,
+                    },
+                    Vertex {
+                        position: p3,
+                        color: c,
+                    },
                 ]);
 
                 indices.extend_from_slice(&[base, base + 1, base + 2]);
@@ -1130,14 +1161,23 @@ impl WgpuRenderer {
 
                 let base = vertices.len() as u32;
 
-                let p1 = self.to_ndc(cx - size, cy - size * 0.3, width, height);
-                let p2 = self.to_ndc(cx + size, cy - size * 0.3, width, height);
-                let p3 = self.to_ndc(cx, cy + size * 0.5, width, height);
+                let p1 = self.to_ndc(cx - size, cy - size * 0.3, viewport);
+                let p2 = self.to_ndc(cx + size, cy - size * 0.3, viewport);
+                let p3 = self.to_ndc(cx, cy + size * 0.5, viewport);
 
                 vertices.extend_from_slice(&[
-                    Vertex { position: p1, color: c },
-                    Vertex { position: p2, color: c },
-                    Vertex { position: p3, color: c },
+                    Vertex {
+                        position: p1,
+                        color: c,
+                    },
+                    Vertex {
+                        position: p2,
+                        color: c,
+                    },
+                    Vertex {
+                        position: p3,
+                        color: c,
+                    },
                 ]);
 
                 indices.extend_from_slice(&[base, base + 1, base + 2]);
@@ -1148,7 +1188,7 @@ impl WgpuRenderer {
                 let cy = rect.y + rect.height / 2.0;
                 let r = rect.width.min(rect.height) * 0.3;
 
-                self.add_circle(vertices, indices, cx, cy, r, &c, width, height);
+                self.add_circle(vertices, indices, (cx, cy), r, &c, viewport);
             }
             ui::IconKind::Rectangle | ui::IconKind::Frame => {
                 // Simple square outline
@@ -1159,7 +1199,7 @@ impl WgpuRenderer {
                     rect.width - 2.0 * inset,
                     rect.height - 2.0 * inset,
                 );
-                self.add_ui_rect(vertices, indices, &inner, color, 0.0, width, height);
+                self.add_ui_rect(vertices, indices, &inner, color, 0.0, viewport);
             }
             ui::IconKind::Folder | ui::IconKind::Group => {
                 // Folder shape
@@ -1170,7 +1210,7 @@ impl WgpuRenderer {
                     rect.width - 2.0 * inset,
                     rect.height - 2.0 * inset,
                 );
-                self.add_ui_rect(vertices, indices, &inner, color, 0.0, width, height);
+                self.add_ui_rect(vertices, indices, &inner, color, 0.0, viewport);
             }
             _ => {
                 // Default: small filled square
@@ -1181,7 +1221,7 @@ impl WgpuRenderer {
                     rect.width - 2.0 * inset,
                     rect.height - 2.0 * inset,
                 );
-                self.add_ui_rect(vertices, indices, &inner, color, 0.0, width, height);
+                self.add_ui_rect(vertices, indices, &inner, color, 0.0, viewport);
             }
         }
     }
@@ -1191,27 +1231,32 @@ impl WgpuRenderer {
         &self,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
-        cx: f32,
-        cy: f32,
+        center: (f32, f32),
         r: f32,
         color: &[f32; 4],
-        width: u32,
-        height: u32,
+        viewport: (u32, u32),
     ) {
+        let (cx, cy) = center;
         let segments = 16;
         let base = vertices.len() as u32;
 
         // Center vertex
-        let center = self.to_ndc(cx, cy, width, height);
-        vertices.push(Vertex { position: center, color: *color });
+        let center = self.to_ndc(cx, cy, viewport);
+        vertices.push(Vertex {
+            position: center,
+            color: *color,
+        });
 
         // Perimeter vertices
         for i in 0..segments {
             let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
             let px = cx + r * angle.cos();
             let py = cy + r * angle.sin();
-            let p = self.to_ndc(px, py, width, height);
-            vertices.push(Vertex { position: p, color: *color });
+            let p = self.to_ndc(px, py, viewport);
+            vertices.push(Vertex {
+                position: p,
+                color: *color,
+            });
         }
 
         // Triangle fan indices
@@ -1222,7 +1267,8 @@ impl WgpuRenderer {
     }
 
     /// Convert screen coordinates to NDC.
-    fn to_ndc(&self, x: f32, y: f32, width: u32, height: u32) -> [f32; 2] {
+    fn to_ndc(&self, x: f32, y: f32, viewport: (u32, u32)) -> [f32; 2] {
+        let (width, height) = viewport;
         [
             (x / width as f32) * 2.0 - 1.0,
             1.0 - (y / height as f32) * 2.0,
@@ -1268,12 +1314,32 @@ impl WgpuRenderer {
                         height,
                     );
                 }
+                DisplayItem::ToolPreview {
+                    path,
+                    fill,
+                    stroke,
+                    transform,
+                } => {
+                    self.tessellate_fill(path, fill, transform, 1.0, &mut geometry, width, height);
+                    self.tessellate_stroke(
+                        path,
+                        stroke,
+                        transform,
+                        1.0,
+                        &mut geometry,
+                        width,
+                        height,
+                    );
+                }
                 DisplayItem::Text { .. } => {
                     // Text is handled separately
                 }
-                DisplayItem::BeginClip { .. } | DisplayItem::EndClip => {
-                    // Clipping not yet implemented in wgpu renderer
-                    // Would require stencil buffer support
+                DisplayItem::VectorAnchor { .. }
+                | DisplayItem::VectorHandle { .. }
+                | DisplayItem::TextCaret { .. }
+                | DisplayItem::TextSelectionRect { .. }
+                | DisplayItem::TransformHandle { .. } => {
+                    // Editing chrome is rendered by the primary GPUI frontend.
                 }
                 DisplayItem::SnapGuide { start, end, .. } => {
                     // Render snap guide as a line
@@ -1282,12 +1348,8 @@ impl WgpuRenderer {
                     let height_f = height as f32;
 
                     // Convert to NDC
-                    let to_ndc = |p: &Vec2| {
-                        [
-                            (p.x / width_f) * 2.0 - 1.0,
-                            1.0 - (p.y / height_f) * 2.0,
-                        ]
-                    };
+                    let to_ndc =
+                        |p: &Vec2| [(p.x / width_f) * 2.0 - 1.0, 1.0 - (p.y / height_f) * 2.0];
 
                     let base_index = geometry.vertices.len() as u32;
                     let thickness = 1.0;
@@ -1337,12 +1399,8 @@ impl WgpuRenderer {
                     let height_f = height as f32;
                     let thickness = 1.0;
 
-                    let to_ndc = |p: &Vec2| {
-                        [
-                            (p.x / width_f) * 2.0 - 1.0,
-                            1.0 - (p.y / height_f) * 2.0,
-                        ]
-                    };
+                    let to_ndc =
+                        |p: &Vec2| [(p.x / width_f) * 2.0 - 1.0, 1.0 - (p.y / height_f) * 2.0];
 
                     // Helper to draw a line segment as a quad
                     let mut draw_line = |start: Vec2, end: Vec2| {
@@ -1391,10 +1449,105 @@ impl WgpuRenderer {
                     let bottom_right = *max;
                     let bottom_left = Vec2::new(min.x, max.y);
 
-                    draw_line(top_left, top_right);       // Top
-                    draw_line(top_right, bottom_right);   // Right
+                    draw_line(top_left, top_right); // Top
+                    draw_line(top_right, bottom_right); // Right
                     draw_line(bottom_right, bottom_left); // Bottom
-                    draw_line(bottom_left, top_left);     // Left
+                    draw_line(bottom_left, top_left); // Left
+                }
+                DisplayItem::MarqueeRect { min, max } => {
+                    // Render marquee as a semi-transparent filled rect with border
+                    let fill_color = [0.0, 0.5, 1.0, 0.15]; // Light blue, semi-transparent
+                    let stroke_color = [0.0, 0.5, 1.0, 1.0]; // Blue, opaque
+                    let width_f = width as f32;
+                    let height_f = height as f32;
+                    let thickness = 1.0;
+
+                    let to_ndc =
+                        |p: &Vec2| [(p.x / width_f) * 2.0 - 1.0, 1.0 - (p.y / height_f) * 2.0];
+
+                    // Draw filled rectangle
+                    {
+                        let base_index = geometry.vertices.len() as u32;
+                        let top_left = *min;
+                        let top_right = Vec2::new(max.x, min.y);
+                        let bottom_right = *max;
+                        let bottom_left = Vec2::new(min.x, max.y);
+
+                        geometry.vertices.push(Vertex {
+                            position: to_ndc(&top_left),
+                            color: fill_color,
+                        });
+                        geometry.vertices.push(Vertex {
+                            position: to_ndc(&top_right),
+                            color: fill_color,
+                        });
+                        geometry.vertices.push(Vertex {
+                            position: to_ndc(&bottom_left),
+                            color: fill_color,
+                        });
+                        geometry.vertices.push(Vertex {
+                            position: to_ndc(&bottom_right),
+                            color: fill_color,
+                        });
+
+                        geometry.indices.push(base_index);
+                        geometry.indices.push(base_index + 1);
+                        geometry.indices.push(base_index + 2);
+                        geometry.indices.push(base_index + 1);
+                        geometry.indices.push(base_index + 3);
+                        geometry.indices.push(base_index + 2);
+                    }
+
+                    // Draw border
+                    let mut draw_line = |start: Vec2, end: Vec2| {
+                        let base_index = geometry.vertices.len() as u32;
+                        let dx = end.x - start.x;
+                        let dy = end.y - start.y;
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len > 0.0 {
+                            let nx = -dy / len * thickness;
+                            let ny = dx / len * thickness;
+
+                            let p0 = Vec2::new(start.x + nx, start.y + ny);
+                            let p1 = Vec2::new(start.x - nx, start.y - ny);
+                            let p2 = Vec2::new(end.x + nx, end.y + ny);
+                            let p3 = Vec2::new(end.x - nx, end.y - ny);
+
+                            geometry.vertices.push(Vertex {
+                                position: to_ndc(&p0),
+                                color: stroke_color,
+                            });
+                            geometry.vertices.push(Vertex {
+                                position: to_ndc(&p1),
+                                color: stroke_color,
+                            });
+                            geometry.vertices.push(Vertex {
+                                position: to_ndc(&p2),
+                                color: stroke_color,
+                            });
+                            geometry.vertices.push(Vertex {
+                                position: to_ndc(&p3),
+                                color: stroke_color,
+                            });
+
+                            geometry.indices.push(base_index);
+                            geometry.indices.push(base_index + 1);
+                            geometry.indices.push(base_index + 2);
+                            geometry.indices.push(base_index + 1);
+                            geometry.indices.push(base_index + 3);
+                            geometry.indices.push(base_index + 2);
+                        }
+                    };
+
+                    let top_left = *min;
+                    let top_right = Vec2::new(max.x, min.y);
+                    let bottom_right = *max;
+                    let bottom_left = Vec2::new(min.x, max.y);
+
+                    draw_line(top_left, top_right);
+                    draw_line(top_right, bottom_right);
+                    draw_line(bottom_right, bottom_left);
+                    draw_line(bottom_left, top_left);
                 }
             }
         }
@@ -1590,13 +1743,13 @@ impl WgpuRenderer {
         height: u32,
     ) {
         let color = paint_to_color(paint, opacity);
-        let events = path_to_events(path, transform, width, height);
+        let events = path_to_events(path, transform);
 
         let _ = self.fill_tessellator.tessellate(
             events,
             &FillOptions::default(),
             &mut BuffersBuilder::new(geometry, |vertex: FillVertex| Vertex {
-                position: vertex.position().to_array(),
+                position: screen_to_ndc(vertex.position().to_array(), width, height),
                 color,
             }),
         );
@@ -1614,7 +1767,10 @@ impl WgpuRenderer {
         height: u32,
     ) {
         let color = paint_to_color(&stroke.paint, opacity);
-        let events = path_to_events(path, transform, width, height);
+        // Tessellate the stroke in local coordinates, then transform its
+        // outline. This preserves non-uniform scale, reflection, and shear
+        // instead of approximating them with one averaged screen-space width.
+        let events = path_to_events(path, &Affine2::IDENTITY);
 
         let line_cap = match stroke.line_cap {
             LineCap::Butt => lyon::tessellation::LineCap::Butt,
@@ -1637,9 +1793,13 @@ impl WgpuRenderer {
         let _ = self.stroke_tessellator.tessellate(
             events,
             &options,
-            &mut BuffersBuilder::new(geometry, |vertex: StrokeVertex| Vertex {
-                position: vertex.position().to_array(),
-                color,
+            &mut BuffersBuilder::new(geometry, |vertex: StrokeVertex| {
+                let position =
+                    transform.transform_point2(Vec2::from_array(vertex.position().to_array()));
+                Vertex {
+                    position: screen_to_ndc(position.to_array(), width, height),
+                    color,
+                }
             }),
         );
     }
@@ -1652,22 +1812,21 @@ fn paint_to_color(paint: &Paint, opacity: f32) -> [f32; 4] {
     }
 }
 
-/// Convert a PathData to lyon path events, applying transform and converting to NDC.
+fn screen_to_ndc(position: [f32; 2], width: u32, height: u32) -> [f32; 2] {
+    [
+        (position[0] / width as f32) * 2.0 - 1.0,
+        1.0 - (position[1] / height as f32) * 2.0,
+    ]
+}
+
+/// Convert path data to lyon events in screen coordinates.
 fn path_to_events<'a>(
     path: &'a PathData,
     transform: &'a Affine2,
-    width: u32,
-    height: u32,
 ) -> impl Iterator<Item = PathEvent> + 'a {
-    let width = width as f32;
-    let height = height as f32;
-
-    // Convert from screen coordinates to normalized device coordinates (-1 to 1)
-    let to_ndc = move |p: Vec2| -> lyon::geom::Point<f32> {
+    let to_screen = move |p: Vec2| -> lyon::geom::Point<f32> {
         let transformed = transform.transform_point2(p);
-        let x = (transformed.x / width) * 2.0 - 1.0;
-        let y = 1.0 - (transformed.y / height) * 2.0; // Flip Y
-        point(x, y)
+        point(transformed.x, transformed.y)
     };
 
     let mut start_point = None;
@@ -1675,22 +1834,22 @@ fn path_to_events<'a>(
 
     path.commands.iter().map(move |cmd| match cmd {
         PathCmd::MoveTo(p) => {
-            let pt = to_ndc(*p);
+            let pt = to_screen(*p);
             start_point = Some(pt);
             current_point = pt;
             PathEvent::Begin { at: pt }
         }
         PathCmd::LineTo(p) => {
             let from = current_point;
-            let to = to_ndc(*p);
+            let to = to_screen(*p);
             current_point = to;
             PathEvent::Line { from, to }
         }
         PathCmd::CubicTo { c1, c2, p } => {
             let from = current_point;
-            let ctrl1 = to_ndc(*c1);
-            let ctrl2 = to_ndc(*c2);
-            let to = to_ndc(*p);
+            let ctrl1 = to_screen(*c1);
+            let ctrl2 = to_screen(*c2);
+            let to = to_screen(*p);
             current_point = to;
             PathEvent::Cubic {
                 from,
@@ -1804,6 +1963,30 @@ mod tests {
         let paint = Paint::Solid([1.0, 0.5, 0.25, 1.0]);
         let color = paint_to_color(&paint, 0.5);
         assert_eq!(color, [1.0, 0.5, 0.25, 0.5]);
+    }
+
+    #[test]
+    fn screen_coordinates_convert_to_ndc_at_viewport_edges() {
+        assert_eq!(screen_to_ndc([0.0, 0.0], 800, 600), [-1.0, 1.0]);
+        assert_eq!(screen_to_ndc([800.0, 600.0], 800, 600), [1.0, -1.0]);
+        assert_eq!(screen_to_ndc([400.0, 300.0], 800, 600), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn path_events_apply_the_requested_affine_transform() {
+        let path = PathData::rect(0.0, 0.0, 10.0, 10.0);
+        let transform =
+            Affine2::from_scale_angle_translation(Vec2::splat(2.0), 0.0, Vec2::new(30.0, 40.0));
+        let events = path_to_events(&path, &transform).collect::<Vec<_>>();
+
+        let PathEvent::Begin { at } = events[0] else {
+            panic!("rectangle should start with a begin event");
+        };
+        let PathEvent::Line { to, .. } = events[1] else {
+            panic!("rectangle should continue with a line event");
+        };
+        assert_eq!(at.to_array(), [30.0, 40.0]);
+        assert_eq!(to.to_array(), [50.0, 40.0]);
     }
 
     #[test]

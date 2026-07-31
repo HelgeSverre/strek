@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 editor_render = { path = "../editor_render" }
 glam = { workspace = true }
+unicode-segmentation = { workspace = true }

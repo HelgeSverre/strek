@@ -5,8 +5,11 @@
 
 use std::fmt::Write;
 
-use editor_render::{DisplayItem, DisplayList, LineCap, LineJoin, Paint, PathCmd, PathData};
+use editor_render::{
+    DisplayItem, DisplayList, LineCap, LineJoin, Paint, PathCmd, PathData, TextAlignment, TextItem,
+};
 use glam::Affine2;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Convert a display list to an SVG string.
 ///
@@ -70,45 +73,21 @@ pub fn to_svg_string(display_list: &DisplayList, width: f32, height: f32) -> Str
                 .unwrap();
             }
 
+            DisplayItem::ToolPreview {
+                path,
+                fill,
+                stroke,
+                transform,
+            } => {
+                write_tool_preview(&mut ui_svg, index, path, fill, stroke, transform);
+            }
+
             DisplayItem::Text {
                 text,
                 transform,
                 opacity,
             } => {
-                let fill = paint_to_css(&text.fill);
-                let matrix = transform_to_matrix(transform);
-                let font_style = if text.font_italic { "italic" } else { "normal" };
-                let escaped_content = html_escape(&text.content);
-
-                write!(
-                    svg,
-                    r#"<text data-index="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" fill="{}" opacity="{}" transform="{}">{}</text>"#,
-                    index,
-                    text.font_family,
-                    text.font_size,
-                    text.font_weight,
-                    font_style,
-                    fill,
-                    opacity,
-                    matrix,
-                    escaped_content
-                )
-                .unwrap();
-            }
-
-            DisplayItem::BeginClip { path, transform } => {
-                let d = path_to_d(path);
-                let matrix = transform_to_matrix(transform);
-                write!(
-                    svg,
-                    r#"<defs><clipPath id="clip-{}"><path d="{}" transform="{}"/></clipPath></defs><g clip-path="url(#clip-{})">"#,
-                    index, d, matrix, index
-                )
-                .unwrap();
-            }
-
-            DisplayItem::EndClip => {
-                svg.push_str("</g>");
+                write_text(&mut svg, index, text, transform, *opacity);
             }
 
             // UI elements go to separate buffer (rendered on top)
@@ -135,6 +114,21 @@ pub fn to_svg_string(display_list: &DisplayList, width: f32, height: f32) -> Str
                 )
                 .unwrap();
             }
+            DisplayItem::MarqueeRect { min, max } => {
+                let w = max.x - min.x;
+                let h = max.y - min.y;
+                write!(
+                    ui_svg,
+                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="rgba(0,128,255,0.15)" stroke="#0080ff" stroke-width="1"/>"##,
+                    min.x, min.y, w, h
+                )
+                .unwrap();
+            }
+            DisplayItem::VectorAnchor { .. }
+            | DisplayItem::VectorHandle { .. }
+            | DisplayItem::TextCaret { .. }
+            | DisplayItem::TextSelectionRect { .. }
+            | DisplayItem::TransformHandle { .. } => {}
         }
     }
 
@@ -197,45 +191,21 @@ pub fn to_svg_fragment(display_list: &DisplayList) -> String {
                 .unwrap();
             }
 
+            DisplayItem::ToolPreview {
+                path,
+                fill,
+                stroke,
+                transform,
+            } => {
+                write_tool_preview(&mut ui_svg, index, path, fill, stroke, transform);
+            }
+
             DisplayItem::Text {
                 text,
                 transform,
                 opacity,
             } => {
-                let fill = paint_to_css(&text.fill);
-                let matrix = transform_to_matrix(transform);
-                let font_style = if text.font_italic { "italic" } else { "normal" };
-                let escaped_content = html_escape(&text.content);
-
-                write!(
-                    svg,
-                    r#"<text data-index="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" fill="{}" opacity="{}" transform="{}">{}</text>"#,
-                    index,
-                    text.font_family,
-                    text.font_size,
-                    text.font_weight,
-                    font_style,
-                    fill,
-                    opacity,
-                    matrix,
-                    escaped_content
-                )
-                .unwrap();
-            }
-
-            DisplayItem::BeginClip { path, transform } => {
-                let d = path_to_d(path);
-                let matrix = transform_to_matrix(transform);
-                write!(
-                    svg,
-                    r#"<defs><clipPath id="clip-{}"><path d="{}" transform="{}"/></clipPath></defs><g clip-path="url(#clip-{})">"#,
-                    index, d, matrix, index
-                )
-                .unwrap();
-            }
-
-            DisplayItem::EndClip => {
-                svg.push_str("</g>");
+                write_text(&mut svg, index, text, transform, *opacity);
             }
 
             // UI elements go to separate buffer (rendered on top)
@@ -262,6 +232,21 @@ pub fn to_svg_fragment(display_list: &DisplayList) -> String {
                 )
                 .unwrap();
             }
+            DisplayItem::MarqueeRect { min, max } => {
+                let width = max.x - min.x;
+                let height = max.y - min.y;
+                write!(
+                    ui_svg,
+                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="rgba(0,128,255,0.15)" stroke="#0080ff" stroke-width="1"/>"##,
+                    min.x, min.y, width, height
+                )
+                .unwrap();
+            }
+            DisplayItem::VectorAnchor { .. }
+            | DisplayItem::VectorHandle { .. }
+            | DisplayItem::TextCaret { .. }
+            | DisplayItem::TextSelectionRect { .. }
+            | DisplayItem::TransformHandle { .. } => {}
         }
     }
 
@@ -333,50 +318,108 @@ pub fn to_svg_string_export(display_list: &DisplayList, width: f32, height: f32)
                 transform,
                 opacity,
             } => {
-                let fill = paint_to_css(&text.fill);
-                let matrix = transform_to_matrix(transform);
-                let font_style = if text.font_italic { "italic" } else { "normal" };
-                let escaped_content = html_escape(&text.content);
-
-                write!(
-                    svg,
-                    r#"<text data-index="{}" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" fill="{}" opacity="{}" transform="{}">{}</text>"#,
-                    index,
-                    text.font_family,
-                    text.font_size,
-                    text.font_weight,
-                    font_style,
-                    fill,
-                    opacity,
-                    matrix,
-                    escaped_content
-                )
-                .unwrap();
-            }
-
-            DisplayItem::BeginClip { path, transform } => {
-                let d = path_to_d(path);
-                let matrix = transform_to_matrix(transform);
-                write!(
-                    svg,
-                    r#"<defs><clipPath id="clip-{}"><path d="{}" transform="{}"/></clipPath></defs><g clip-path="url(#clip-{})">"#,
-                    index, d, matrix, index
-                )
-                .unwrap();
-            }
-
-            DisplayItem::EndClip => {
-                svg.push_str("</g>");
+                write_text(&mut svg, index, text, transform, *opacity);
             }
 
             // Skip UI-only elements for export
+            DisplayItem::ToolPreview { .. } => {}
             DisplayItem::SnapGuide { .. } => {}
             DisplayItem::SelectionRect { .. } => {}
+            DisplayItem::MarqueeRect { .. } => {}
+            DisplayItem::VectorAnchor { .. } => {}
+            DisplayItem::VectorHandle { .. } => {}
+            DisplayItem::TextCaret { .. } => {}
+            DisplayItem::TextSelectionRect { .. } => {}
+            DisplayItem::TransformHandle { .. } => {}
         }
     }
 
     svg.push_str("</svg>");
     svg
+}
+
+fn write_tool_preview(
+    output: &mut String,
+    index: usize,
+    path: &PathData,
+    fill: &Paint,
+    stroke: &editor_render::Stroke,
+    transform: &Affine2,
+) {
+    write!(
+        output,
+        r#"<path data-index="{}" data-editor-ui="tool-preview" d="{}" fill="{}" stroke="{}" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="{}" transform="{}"/>"#,
+        index,
+        path_to_d(path),
+        paint_to_css(fill),
+        paint_to_css(&stroke.paint),
+        stroke.width,
+        line_cap_to_css(stroke.line_cap),
+        line_join_to_css(stroke.line_join),
+        transform_to_matrix(transform),
+    )
+    .unwrap();
+}
+
+fn write_text(
+    output: &mut String,
+    index: usize,
+    text: &TextItem,
+    transform: &Affine2,
+    opacity: f32,
+) {
+    let approximate_character_width = (text.font_size * 0.6).max(1.0);
+    let wrap_limit = text
+        .wrap_width
+        .map(|width| (width / approximate_character_width).floor().max(1.0) as usize);
+    let mut lines = Vec::new();
+    for explicit_line in text.content.split('\n') {
+        let graphemes = explicit_line.graphemes(true).collect::<Vec<_>>();
+        match wrap_limit {
+            Some(limit) if graphemes.len() > limit => {
+                lines.extend(graphemes.chunks(limit).map(|chunk| chunk.concat()));
+            }
+            _ => lines.push(explicit_line.to_owned()),
+        }
+    }
+    let width = text.wrap_width.unwrap_or_else(|| {
+        lines
+            .iter()
+            .map(|line| line.graphemes(true).count() as f32 * approximate_character_width)
+            .fold(0.0, f32::max)
+    });
+    let (x, anchor) = match text.alignment {
+        TextAlignment::Left => (0.0, "start"),
+        TextAlignment::Center => (width * 0.5, "middle"),
+        TextAlignment::Right => (width, "end"),
+    };
+    let font_style = if text.font_italic { "italic" } else { "normal" };
+    write!(
+        output,
+        r#"<text data-index="{}" xml:space="preserve" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="{}" fill="{}" opacity="{}" transform="{}">"#,
+        index,
+        html_escape(&text.font_family),
+        text.font_size,
+        text.font_weight,
+        font_style,
+        anchor,
+        paint_to_css(&text.fill),
+        opacity,
+        transform_to_matrix(transform),
+    )
+    .unwrap();
+    let line_height = text.font_size * text.line_height.max(0.1);
+    for (line_index, line) in lines.iter().enumerate() {
+        write!(
+            output,
+            r#"<tspan x="{}" y="{}">{}</tspan>"#,
+            x,
+            text.font_size + line_index as f32 * line_height,
+            html_escape(line),
+        )
+        .unwrap();
+    }
+    output.push_str("</text>");
 }
 
 /// Convert path data to SVG `d` attribute.
@@ -576,6 +619,24 @@ mod tests {
         assert!(svg.contains("fill=\"none\""));
         assert!(svg.contains("stroke=\"#000000\""));
         assert!(svg.contains("stroke-width=\"2\""));
+    }
+
+    #[test]
+    fn tool_preview_is_visible_in_editor_svg_but_not_exported() {
+        let mut list = DisplayList::new();
+        list.push(DisplayItem::ToolPreview {
+            path: PathData::rect(0.0, 0.0, 100.0, 100.0),
+            fill: Paint::rgba(0.0, 0.5, 1.0, 0.15),
+            stroke: Stroke::new(1.0, Paint::rgb(0.0, 0.5, 1.0)),
+            transform: Affine2::IDENTITY,
+        });
+
+        let editor_svg = to_svg_string(&list, 800.0, 600.0);
+        let exported_svg = to_svg_string_export(&list, 800.0, 600.0);
+
+        assert!(editor_svg.contains("data-editor-ui=\"tool-preview\""));
+        assert!(!exported_svg.contains("tool-preview"));
+        assert!(!exported_svg.contains("<path"));
     }
 
     #[test]
