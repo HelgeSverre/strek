@@ -386,6 +386,7 @@ impl Strek {
                 }
             }
             AutomationRequest::SetUi { target, visible } => {
+                let scrub_cancelled = self.cancel_numeric_property_scrub();
                 match target {
                     UiTarget::MainMenu => {
                         self.dismiss_menus();
@@ -410,6 +411,9 @@ impl Strek {
                             self.toggle_design_panel(&ToggleDesignPanel, window, cx);
                         }
                     }
+                }
+                if scrub_cancelled {
+                    cx.notify();
                 }
                 Ok(format!("set {target:?} visibility to {visible}"))
             }
@@ -758,6 +762,7 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_numeric_property_scrub();
         if self.command_palette.take().is_some() {
             self.focus_handle.focus(window);
             cx.notify();
@@ -1560,6 +1565,7 @@ impl Strek {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_numeric_property_scrub();
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
@@ -1575,6 +1581,7 @@ impl Strek {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_numeric_property_scrub();
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
