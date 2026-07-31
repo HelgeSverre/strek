@@ -111,6 +111,8 @@ actions!(
         PropertyFillBlue,
         PropertyFillRed,
         PropertyFillGreen,
+        StartFillColorInput,
+        StartStrokeColorInput,
         PropertyToggleStroke,
         PropertyStrokeDown,
         PropertyStrokeUp,
@@ -147,6 +149,14 @@ enum FileOperation {
     Exporting,
 }
 
+#[derive(Debug, Clone)]
+struct PropertyColorInput {
+    target: properties_panel::ColorTarget,
+    value: String,
+    replace_on_type: bool,
+    invalid: bool,
+}
+
 /// Main application state as a GPUI Entity.
 struct VectorEditor {
     editor: Editor,
@@ -158,6 +168,7 @@ struct VectorEditor {
     keymap: commands::Keymap,
     recent_commands: Vec<commands::CommandTarget>,
     command_palette: Option<Entity<command_palette::CommandPalette>>,
+    property_color_input: Option<PropertyColorInput>,
     focus_handle: FocusHandle,
     show_layers_panel: bool,
     show_design_panel: bool,
@@ -183,6 +194,7 @@ impl VectorEditor {
             keymap,
             recent_commands: Vec::new(),
             command_palette: None,
+            property_color_input: None,
             focus_handle: cx.focus_handle(),
             show_layers_panel: true,
             show_design_panel: true,
@@ -457,6 +469,7 @@ impl VectorEditor {
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
+        self.property_color_input = None;
         self.finish_layer_rename(true, cx);
         self.open_menu = None;
         let entries = commands::COMMANDS
@@ -931,6 +944,7 @@ impl VectorEditor {
     }
 
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
+        self.property_color_input = None;
         let menu_closed = self.open_menu.take().is_some();
         let executed = self.editor.execute_action(action);
         if executed {
@@ -1484,7 +1498,58 @@ impl VectorEditor {
         }
     }
 
+    fn start_fill_color_input(
+        &mut self,
+        _: &StartFillColorInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_property_color_input(properties_panel::ColorTarget::Fill, window, cx);
+    }
+
+    fn start_stroke_color_input(
+        &mut self,
+        _: &StartStrokeColorInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_property_color_input(properties_panel::ColorTarget::Stroke, window, cx);
+    }
+
+    fn start_property_color_input(
+        &mut self,
+        target: properties_panel::ColorTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        let paint = self
+            .editor
+            .selection()
+            .primary()
+            .and_then(|id| self.editor.document().get(id))
+            .and_then(|node| match target {
+                properties_panel::ColorTarget::Fill => node.style.fill.as_ref(),
+                properties_panel::ColorTarget::Stroke => {
+                    node.style.stroke.as_ref().map(|stroke| &stroke.paint)
+                }
+            })
+            .cloned()
+            .unwrap_or_else(editor_core::Paint::black);
+        self.property_color_input = Some(PropertyColorInput {
+            target,
+            value: properties_panel::format_paint(&paint),
+            replace_on_type: true,
+            invalid: false,
+        });
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
     fn set_property_fill(&mut self, fill: Option<editor_core::Paint>, cx: &mut Context<Self>) {
+        self.property_color_input = None;
         if self.editor.set_selected_fill(fill) {
             cx.notify();
         }
@@ -1550,6 +1615,7 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.property_color_input = None;
         if self.editor.toggle_selected_stroke() {
             cx.notify();
         }
@@ -1761,6 +1827,17 @@ impl VectorEditor {
         }
     }
 
+    fn dismiss_property_color_from_mouse(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.property_color_input.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
         if self.open_menu.take().is_some() {
             cx.notify();
@@ -1784,6 +1861,7 @@ impl VectorEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.property_color_input = None;
         self.focus_handle.focus(window);
         let position = canvas_position(
             event.position,
@@ -1898,7 +1976,101 @@ impl VectorEditor {
         }
     }
 
+    fn handle_property_color_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let primary = if cfg!(target_os = "macos") {
+            event.keystroke.modifiers.platform
+        } else {
+            event.keystroke.modifiers.control
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.property_color_input = None;
+                cx.notify();
+            }
+            "enter" => {
+                let Some(input) = self.property_color_input.as_ref() else {
+                    return;
+                };
+                let Some(paint) = properties_panel::parse_hex_paint(&input.value) else {
+                    if let Some(input) = &mut self.property_color_input {
+                        input.invalid = true;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                };
+                let target = input.target;
+                self.property_color_input = None;
+                let changed = match target {
+                    properties_panel::ColorTarget::Fill => {
+                        self.editor.set_selected_fill(Some(paint))
+                    }
+                    properties_panel::ColorTarget::Stroke => {
+                        self.editor.set_selected_stroke_paint(paint)
+                    }
+                };
+                if changed {
+                    self.current_cursor = convert_cursor(self.editor.cursor());
+                }
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if let Some(input) = &mut self.property_color_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                    } else {
+                        input.value.pop();
+                    }
+                    input.replace_on_type = false;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "a" if primary => {
+                if let Some(input) = &mut self.property_color_input {
+                    input.replace_on_type = true;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "v" if primary => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if let Some(input) = &mut self.property_color_input {
+                        input.value = sanitize_hex_input(&text);
+                        input.replace_on_type = false;
+                        input.invalid = false;
+                        cx.notify();
+                    }
+                }
+            }
+            _ if !primary
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt =>
+            {
+                let Some(text) = event.keystroke.key_char.as_deref() else {
+                    cx.stop_propagation();
+                    return;
+                };
+                if let Some(input) = &mut self.property_color_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                        input.replace_on_type = false;
+                    }
+                    append_hex_input(&mut input.value, text);
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.property_color_input.is_some() {
+            self.handle_property_color_key(event, cx);
+            return;
+        }
         if self.command_palette.is_some()
             || self.open_menu.is_some()
             || event.keystroke.key != "space"
@@ -1919,7 +2091,10 @@ impl VectorEditor {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.command_palette.is_some() || event.keystroke.key != "space" {
+        if self.command_palette.is_some()
+            || self.property_color_input.is_some()
+            || event.keystroke.key != "space"
+        {
             return;
         }
         let effects = self.editor.handle_event(editor_core::InputEvent::KeyUp {
@@ -1951,7 +2126,9 @@ impl Render for VectorEditor {
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
         let key_context = editor_key_context(
-            self.command_palette.is_some() || self.layer_name_input.is_some(),
+            self.command_palette.is_some()
+                || self.layer_name_input.is_some()
+                || self.property_color_input.is_some(),
             self.open_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
@@ -1997,7 +2174,15 @@ impl Render for VectorEditor {
         let text_layouts =
             canvas::shape_text_layouts(self.editor.document().text_items_for_layout(), window);
         self.editor.set_text_layouts(text_layouts);
-        let properties_snapshot = properties_panel::snapshot(&mut self.editor);
+        let color_input =
+            self.property_color_input
+                .as_ref()
+                .map(|input| properties_panel::ColorInputSnapshot {
+                    target: input.target,
+                    value: input.value.clone(),
+                    invalid: input.invalid,
+                });
+        let properties_snapshot = properties_panel::snapshot(&mut self.editor, color_input);
 
         // Build display list for canvas
         let display_list = self.editor.build_display_list();
@@ -2093,6 +2278,8 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::property_fill_blue))
             .on_action(cx.listener(Self::property_fill_red))
             .on_action(cx.listener(Self::property_fill_green))
+            .on_action(cx.listener(Self::start_fill_color_input))
+            .on_action(cx.listener(Self::start_stroke_color_input))
             .on_action(cx.listener(Self::property_toggle_stroke))
             .on_action(cx.listener(Self::property_stroke_down))
             .on_action(cx.listener(Self::property_stroke_up))
@@ -2111,6 +2298,10 @@ impl Render for VectorEditor {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::dismiss_property_color_from_mouse),
+            )
             .size_full()
             .relative()
             .flex()
@@ -2252,6 +2443,24 @@ fn editor_key_context(has_modal: bool, has_menu: bool, editing_text: bool) -> &'
         "VectorTextEditor"
     } else {
         "VectorEditor"
+    }
+}
+
+fn sanitize_hex_input(value: &str) -> String {
+    let mut sanitized = String::with_capacity(9);
+    append_hex_input(&mut sanitized, value);
+    sanitized
+}
+
+fn append_hex_input(value: &mut String, text: &str) {
+    for character in text.chars() {
+        if character == '#' && value.is_empty() {
+            value.push(character);
+        } else if character.is_ascii_hexdigit()
+            && value.chars().filter(|character| *character != '#').count() < 8
+        {
+            value.push(character.to_ascii_uppercase());
+        }
     }
 }
 
@@ -2456,5 +2665,15 @@ mod layout_tests {
         assert_eq!(editor_key_context(false, true, true), "VectorMenu");
         assert_eq!(editor_key_context(false, false, true), "VectorTextEditor");
         assert_eq!(editor_key_context(false, false, false), "VectorEditor");
+    }
+
+    #[test]
+    fn color_input_keeps_one_prefix_and_eight_hex_digits() {
+        assert_eq!(sanitize_hex_input("  #12ab34cd trailing"), "#12AB34CD");
+        assert_eq!(sanitize_hex_input("##ff00aa"), "#FF00AA");
+
+        let mut value = "#12".to_owned();
+        append_hex_input(&mut value, "g3f");
+        assert_eq!(value, "#123F");
     }
 }
