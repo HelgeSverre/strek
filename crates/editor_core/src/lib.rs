@@ -93,6 +93,25 @@ pub enum DocumentLoadError {
 /// Structural reason a serialized document cannot be loaded safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentValidationError {
+    TooManyNodes {
+        count: usize,
+        limit: usize,
+    },
+    TooManyChildren {
+        node: NodeId,
+        count: usize,
+        limit: usize,
+    },
+    TooManyPathAnchors {
+        node: NodeId,
+        count: usize,
+        limit: usize,
+    },
+    TextTooLong {
+        node: NodeId,
+        bytes: usize,
+        limit: usize,
+    },
     MissingRoot {
         root: NodeId,
     },
@@ -137,6 +156,21 @@ pub enum DocumentValidationError {
 impl fmt::Display for DocumentValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TooManyNodes { count, limit } => {
+                write!(formatter, "document contains {count} nodes; limit is {limit}")
+            }
+            Self::TooManyChildren { node, count, limit } => write!(
+                formatter,
+                "node {node:?} contains {count} children; limit is {limit}"
+            ),
+            Self::TooManyPathAnchors { node, count, limit } => write!(
+                formatter,
+                "path {node:?} contains {count} anchors; limit is {limit}"
+            ),
+            Self::TextTooLong { node, bytes, limit } => write!(
+                formatter,
+                "text node {node:?} contains {bytes} bytes; limit is {limit}"
+            ),
             Self::MissingRoot { root } => write!(formatter, "root {root:?} does not exist"),
             Self::DeletedRoot { root } => write!(formatter, "root {root:?} is deleted"),
             Self::RootHasParent { root, parent } => {
@@ -174,6 +208,23 @@ impl fmt::Display for DocumentValidationError {
 }
 
 impl std::error::Error for DocumentValidationError {}
+
+#[derive(Debug, Clone, Copy)]
+struct DocumentComplexityLimits {
+    nodes: usize,
+    children_per_node: usize,
+    path_anchors_per_node: usize,
+    text_bytes_per_node: usize,
+}
+
+impl DocumentComplexityLimits {
+    const DEFAULT: Self = Self {
+        nodes: 100_000,
+        children_per_node: 100_000,
+        path_anchors_per_node: 1_000_000,
+        text_bytes_per_node: 4 * 1024 * 1024,
+    };
+}
 
 impl fmt::Display for DocumentLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1273,9 +1324,11 @@ impl Document {
 
     /// Convert document to a serializable format.
     pub fn to_saved(&self) -> SavedDocument {
+        let mut nodes = self.nodes.clone();
+        nodes.retain(|_, node| !node.deleted);
         SavedDocument {
             version: SavedDocument::CURRENT_VERSION,
-            nodes: self.nodes.clone(),
+            nodes,
             root: self.root,
         }
     }
@@ -1301,6 +1354,8 @@ impl Document {
     }
 
     fn validate_saved_graph(saved: &SavedDocument) -> Result<(), DocumentValidationError> {
+        Self::validate_saved_complexity(saved, DocumentComplexityLimits::DEFAULT)?;
+
         let root = saved
             .nodes
             .get(saved.root)
@@ -1470,6 +1525,53 @@ impl Document {
 
         if let Some(&node) = live_nodes.iter().find(|node| !reachable.contains(node)) {
             return Err(DocumentValidationError::UnreachableNode { node });
+        }
+
+        Ok(())
+    }
+
+    fn validate_saved_complexity(
+        saved: &SavedDocument,
+        limits: DocumentComplexityLimits,
+    ) -> Result<(), DocumentValidationError> {
+        if saved.nodes.len() > limits.nodes {
+            return Err(DocumentValidationError::TooManyNodes {
+                count: saved.nodes.len(),
+                limit: limits.nodes,
+            });
+        }
+
+        for (node_id, node) in &saved.nodes {
+            if node.children.len() > limits.children_per_node {
+                return Err(DocumentValidationError::TooManyChildren {
+                    node: node_id,
+                    count: node.children.len(),
+                    limit: limits.children_per_node,
+                });
+            }
+
+            match &node.kind {
+                NodeKind::Shape(path) => {
+                    let anchor_count = path.contours.iter().fold(0_usize, |count, contour| {
+                        count.saturating_add(contour.anchors.len())
+                    });
+                    if anchor_count > limits.path_anchors_per_node {
+                        return Err(DocumentValidationError::TooManyPathAnchors {
+                            node: node_id,
+                            count: anchor_count,
+                            limit: limits.path_anchors_per_node,
+                        });
+                    }
+                }
+                NodeKind::Text(text) if text.content.len() > limits.text_bytes_per_node => {
+                    return Err(DocumentValidationError::TextTooLong {
+                        node: node_id,
+                        bytes: text.content.len(),
+                        limit: limits.text_bytes_per_node,
+                    });
+                }
+                NodeKind::Group | NodeKind::Frame(_) | NodeKind::Text(_) => {}
+            }
         }
 
         Ok(())
@@ -2450,6 +2552,55 @@ mod tests {
         assert!(doc.remove(group));
 
         assert!(Document::from_saved(doc.to_saved()).is_ok());
+    }
+
+    #[test]
+    fn saved_documents_omit_soft_deleted_content() {
+        let mut doc = Document::new();
+        let deleted = doc
+            .add_child(
+                doc.root,
+                Node::text("Private note", "do not persist this secret"),
+            )
+            .expect("root exists");
+        assert!(doc.remove(deleted));
+
+        let json = doc.to_json().expect("document should serialize");
+        assert!(!json.contains("do not persist this secret"));
+
+        let restored = Document::from_json(&json).expect("saved document should load");
+        assert_eq!(restored.nodes.len(), 1);
+        assert!(restored.nodes.contains_key(restored.root));
+    }
+
+    #[test]
+    fn saved_document_complexity_is_bounded_before_graph_validation() {
+        let mut doc = Document::new();
+        let child = doc
+            .add_child(doc.root, Node::text("Label", "too long"))
+            .expect("root exists");
+        let saved = doc.to_saved();
+        let limits = DocumentComplexityLimits {
+            nodes: saved.nodes.len(),
+            children_per_node: 0,
+            path_anchors_per_node: usize::MAX,
+            text_bytes_per_node: usize::MAX,
+        };
+        assert!(matches!(
+            Document::validate_saved_complexity(&saved, limits),
+            Err(DocumentValidationError::TooManyChildren { node, .. }) if node == saved.root
+        ));
+
+        let limits = DocumentComplexityLimits {
+            nodes: saved.nodes.len(),
+            children_per_node: usize::MAX,
+            path_anchors_per_node: usize::MAX,
+            text_bytes_per_node: 3,
+        };
+        assert!(matches!(
+            Document::validate_saved_complexity(&saved, limits),
+            Err(DocumentValidationError::TextTooLong { node, .. }) if node == child
+        ));
     }
 
     #[test]
