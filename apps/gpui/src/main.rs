@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{
-    Editor, EditorAction, NodeId, NumericAdjustmentDirection, NumericAdjustmentMode,
+    Editor, EditorAction, NodeId, NodeKind, NumericAdjustmentDirection, NumericAdjustmentMode,
     NumericPropertyScrubSession, NumericPropertyTarget,
 };
 use gpui::{
@@ -190,6 +190,13 @@ impl DocumentOrigin {
         }
     }
 
+    fn import_source_path(&self) -> Option<&Path> {
+        match self {
+            Self::ImportedSvg(path) => Some(path),
+            Self::Untitled | Self::Native(_) => None,
+        }
+    }
+
     fn requires_native_save(&self) -> bool {
         matches!(self, Self::ImportedSvg(_))
     }
@@ -203,6 +210,13 @@ enum ClipboardArtworkFormat {
 }
 
 impl ClipboardArtworkFormat {
+    fn is_supported(self) -> bool {
+        match self {
+            Self::Svg | Self::Png => cfg!(any(target_os = "macos", target_os = "windows")),
+            Self::WebP => cfg!(target_os = "macos"),
+        }
+    }
+
     fn export_format(self) -> export::ExportFormat {
         match self {
             Self::Svg => export::ExportFormat::Svg,
@@ -1023,11 +1037,17 @@ impl Strek {
                 | AppCommand::ExportPng
                 | AppCommand::ExportJpeg
                 | AppCommand::ExportWebP
-                | AppCommand::CopyAsSvg
-                | AppCommand::CopyAsPng
-                | AppCommand::CopyAsWebP
                 | AppCommand::QuitApplication,
             ) => self.file_operation == FileOperation::Idle,
+            CommandTarget::App(AppCommand::CopyAsSvg) => {
+                self.can_copy_artwork(ClipboardArtworkFormat::Svg)
+            }
+            CommandTarget::App(AppCommand::CopyAsPng) => {
+                self.can_copy_artwork(ClipboardArtworkFormat::Png)
+            }
+            CommandTarget::App(AppCommand::CopyAsWebP) => {
+                self.can_copy_artwork(ClipboardArtworkFormat::WebP)
+            }
             CommandTarget::App(AppCommand::Copy | AppCommand::Cut) => {
                 self.file_operation != FileOperation::Copying
                     && self.editor.text_input_snapshot().map_or_else(
@@ -1060,6 +1080,16 @@ impl Strek {
                 | AppCommand::ShowCommandPalette,
             ) => true,
         }
+    }
+
+    fn can_copy_artwork(&self, format: ClipboardArtworkFormat) -> bool {
+        self.file_operation == FileOperation::Idle
+            && format.is_supported()
+            && self.has_visible_artwork()
+    }
+
+    fn has_visible_artwork(&self) -> bool {
+        document_has_visible_artwork(self.editor.document())
     }
 
     fn quit_application(
@@ -1241,18 +1271,34 @@ impl Strek {
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let prompt = cx.prompt_for_new_path(&directory);
+        let import_source = self
+            .document_origin
+            .import_source_path()
+            .map(Path::to_path_buf);
         cx.spawn_in(window, async move |editor, cx| {
             let result = prompt.await;
             editor
                 .update_in(cx, |editor, window, cx| {
                     editor.file_operation = FileOperation::Idle;
                     match result {
-                        Ok(Ok(Some(path))) => editor.begin_save_to_path(
-                            document_io::normalize_document_path(path),
-                            resume,
-                            window,
-                            cx,
-                        ),
+                        Ok(Ok(Some(path))) => {
+                            let path = if let Some(source) = import_source.as_deref() {
+                                document_io::normalize_imported_document_path(path, source)
+                            } else {
+                                Ok(document_io::normalize_document_path(path))
+                            };
+                            match path {
+                                Ok(path) => {
+                                    editor.begin_save_to_path(path, resume, window, cx);
+                                }
+                                Err(error) => editor.show_error(
+                                    "Could not save document",
+                                    error.to_string(),
+                                    window,
+                                    cx,
+                                ),
+                            }
+                        }
                         Ok(Ok(None)) | Err(_) => cx.notify(),
                         Ok(Err(error)) => editor.show_error(
                             "Could not open save dialog",
@@ -1382,6 +1428,15 @@ impl Strek {
         if self.file_operation != FileOperation::Idle {
             return;
         }
+        if !format.is_supported() {
+            self.show_error(
+                "Clipboard format unavailable",
+                "This clipboard format is not supported on the current platform.".to_owned(),
+                window,
+                cx,
+            );
+            return;
+        }
         self.settle_for_document_io();
         let Some(snapshot) = self.editor.artwork_snapshot() else {
             self.show_error(
@@ -1394,6 +1449,7 @@ impl Strek {
         };
 
         self.file_operation = FileOperation::Copying;
+        let clipboard_before = cx.read_from_clipboard();
         let task = cx
             .background_executor()
             .spawn(async move { export::encode_artwork(format.export_format(), &snapshot) });
@@ -1404,6 +1460,10 @@ impl Strek {
                     editor.file_operation = FileOperation::Idle;
                     match result {
                         Ok(bytes) => {
+                            if cx.read_from_clipboard() != clipboard_before {
+                                cx.notify();
+                                return;
+                            }
                             let sequence =
                                 ARTWORK_CLIPBOARD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
                             let image = Image {
@@ -3104,6 +3164,26 @@ impl Focusable for Strek {
     }
 }
 
+fn document_has_visible_artwork(document: &editor_core::Document) -> bool {
+    document.descendants(document.root).any(|id| {
+        if !document.is_effectively_visible(id) {
+            return false;
+        }
+        let Some(node) = document.get(id) else {
+            return false;
+        };
+        document.local_bounds(id).is_some_and(|bounds| {
+            bounds.min.is_finite()
+                && bounds.max.is_finite()
+                && (!bounds.is_empty()
+                    || matches!(&node.kind, NodeKind::Shape(_))
+                        && node.style.stroke.as_ref().is_some_and(|stroke| {
+                            stroke.width > 0.0 && (bounds.width() > 0.0 || bounds.height() > 0.0)
+                        }))
+        })
+    })
+}
+
 impl Render for Strek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.did_focus {
@@ -3141,6 +3221,13 @@ impl Render for Strek {
         let document_location = self.document_location();
         let recent_files = self.recent_files.paths().to_vec();
         let file_busy = self.file_operation != FileOperation::Idle;
+        let can_copy_artwork = self.has_visible_artwork();
+        let can_copy_svg =
+            !file_busy && can_copy_artwork && ClipboardArtworkFormat::Svg.is_supported();
+        let can_copy_png =
+            !file_busy && can_copy_artwork && ClipboardArtworkFormat::Png.is_supported();
+        let can_copy_webp =
+            !file_busy && can_copy_artwork && ClipboardArtworkFormat::WebP.is_supported();
         let can_paste = match open_menu {
             Some(toolbar::MenuKind::Main) if self.editor.text_input_snapshot().is_some() => cx
                 .read_from_clipboard()
@@ -3220,9 +3307,15 @@ impl Render for Strek {
             .on_action(cx.listener(Self::export_png))
             .on_action(cx.listener(Self::export_jpeg))
             .on_action(cx.listener(Self::export_webp))
-            .on_action(cx.listener(Self::copy_as_svg))
-            .on_action(cx.listener(Self::copy_as_png))
-            .on_action(cx.listener(Self::copy_as_webp))
+            .when(can_copy_svg, |root| {
+                root.on_action(cx.listener(Self::copy_as_svg))
+            })
+            .when(can_copy_png, |root| {
+                root.on_action(cx.listener(Self::copy_as_png))
+            })
+            .when(can_copy_webp, |root| {
+                root.on_action(cx.listener(Self::copy_as_webp))
+            })
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::show_command_palette))
             .on_action(cx.listener(Self::quit_application))
@@ -3447,6 +3540,7 @@ impl Render for Strek {
                         can_paste,
                         recent_files: &recent_files,
                         file_busy,
+                        can_copy_artwork,
                         keymap: &self.keymap,
                     },
                     window_size.width.0,
@@ -3809,6 +3903,28 @@ fn main() {
             register_keybindings(cx, &keymap);
             command_palette::register_keybindings(cx);
             layer_name_input::register_keybindings(cx);
+            let mut file_menu_items = vec![
+                MenuItem::action("New", NewDocument),
+                MenuItem::action("Open…", OpenDocument),
+                MenuItem::separator(),
+                MenuItem::action("Save", SaveDocument),
+                MenuItem::action("Save As…", SaveDocumentAs),
+                MenuItem::separator(),
+                MenuItem::action("Export SVG…", ExportSvg),
+                MenuItem::action("Export SVG with Outlined Text…", ExportSvgOutlined),
+                MenuItem::action("Export PNG…", ExportPng),
+                MenuItem::action("Export JPEG…", ExportJpeg),
+                MenuItem::action("Export WebP…", ExportWebP),
+            ];
+            if cfg!(any(target_os = "macos", target_os = "windows")) {
+                file_menu_items.push(MenuItem::separator());
+                file_menu_items.push(MenuItem::action("Copy as SVG", CopyAsSvg));
+                file_menu_items.push(MenuItem::action("Copy as PNG", CopyAsPng));
+            }
+            if cfg!(target_os = "macos") {
+                file_menu_items.push(MenuItem::action("Copy as WebP", CopyAsWebP));
+            }
+
             cx.set_menus(vec![
                 Menu {
                     name: "Strek".into(),
@@ -3820,23 +3936,7 @@ fn main() {
                 },
                 Menu {
                     name: "File".into(),
-                    items: vec![
-                        MenuItem::action("New", NewDocument),
-                        MenuItem::action("Open…", OpenDocument),
-                        MenuItem::separator(),
-                        MenuItem::action("Save", SaveDocument),
-                        MenuItem::action("Save As…", SaveDocumentAs),
-                        MenuItem::separator(),
-                        MenuItem::action("Export SVG…", ExportSvg),
-                        MenuItem::action("Export SVG with Outlined Text…", ExportSvgOutlined),
-                        MenuItem::action("Export PNG…", ExportPng),
-                        MenuItem::action("Export JPEG…", ExportJpeg),
-                        MenuItem::action("Export WebP…", ExportWebP),
-                        MenuItem::separator(),
-                        MenuItem::action("Copy as SVG", CopyAsSvg),
-                        MenuItem::action("Copy as PNG", CopyAsPng),
-                        MenuItem::action("Copy as WebP", CopyAsWebP),
-                    ],
+                    items: file_menu_items,
                 },
                 Menu {
                     name: "View".into(),
@@ -3896,6 +3996,46 @@ mod layout_tests {
         assert_eq!(origin.source_path(), Some(path.as_path()));
         assert_eq!(origin.native_path(), None);
         assert!(origin.requires_native_save());
+    }
+
+    #[test]
+    fn artwork_availability_requires_effectively_visible_renderable_geometry() {
+        let mut document = editor_core::Document::new();
+        assert!(!document_has_visible_artwork(&document));
+
+        document
+            .add_child(
+                document.root,
+                editor_core::Node::shape(
+                    "Hidden rectangle",
+                    editor_core::PathData::rect(0.0, 0.0, 10.0, 10.0),
+                )
+                .with_visible(false),
+            )
+            .unwrap();
+        assert!(!document_has_visible_artwork(&document));
+
+        document
+            .add_child(
+                document.root,
+                editor_core::Node::shape(
+                    "Horizontal line",
+                    editor_core::PathData::from_commands(&[
+                        editor_core::PathCmd::MoveTo(glam::Vec2::ZERO),
+                        editor_core::PathCmd::LineTo(glam::Vec2::new(10.0, 0.0)),
+                    ]),
+                )
+                .with_style(editor_core::Style {
+                    fill: None,
+                    stroke: Some(editor_core::Stroke::new(
+                        1.0,
+                        editor_core::Paint::rgb(0.0, 0.0, 0.0),
+                    )),
+                    opacity: 1.0,
+                }),
+            )
+            .unwrap();
+        assert!(document_has_visible_artwork(&document));
     }
 
     #[test]

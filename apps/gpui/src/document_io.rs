@@ -42,6 +42,10 @@ pub enum DocumentIoError {
     InvalidDocument {
         source: DocumentValidationError,
     },
+    UnsafeImportDestination {
+        source: PathBuf,
+        destination: PathBuf,
+    },
     Write {
         path: PathBuf,
         source: io::Error,
@@ -69,6 +73,15 @@ impl fmt::Display for DocumentIoError {
             Self::InvalidDocument { source } => {
                 write!(formatter, "could not save invalid document: {source}")
             }
+            Self::UnsafeImportDestination {
+                source,
+                destination,
+            } => write!(
+                formatter,
+                "refusing to overwrite imported SVG {} through save destination {}; choose a different native document path",
+                source.display(),
+                destination.display()
+            ),
             Self::Write { path, source } => {
                 write!(formatter, "could not save {}: {source}", path.display())
             }
@@ -85,6 +98,7 @@ impl Error for DocumentIoError {
             Self::Import { source, .. } => Some(source),
             Self::Encode { source } => Some(source),
             Self::InvalidDocument { source } => Some(source),
+            Self::UnsafeImportDestination { .. } => None,
         }
     }
 }
@@ -184,6 +198,80 @@ pub fn normalize_document_path(path: PathBuf) -> PathBuf {
     path.with_file_name(format!("{file_name}.{DOCUMENT_EXTENSION}"))
 }
 
+/// Force an imported document's save destination to the native extension and
+/// reject aliases that would overwrite the source SVG.
+pub fn normalize_imported_document_path(
+    path: PathBuf,
+    source: &Path,
+) -> Result<PathBuf, DocumentIoError> {
+    let is_native_path = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.to_ascii_lowercase()
+                .ends_with(&format!(".{DOCUMENT_EXTENSION}"))
+        });
+    let destination = if is_native_path {
+        path
+    } else {
+        path.with_extension(DOCUMENT_EXTENSION)
+    };
+
+    if paths_refer_to_same_file(source, &destination) {
+        return Err(DocumentIoError::UnsafeImportDestination {
+            source: source.to_path_buf(),
+            destination,
+        });
+    }
+
+    Ok(destination)
+}
+
+fn paths_refer_to_same_file(first: &Path, second: &Path) -> bool {
+    if first == second {
+        return true;
+    }
+    if matches!(
+        (first.canonicalize(), second.canonicalize()),
+        (Ok(first), Ok(second)) if first == second
+    ) {
+        return true;
+    }
+
+    let (Ok(first), Ok(second)) = (first.metadata(), second.metadata()) else {
+        return false;
+    };
+    same_file_metadata(&first, &second)
+}
+
+#[cfg(unix)]
+fn same_file_metadata(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    first.dev() == second.dev() && first.ino() == second.ino()
+}
+
+#[cfg(windows)]
+fn same_file_metadata(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    matches!(
+        (
+            first.volume_serial_number(),
+            first.file_index(),
+            second.volume_serial_number(),
+            second.file_index(),
+        ),
+        (Some(first_volume), Some(first_index), Some(second_volume), Some(second_index))
+            if first_volume == second_volume && first_index == second_index
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_metadata(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    false
+}
+
 /// Most-recently-used document paths.
 #[derive(Debug, Clone, Default)]
 pub struct RecentFiles {
@@ -219,10 +307,7 @@ impl RecentFiles {
 
     /// Move a path to the front and persist the updated list.
     pub fn record(&mut self, path: &Path) {
-        let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.paths.retain(|candidate| candidate != &normalized);
-        self.paths.insert(0, normalized);
-        self.paths.truncate(MAX_RECENT_FILES);
+        record_recent_path(&mut self.paths, path);
         if let Err(error) = self.persist() {
             log::warn!("could not persist recent files: {error}");
         }
@@ -243,6 +328,12 @@ impl RecentFiles {
         let json = serde_json::to_vec_pretty(&self.paths).map_err(io::Error::other)?;
         write_atomic(&path, &json)
     }
+}
+
+fn record_recent_path(paths: &mut Vec<PathBuf>, path: &Path) {
+    paths.retain(|candidate| !paths_refer_to_same_file(candidate, path));
+    paths.insert(0, path.to_path_buf());
+    paths.truncate(MAX_RECENT_FILES);
 }
 
 fn recent_files_path() -> Option<PathBuf> {
@@ -399,6 +490,54 @@ mod tests {
             normalize_document_path(PathBuf::from("/tmp/drawing.json")),
             PathBuf::from("/tmp/drawing.json")
         );
+    }
+
+    #[test]
+    fn imported_save_paths_always_use_the_native_extension() {
+        let source = Path::new("/tmp/logo.svg");
+
+        assert_eq!(
+            normalize_imported_document_path(PathBuf::from("/tmp/logo.svg"), source).unwrap(),
+            PathBuf::from("/tmp/logo.strek.json")
+        );
+        assert_eq!(
+            normalize_imported_document_path(PathBuf::from("/tmp/logo.STREK.JSON"), source)
+                .unwrap(),
+            PathBuf::from("/tmp/logo.STREK.JSON")
+        );
+    }
+
+    #[test]
+    fn imported_saves_reject_existing_aliases_to_the_source() {
+        let directory = temporary_test_directory("svg-save-alias");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("source.svg");
+        let destination = directory.join("drawing.strek.json");
+        fs::write(&source, "<svg/>").unwrap();
+        fs::hard_link(&source, &destination).unwrap();
+
+        assert!(matches!(
+            normalize_imported_document_path(destination, &source),
+            Err(DocumentIoError::UnsafeImportDestination { .. })
+        ));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recent_files_preserve_the_opened_alias_while_deduplicating_identity() {
+        let directory = temporary_test_directory("recent-svg-alias");
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("source-without-extension");
+        let alias = directory.join("source.svg");
+        fs::write(&target, "<svg/>").unwrap();
+        fs::hard_link(&target, &alias).unwrap();
+        let mut paths = vec![target];
+
+        record_recent_path(&mut paths, &alias);
+
+        assert_eq!(paths, vec![alias]);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

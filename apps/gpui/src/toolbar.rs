@@ -127,6 +127,7 @@ pub struct MenuState<'a> {
     pub can_paste: bool,
     pub recent_files: &'a [PathBuf],
     pub file_busy: bool,
+    pub can_copy_artwork: bool,
     pub keymap: &'a Keymap,
 }
 
@@ -1038,16 +1039,7 @@ pub fn render_menu(
         MenuKind::Main => (
             point(px(8.0), px(HEADER_HEIGHT + 6.0)),
             Corner::TopLeft,
-            render_main_menu(
-                editor,
-                state.panels,
-                state.can_paste,
-                state.recent_files,
-                state.file_busy,
-                state.keymap,
-                cx,
-            )
-            .into_any_element(),
+            render_main_menu(editor, state, cx).into_any_element(),
         ),
         MenuKind::Zoom => (
             point(px(viewport_width - 44.0), px(HEADER_HEIGHT + 6.0)),
@@ -1080,13 +1072,17 @@ pub fn render_menu(
 
 fn render_main_menu(
     editor: &Editor,
-    panels: PanelVisibility,
-    can_paste: bool,
-    recent_files: &[PathBuf],
-    file_busy: bool,
-    keymap: &Keymap,
+    state: MenuState<'_>,
     cx: &mut Context<Strek>,
 ) -> impl IntoElement {
+    let MenuState {
+        panels,
+        can_paste,
+        recent_files,
+        file_busy,
+        can_copy_artwork,
+        keymap,
+    } = state;
     let can_copy_or_cut = editor.text_input_snapshot().map_or_else(
         || !editor.selection().is_empty(),
         |snapshot| !snapshot.selection.is_empty(),
@@ -1133,9 +1129,31 @@ fn render_main_menu(
         .child(menu_item("Export PNG…", "", !file_busy, ExportPng))
         .child(menu_item("Export JPEG…", "", !file_busy, ExportJpeg))
         .child(menu_item("Export WebP…", "", !file_busy, ExportWebP))
-        .child(menu_item("Copy as SVG", "", !file_busy, CopyAsSvg))
-        .child(menu_item("Copy as PNG", "", !file_busy, CopyAsPng))
-        .child(menu_item("Copy as WebP", "", !file_busy, CopyAsWebP))
+        .when(
+            cfg!(any(target_os = "macos", target_os = "windows")),
+            |menu| {
+                menu.child(menu_item(
+                    "Copy as SVG",
+                    "",
+                    !file_busy && can_copy_artwork,
+                    CopyAsSvg,
+                ))
+                .child(menu_item(
+                    "Copy as PNG",
+                    "",
+                    !file_busy && can_copy_artwork,
+                    CopyAsPng,
+                ))
+            },
+        )
+        .when(cfg!(target_os = "macos"), |menu| {
+            menu.child(menu_item(
+                "Copy as WebP",
+                "",
+                !file_busy && can_copy_artwork,
+                CopyAsWebP,
+            ))
+        })
         .when(!recent_items.is_empty(), |menu| {
             menu.child(menu_section("Recent")).children(recent_items)
         })

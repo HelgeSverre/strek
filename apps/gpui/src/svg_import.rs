@@ -11,6 +11,12 @@ use resvg::{tiny_skia, usvg};
 
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 const MAX_XML_NODES: u32 = 200_000;
+const MAX_SVG_NESTING_DEPTH: usize = 128;
+const MAX_GEOMETRY_ATTRIBUTE_BYTES: usize = 512 * 1024;
+const MAX_TOTAL_GEOMETRY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DOCUMENT_NODES: usize = 100_000;
+const MAX_PATH_SEGMENTS: usize = 100_000;
+const MAX_TOTAL_PATH_SEGMENTS: usize = 250_000;
 
 /// Failure while converting an SVG into Strek's editable document model.
 #[derive(Debug)]
@@ -27,6 +33,10 @@ pub(crate) enum SvgImportError {
         position: Option<roxmltree::TextPos>,
     },
     Parse(usvg::Error),
+    Complexity {
+        resource: &'static str,
+        limit: usize,
+    },
     InvalidGeometry,
     Empty,
     InvalidDocument(DocumentValidationError),
@@ -54,6 +64,9 @@ impl fmt::Display for SvgImportError {
                 Ok(())
             }
             Self::Parse(source) => write!(formatter, "could not interpret SVG geometry: {source}"),
+            Self::Complexity { resource, limit } => {
+                write!(formatter, "the SVG exceeds the supported {resource} limit ({limit})")
+            }
             Self::InvalidGeometry => write!(
                 formatter,
                 "the SVG contains non-finite or non-invertible geometry"
@@ -78,6 +91,7 @@ impl Error for SvgImportError {
             Self::InvalidRoot
             | Self::UnsupportedElement { .. }
             | Self::UnsupportedFeature { .. }
+            | Self::Complexity { .. }
             | Self::InvalidGeometry
             | Self::Empty
             | Self::InternalStructure => None,
@@ -99,25 +113,29 @@ pub(crate) fn import_svg(svg: &str, document_name: &str) -> Result<Document, Svg
 
     let tree =
         usvg::Tree::from_xmltree(&xml, &usvg::Options::default()).map_err(SvgImportError::Parse)?;
-    validate_group(tree.root())?;
+    validate_group(tree.root(), 0)?;
 
     let mut document = Document::new();
     let root_group = Node::group(non_empty_name(document_name, || "Imported SVG".to_owned()))
-        .with_transform(import_transform(tree.root().transform())?)
-        .with_style(group_style(tree.root()));
+        .with_transform(import_transform(tree.root().transform())?);
     let import_root = document
         .add_child(document.root, root_group)
         .ok_or(SvgImportError::InternalStructure)?;
-    let mut names = GeneratedNames::default();
+    let mut state = ImportState {
+        // Include the native document root and the imported SVG root group.
+        nodes: 2,
+        ..ImportState::default()
+    };
     append_children(
         &mut document,
         import_root,
         tree.root(),
         tree.root().abs_transform(),
-        &mut names,
+        0,
+        &mut state,
     )?;
 
-    if names.paths == 0 {
+    if state.paths == 0 {
         return Err(SvgImportError::Empty);
     }
     document
@@ -134,7 +152,16 @@ fn validate_source(document: &roxmltree::Document<'_>) -> Result<(), SvgImportEr
         return Err(SvgImportError::InvalidRoot);
     }
 
-    for element in document.descendants().filter(roxmltree::Node::is_element) {
+    let mut stack = vec![(root, 0_usize)];
+    let mut geometry_bytes = 0_usize;
+    while let Some((element, depth)) = stack.pop() {
+        if depth > MAX_SVG_NESTING_DEPTH {
+            return Err(SvgImportError::Complexity {
+                resource: "nesting depth",
+                limit: MAX_SVG_NESTING_DEPTH,
+            });
+        }
+
         let name = element.tag_name().name();
         let supported_namespace =
             matches!(element.tag_name().namespace(), None | Some(SVG_NAMESPACE));
@@ -166,6 +193,31 @@ fn validate_source(document: &roxmltree::Document<'_>) -> Result<(), SvgImportEr
         }
 
         validate_feature_attributes(document, element)?;
+
+        for attribute in element.attributes() {
+            if matches!(attribute.name(), "d" | "points") {
+                let bytes = attribute.value().len();
+                if bytes > MAX_GEOMETRY_ATTRIBUTE_BYTES {
+                    return Err(SvgImportError::Complexity {
+                        resource: "bytes in one geometry attribute",
+                        limit: MAX_GEOMETRY_ATTRIBUTE_BYTES,
+                    });
+                }
+                geometry_bytes = geometry_bytes.saturating_add(bytes);
+                if geometry_bytes > MAX_TOTAL_GEOMETRY_BYTES {
+                    return Err(SvgImportError::Complexity {
+                        resource: "total geometry bytes",
+                        limit: MAX_TOTAL_GEOMETRY_BYTES,
+                    });
+                }
+            }
+        }
+
+        let children = element
+            .children()
+            .filter(roxmltree::Node::is_element)
+            .collect::<Vec<_>>();
+        stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
     }
     Ok(())
 }
@@ -236,6 +288,7 @@ fn unsupported_presentation_feature(property: &str, value: &str) -> Option<&'sta
         "paint-order" if value.split_whitespace().next() == Some("stroke") => {
             Some("stroke-before-fill paint order")
         }
+        "opacity" if !is_full_opacity(&value) => Some("object/group opacity"),
         "fill" | "stroke"
             if value.starts_with("var(")
                 || matches!(value.as_str(), "context-fill" | "context-stroke") =>
@@ -246,11 +299,33 @@ fn unsupported_presentation_feature(property: &str, value: &str) -> Option<&'sta
     }
 }
 
+fn is_full_opacity(value: &str) -> bool {
+    if let Some(percentage) = value.strip_suffix('%') {
+        percentage
+            .trim()
+            .parse::<f32>()
+            .is_ok_and(|opacity| (opacity - 100.0).abs() <= f32::EPSILON)
+    } else {
+        value
+            .parse::<f32>()
+            .is_ok_and(|opacity| (opacity - 1.0).abs() <= f32::EPSILON)
+    }
+}
+
 fn references_paint_server(value: &str) -> bool {
     value.trim_start().to_ascii_lowercase().starts_with("url(")
 }
 
-fn validate_group(group: &usvg::Group) -> Result<(), SvgImportError> {
+fn validate_group(group: &usvg::Group, depth: usize) -> Result<(), SvgImportError> {
+    if depth > MAX_SVG_NESTING_DEPTH {
+        return Err(SvgImportError::Complexity {
+            resource: "converted nesting depth",
+            limit: MAX_SVG_NESTING_DEPTH,
+        });
+    }
+    if (group.opacity().get() - 1.0).abs() > f32::EPSILON {
+        return Err(unsupported_tree_feature("object/group opacity", group.id()));
+    }
     if group.clip_path().is_some() {
         return Err(unsupported_tree_feature("clipping", group.id()));
     }
@@ -270,7 +345,7 @@ fn validate_group(group: &usvg::Group) -> Result<(), SvgImportError> {
 
     for node in group.children() {
         match node {
-            usvg::Node::Group(child) => validate_group(child)?,
+            usvg::Node::Group(child) => validate_group(child, depth + 1)?,
             usvg::Node::Path(path) => validate_path(path)?,
             usvg::Node::Image(_) => {
                 return Err(unsupported_tree_feature("images", node.id()));
@@ -339,9 +414,11 @@ fn unsupported_tree_feature(feature: &str, id: &str) -> SvgImportError {
 }
 
 #[derive(Default)]
-struct GeneratedNames {
+struct ImportState {
     groups: usize,
     paths: usize,
+    nodes: usize,
+    total_path_segments: usize,
 }
 
 fn append_children(
@@ -349,17 +426,31 @@ fn append_children(
     parent: NodeId,
     group: &usvg::Group,
     parent_absolute: tiny_skia::Transform,
-    names: &mut GeneratedNames,
+    depth: usize,
+    state: &mut ImportState,
 ) -> Result<(), SvgImportError> {
+    if depth > MAX_SVG_NESTING_DEPTH {
+        return Err(SvgImportError::Complexity {
+            resource: "converted nesting depth",
+            limit: MAX_SVG_NESTING_DEPTH,
+        });
+    }
+
     for child in group.children() {
+        state.nodes += 1;
+        if state.nodes > MAX_DOCUMENT_NODES {
+            return Err(SvgImportError::Complexity {
+                resource: "document nodes",
+                limit: MAX_DOCUMENT_NODES,
+            });
+        }
         match child {
             usvg::Node::Group(child_group) => {
-                names.groups += 1;
+                state.groups += 1;
                 let node = Node::group(non_empty_name(child_group.id(), || {
-                    format!("Group {}", names.groups)
+                    format!("Group {}", state.groups)
                 }))
-                .with_transform(import_transform(child_group.transform())?)
-                .with_style(group_style(child_group));
+                .with_transform(import_transform(child_group.transform())?);
                 let child_id = document
                     .add_child(parent, node)
                     .ok_or(SvgImportError::InternalStructure)?;
@@ -368,14 +459,15 @@ fn append_children(
                     child_id,
                     child_group,
                     child_group.abs_transform(),
-                    names,
+                    depth + 1,
+                    state,
                 )?;
             }
             usvg::Node::Path(path) => {
-                names.paths += 1;
+                state.paths += 1;
                 let node = Node::shape(
-                    non_empty_name(path.id(), || format!("Path {}", names.paths)),
-                    import_path_data(path.data())?,
+                    non_empty_name(path.id(), || format!("Path {}", state.paths)),
+                    import_path_data(path.data(), state)?,
                 )
                 .with_transform(relative_transform(parent_absolute, path.abs_transform())?)
                 .with_style(import_path_style(path)?)
@@ -390,14 +482,6 @@ fn append_children(
         }
     }
     Ok(())
-}
-
-fn group_style(group: &usvg::Group) -> Style {
-    Style {
-        fill: None,
-        stroke: None,
-        opacity: group.opacity().get(),
-    }
 }
 
 fn import_path_style(path: &usvg::Path) -> Result<Style, SvgImportError> {
@@ -433,11 +517,29 @@ fn import_paint(paint: &usvg::Paint, alpha: f32) -> Result<Paint, SvgImportError
     ))
 }
 
-fn import_path_data(path: &tiny_skia::Path) -> Result<PathData, SvgImportError> {
+fn import_path_data(
+    path: &tiny_skia::Path,
+    state: &mut ImportState,
+) -> Result<PathData, SvgImportError> {
     let mut commands = Vec::new();
     let mut current = Vec2::ZERO;
+    let mut path_segments = 0_usize;
 
     for segment in path.segments() {
+        path_segments += 1;
+        if path_segments > MAX_PATH_SEGMENTS {
+            return Err(SvgImportError::Complexity {
+                resource: "segments in one path",
+                limit: MAX_PATH_SEGMENTS,
+            });
+        }
+        state.total_path_segments += 1;
+        if state.total_path_segments > MAX_TOTAL_PATH_SEGMENTS {
+            return Err(SvgImportError::Complexity {
+                resource: "total path segments",
+                limit: MAX_TOTAL_PATH_SEGMENTS,
+            });
+        }
         match segment {
             tiny_skia::PathSegment::MoveTo(point) => {
                 current = import_point(point)?;
@@ -525,10 +627,10 @@ mod tests {
     fn imports_editable_shapes_solid_styles_and_group_transforms() {
         let mut document = import_svg(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80" viewBox="0 0 100 80">
-                <g id="logo" transform="translate(10 20)" opacity="0.5">
+                <g id="logo" transform="translate(10 20)">
                     <rect id="box" x="1" y="2" width="30" height="20"
                           fill="#ff0000" fill-opacity="0.25"
-                          stroke="#0000ff" stroke-width="2"/>
+                          stroke="#0000ff" stroke-opacity="0.75" stroke-width="2"/>
                     <path id="curve" d="M 0 0 Q 10 20 20 0" fill="none" stroke="#00ff00"/>
                 </g>
             </svg>"##,
@@ -549,12 +651,8 @@ mod tests {
         assert_eq!(box_shape.style.fill, Some(Paint::rgba(1.0, 0.0, 0.0, 0.25)));
         assert_eq!(
             box_shape.style.stroke,
-            Some(Stroke::new(2.0, Paint::rgb(0.0, 0.0, 1.0)))
+            Some(Stroke::new(2.0, Paint::rgba(0.0, 0.0, 1.0, 0.75)))
         );
-        assert!(document
-            .descendants(document.root)
-            .filter_map(|id| document.get(id))
-            .any(|node| node.name == "logo" && node.style.opacity == 0.5));
 
         let box_id = document
             .descendants(document.root)
@@ -648,6 +746,76 @@ mod tests {
         let message = dashed.to_string();
         assert!(message.contains("dashed strokes"));
         assert!(message.contains("2:"));
+    }
+
+    #[test]
+    fn rejects_object_opacity_but_preserves_paint_opacity() {
+        let error = import_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                <g opacity="0.5"><rect width="10" height="10" fill="#f00"/></g>
+            </svg>"##,
+            "opacity.svg",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("object/group opacity"));
+    }
+
+    #[test]
+    fn rejects_excessive_nesting_before_geometry_conversion() {
+        let mut svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\">");
+        svg.push_str(&"<g>".repeat(MAX_SVG_NESTING_DEPTH + 1));
+        svg.push_str("<rect width=\"1\" height=\"1\"/>");
+        svg.push_str(&"</g>".repeat(MAX_SVG_NESTING_DEPTH + 1));
+        svg.push_str("</svg>");
+
+        let error = import_svg(&svg, "deep.svg").unwrap_err();
+
+        assert!(matches!(
+            error,
+            SvgImportError::Complexity {
+                resource: "nesting depth",
+                limit: MAX_SVG_NESTING_DEPTH,
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_geometry_attributes_before_usvg_parsing() {
+        let path_data = "M0 0 ".repeat(MAX_GEOMETRY_ATTRIBUTE_BYTES / 5 + 1);
+        let svg =
+            format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"{path_data}\"/></svg>");
+
+        let error = import_svg(&svg, "large.svg").unwrap_err();
+
+        assert!(matches!(
+            error,
+            SvgImportError::Complexity {
+                resource: "bytes in one geometry attribute",
+                limit: MAX_GEOMETRY_ATTRIBUTE_BYTES,
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_segments_during_native_path_conversion() {
+        let mut builder = tiny_skia::PathBuilder::new();
+        builder.move_to(0.0, 0.0);
+        for x in 0..MAX_PATH_SEGMENTS {
+            builder.line_to(x as f32, 1.0);
+        }
+        let path = builder.finish().unwrap();
+        let mut state = ImportState::default();
+
+        let error = import_path_data(&path, &mut state).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SvgImportError::Complexity {
+                resource: "segments in one path",
+                limit: MAX_PATH_SEGMENTS,
+            }
+        ));
     }
 
     #[test]
