@@ -3,6 +3,7 @@
 //! Uses Zed's GPUI framework for high-performance GPU-accelerated rendering.
 
 mod assets;
+mod automation;
 mod canvas;
 mod command_palette;
 mod commands;
@@ -10,6 +11,7 @@ mod document_io;
 mod export;
 mod layer_name_input;
 mod layer_panel;
+mod mcp;
 mod properties_panel;
 mod status_bar;
 mod text_input;
@@ -258,6 +260,211 @@ impl Strek {
             canvas_input_bounds: None,
             text_image_cache: canvas::TextImageCache::default(),
             did_focus: false,
+        }
+    }
+
+    fn start_automation(
+        &mut self,
+        mut requests: tokio::sync::mpsc::UnboundedReceiver<automation::PendingRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |editor, cx| {
+            while let Some(pending) = requests.recv().await {
+                if editor
+                    .update_in(cx, |editor, window, cx| {
+                        pending
+                            .respond_with(|request| editor.handle_automation(request, window, cx));
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_automation(
+        &mut self,
+        request: automation::AutomationRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> automation::AutomationResponse {
+        use automation::{AutomationRequest, PointerPhase, UiTarget};
+
+        let result = match request {
+            AutomationRequest::State => Ok("state read".to_owned()),
+            AutomationRequest::Action { id } => {
+                let Some(spec) = commands::command(&id) else {
+                    return automation::AutomationResponse::error(
+                        self.automation_state(window),
+                        format!("unknown command `{id}`"),
+                    );
+                };
+                let commands::CommandTarget::Editor(action) = spec.target else {
+                    return automation::AutomationResponse::error(
+                        self.automation_state(window),
+                        format!("`{id}` is not an editor action; use the dedicated UI tools"),
+                    );
+                };
+                if !self.editor.can_execute(action) {
+                    Err(format!("command `{id}` is disabled in the current state"))
+                } else {
+                    if self.command_palette.take().is_some() {
+                        self.focus_handle.focus(window);
+                    }
+                    self.execute_editor_action(action, cx);
+                    Ok(format!("performed `{id}`"))
+                }
+            }
+            AutomationRequest::Pointer {
+                phase,
+                x,
+                y,
+                button,
+                modifiers,
+            } => {
+                if self.command_palette.is_some()
+                    || self.open_menu.is_some()
+                    || self.layer_context_menu.is_some()
+                {
+                    Err("dismiss open menus and overlays before sending canvas input".to_owned())
+                } else if !x.is_finite() || !y.is_finite() {
+                    Err("pointer coordinates must be finite".to_owned())
+                } else if matches!(phase, PointerPhase::Down)
+                    && self.canvas_input_bounds.is_none_or(|bounds| {
+                        x < 0.0 || y < 0.0 || x >= bounds.size.width.0 || y >= bounds.size.height.0
+                    })
+                {
+                    Err("pointer down must be inside the canvas bounds from get_state".to_owned())
+                } else {
+                    if matches!(phase, PointerPhase::Down) {
+                        self.property_color_input = None;
+                        self.zoom_input = None;
+                        self.focus_handle.focus(window);
+                    }
+                    let event = match phase {
+                        PointerPhase::Down => editor_core::InputEvent::PointerDown {
+                            position: glam::Vec2::new(x, y),
+                            button: automation_mouse_button(button),
+                            modifiers: automation_modifiers(modifiers),
+                        },
+                        PointerPhase::Move => editor_core::InputEvent::PointerMove {
+                            position: glam::Vec2::new(x, y),
+                            modifiers: automation_modifiers(modifiers),
+                        },
+                        PointerPhase::Up => editor_core::InputEvent::PointerUp {
+                            position: glam::Vec2::new(x, y),
+                            button: automation_mouse_button(button),
+                            modifiers: automation_modifiers(modifiers),
+                        },
+                    };
+                    let effects = self.editor.handle_event(event);
+                    if let Some(cursor) = effects.cursor {
+                        self.current_cursor = convert_cursor(cursor);
+                    }
+                    if effects.redraw {
+                        cx.notify();
+                    }
+                    Ok(format!("sent pointer {phase:?}"))
+                }
+            }
+            AutomationRequest::Text { text } => {
+                if self.editor.text_input_snapshot().is_none() {
+                    Err("Strek is not editing text".to_owned())
+                } else if self.editor.replace_text(None, &text) {
+                    cx.notify();
+                    Ok("inserted text".to_owned())
+                } else {
+                    Err("text did not change".to_owned())
+                }
+            }
+            AutomationRequest::SetUi { target, visible } => {
+                match target {
+                    UiTarget::MainMenu => {
+                        self.dismiss_menus();
+                        if visible {
+                            self.command_palette = None;
+                            self.open_menu = Some(toolbar::MenuKind::Main);
+                        }
+                        cx.notify();
+                    }
+                    UiTarget::CommandPalette => {
+                        if self.command_palette.is_some() != visible {
+                            self.show_command_palette(&ShowCommandPalette, window, cx);
+                        }
+                    }
+                    UiTarget::LayersPanel => {
+                        if self.show_layers_panel != visible {
+                            self.toggle_layer_panel(&ToggleLayerPanel, window, cx);
+                        }
+                    }
+                    UiTarget::DesignPanel => {
+                        if self.show_design_panel != visible {
+                            self.toggle_design_panel(&ToggleDesignPanel, window, cx);
+                        }
+                    }
+                }
+                Ok(format!("set {target:?} visibility to {visible}"))
+            }
+            AutomationRequest::Activate => {
+                cx.activate(true);
+                window.activate_window();
+                self.focus_handle.focus(window);
+                Ok("activated Strek".to_owned())
+            }
+        };
+
+        let state = self.automation_state(window);
+        match result {
+            Ok(message) => automation::AutomationResponse::success(state, message),
+            Err(message) => automation::AutomationResponse::error(state, message),
+        }
+    }
+
+    fn automation_state(&self, window: &Window) -> automation::AutomationState {
+        let bounds = window.bounds();
+        let view = self.editor.view();
+        let selected_layers = self
+            .editor
+            .selection()
+            .iter()
+            .filter_map(|id| self.editor.document().get(id).map(|node| node.name.clone()))
+            .collect();
+        let actions = commands::COMMANDS
+            .iter()
+            .filter_map(|spec| {
+                let commands::CommandTarget::Editor(action) = spec.target else {
+                    return None;
+                };
+                Some(automation::AutomationAction {
+                    id: spec.id.to_owned(),
+                    label: spec.label.to_owned(),
+                    enabled: self.editor.can_execute(action),
+                })
+            })
+            .collect();
+
+        automation::AutomationState {
+            document: self.document_name(),
+            dirty: self.editor.is_dirty(),
+            tool: automation_tool_name(self.editor.tool).to_owned(),
+            interaction: automation_interaction_name(self.editor.interaction_kind()).to_owned(),
+            selection_count: self.editor.selection().len(),
+            selected_layers,
+            zoom: view.zoom,
+            pan: automation::AutomationPoint {
+                x: view.pan.x,
+                y: view.pan.y,
+            },
+            window: automation_bounds(bounds),
+            canvas: self.canvas_input_bounds.map(automation_bounds),
+            layers_panel_visible: self.show_layers_panel,
+            design_panel_visible: self.show_design_panel,
+            main_menu_open: self.open_menu == Some(toolbar::MenuKind::Main),
+            command_palette_open: self.command_palette.is_some(),
+            actions,
         }
     }
 
@@ -3160,6 +3367,62 @@ fn clamp_panel_width(requested: f32, opposite_width: f32, window_width: f32) -> 
         .clamp(layer_panel::MIN_PANEL_WIDTH, maximum_width)
 }
 
+fn automation_bounds(bounds: Bounds<gpui::Pixels>) -> automation::AutomationBounds {
+    automation::AutomationBounds {
+        x: bounds.origin.x.0,
+        y: bounds.origin.y.0,
+        width: bounds.size.width.0,
+        height: bounds.size.height.0,
+    }
+}
+
+fn automation_tool_name(tool: editor_core::Tool) -> &'static str {
+    match tool {
+        editor_core::Tool::Select => "select",
+        editor_core::Tool::Frame => "frame",
+        editor_core::Tool::Rectangle => "rectangle",
+        editor_core::Tool::Ellipse => "ellipse",
+        editor_core::Tool::Line => "line",
+        editor_core::Tool::Pen => "pen",
+        editor_core::Tool::Text => "text",
+        editor_core::Tool::VectorEdit => "vector_edit",
+    }
+}
+
+fn automation_interaction_name(interaction: editor_core::InteractionKind) -> &'static str {
+    match interaction {
+        editor_core::InteractionKind::Idle => "idle",
+        editor_core::InteractionKind::Moving => "moving",
+        editor_core::InteractionKind::Resizing => "resizing",
+        editor_core::InteractionKind::Rotating => "rotating",
+        editor_core::InteractionKind::Marquee => "marquee",
+        editor_core::InteractionKind::CreatingShape => "creating_shape",
+        editor_core::InteractionKind::CreatingFrame => "creating_frame",
+        editor_core::InteractionKind::Pen => "pen",
+        editor_core::InteractionKind::CreatingText => "creating_text",
+        editor_core::InteractionKind::TextEditing => "text_editing",
+        editor_core::InteractionKind::VectorEditing => "vector_editing",
+        editor_core::InteractionKind::Panning => "panning",
+    }
+}
+
+fn automation_mouse_button(button: automation::PointerButton) -> editor_core::MouseButton {
+    match button {
+        automation::PointerButton::Left => editor_core::MouseButton::Left,
+        automation::PointerButton::Middle => editor_core::MouseButton::Middle,
+        automation::PointerButton::Right => editor_core::MouseButton::Right,
+    }
+}
+
+fn automation_modifiers(modifiers: automation::AutomationModifiers) -> editor_core::Modifiers {
+    editor_core::Modifiers {
+        shift: modifiers.shift,
+        ctrl: modifiers.control,
+        alt: modifiers.alt,
+        meta: modifiers.command,
+    }
+}
+
 fn convert_modifiers(mods: &gpui::Modifiers) -> editor_core::Modifiers {
     editor_core::Modifiers {
         shift: mods.shift,
@@ -3213,11 +3476,40 @@ fn register_keybindings(cx: &mut App, keymap: &commands::Keymap) {
 }
 
 fn main() {
+    let mut args = env::args().skip(1);
+    match args.next().as_deref() {
+        Some("automate") => {
+            if let Err(error) = automation::run_cli(args) {
+                eprintln!("strek automate: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("mcp") => {
+            if let Err(error) = mcp::run() {
+                eprintln!("strek mcp: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
+    }
+
     env_logger::init();
+    let automation_requests = match automation::start_server() {
+        Ok(requests) => Some(requests),
+        Err(error) => {
+            log::warn!(
+                "automation unavailable at {}: {error}",
+                automation::socket_path_display()
+            );
+            None
+        }
+    };
 
     Application::new()
         .with_assets(assets::Assets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             let keymap = commands::Keymap::load();
             register_keybindings(cx, &keymap);
             command_palette::register_keybindings(cx);
@@ -3260,6 +3552,7 @@ fn main() {
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
 
+            let mut automation_requests = automation_requests;
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -3267,6 +3560,11 @@ fn main() {
                 },
                 move |window, cx| {
                     let editor = cx.new(|editor_cx| Strek::new(keymap.clone(), editor_cx));
+                    if let Some(requests) = automation_requests.take() {
+                        editor.update(cx, |editor, cx| {
+                            editor.start_automation(requests, window, cx)
+                        });
+                    }
                     let weak_editor = editor.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         weak_editor

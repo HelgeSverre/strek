@@ -56,6 +56,60 @@ first release, install Strek from Homebrew:
 brew install helgesverre/tap/strek
 ```
 
+## Cursor-free automation
+
+A running Strek window exposes its existing command and pointer systems over a
+per-user Unix socket. The installed `strek` binary is also the client, so shell
+scripts and AppleScript can inspect and drive the editor without moving the
+system cursor:
+
+```sh
+strek automate state
+strek automate action tool.rectangle
+strek automate pointer down 120 100
+strek automate pointer move 360 260
+strek automate pointer up 360 260
+strek automate screenshot /tmp/strek.png
+```
+
+Pointer coordinates are canvas-local pixels. `state` reports the current
+window and canvas bounds, selected layers, zoom, open panels, and the complete
+list of editor command IDs with their enabled state.
+
+The packaged app includes `Strek Automation.applescript` in its Resources
+directory. It exposes `strekState`, `strekAction`, `strekPointer`, `strekText`,
+`strekUi`, and `strekScreenshot` handlers. The same commands can be called
+directly from any AppleScript:
+
+```applescript
+do shell script "/opt/homebrew/bin/strek automate action tool.rectangle"
+do shell script "/opt/homebrew/bin/strek automate screenshot /tmp/strek.png"
+```
+
+The bundled helper can also be run directly with `osascript`:
+
+```sh
+osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" state
+```
+
+Strek also embeds an MCP server using the official Rust MCP SDK. Configure an
+MCP client to launch the same binary in stdio mode:
+
+```json
+{
+  "mcpServers": {
+    "strek": {
+      "command": "/opt/homebrew/bin/strek",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The server exposes state, editor actions, canvas pointer events, text input,
+panel/overlay visibility, and PNG window screenshots. Strek must already be
+running before those tools are called.
+
 ## Keyboard and pointer controls
 
 `Primary` means `⌘` on macOS and `Ctrl` on other platforms.

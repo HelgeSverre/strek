@@ -10,6 +10,7 @@ homepage = "https://github.com/HelgeSverre/strek"
 readme = "../../README.md"
 
 [dependencies]
+base64 = "0.22"
 editor_core = { path = "../../crates/editor_core" }
 editor_render = { path = "../../crates/editor_render" }
 render_svg = { path = "../../crates/render_svg" }
@@ -20,8 +21,12 @@ env_logger = "0.11"
 image = "0.25"
 lyon = "1.0"
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+rmcp = { version = "3.0.1", features = ["transport-io"] }
+schemars = "1"
+serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = "1"
+tokio = { version = "1", features = ["io-std", "rt", "sync"] }
 unicode-segmentation = { workspace = true }
 
 [[bin]]
@@ -33,6 +38,7 @@ before-packaging-command = "cargo build --release --locked -p strek"
 product-name = "Strek"
 identifier = "no.helgesverre.strek"
 icons = ["assets/app-icon.icns"]
+resources = [{ src = "assets/Strek Automation.applescript", target = "Contents/Resources/Strek Automation.applescript" }]
 license-file = "../../LICENSE"
 formats = ["app"]
 
