@@ -89,6 +89,10 @@ impl AffineTextFrameBudget {
         self.remaining_pixels = self.remaining_pixels.saturating_sub(limit);
         limit
     }
+
+    fn skip_item(&mut self) {
+        self.remaining_items = self.remaining_items.saturating_sub(1);
+    }
 }
 
 impl TextImageCache {
@@ -668,17 +672,20 @@ fn paint_affine_text(
     transform: &Affine2,
     opacity: f32,
 ) {
-    let raster_pixel_limit = frame_budget.take_raster_limit();
     let Some(layout) = shape_text_layout(text, window) else {
+        frame_budget.skip_item();
         return;
     };
     let Some(rendered) = affine_text_svg(text, &layout, transform, opacity) else {
+        frame_budget.skip_item();
         return;
     };
     let canvas_size = Vec2::new(canvas_bounds.size.width.0, canvas_bounds.size.height.0);
     if !affine_text_intersects_canvas(rendered.min, rendered.size, canvas_size) {
+        frame_budget.skip_item();
         return;
     }
+    let raster_pixel_limit = frame_budget.take_raster_limit();
     let raster_scale = window.scale_factor() * 2.0;
     let Some((raster_width, raster_height)) = affine_text_raster_dimensions(
         rendered.size,
@@ -1420,5 +1427,18 @@ mod tests {
         assert_eq!(budget.take_raster_limit(), 4);
         assert_eq!(budget.remaining_pixels, 0);
         assert_eq!(budget.take_raster_limit(), 1);
+    }
+
+    #[test]
+    fn affine_text_frame_budget_skips_items_without_consuming_pixels() {
+        let mut budget = AffineTextFrameBudget {
+            remaining_items: 3,
+            remaining_pixels: 10,
+        };
+
+        budget.skip_item();
+
+        assert_eq!(budget.take_raster_limit(), 5);
+        assert_eq!(budget.remaining_pixels, 5);
     }
 }
