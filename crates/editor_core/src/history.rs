@@ -139,6 +139,19 @@ impl History {
         self.saved_revision = self.current_revision;
     }
 
+    /// Mark a specific revision as persisted.
+    ///
+    /// This is used by asynchronous saves so edits made while a write is in
+    /// flight remain dirty when that older snapshot finishes saving.
+    pub fn mark_revision_saved(&mut self, revision: u64) {
+        self.saved_revision = revision;
+    }
+
+    /// The revision represented by the current document state.
+    pub fn current_revision(&self) -> u64 {
+        self.current_revision
+    }
+
     /// Whether the current document revision differs from the saved revision.
     pub fn is_dirty(&self) -> bool {
         self.current_revision != self.saved_revision
@@ -308,5 +321,40 @@ mod tests {
         history.push(branch);
         assert!(history.is_dirty());
         assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn async_save_completion_does_not_clean_newer_edits() {
+        let mut doc = Document::new();
+        let mut history = History::new();
+        let id = doc
+            .add_child(
+                doc.root,
+                Node::shape("Rect", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+
+        let first = Command::new("Move once").with_patch(Patch::SetTransform {
+            id,
+            before: Affine2::IDENTITY,
+            after: Affine2::from_translation(Vec2::new(10.0, 0.0)),
+        });
+        first.apply(&mut doc);
+        history.push(first);
+        let saving_revision = history.current_revision();
+
+        let second = Command::new("Move twice").with_patch(Patch::SetTransform {
+            id,
+            before: Affine2::from_translation(Vec2::new(10.0, 0.0)),
+            after: Affine2::from_translation(Vec2::new(20.0, 0.0)),
+        });
+        second.apply(&mut doc);
+        history.push(second);
+
+        history.mark_revision_saved(saving_revision);
+        assert!(history.is_dirty());
+
+        assert!(history.undo(&mut doc));
+        assert!(!history.is_dirty());
     }
 }

@@ -959,6 +959,16 @@ impl Editor {
         self.history.mark_saved();
     }
 
+    /// Mark a specific document revision as persisted.
+    pub fn mark_revision_saved(&mut self, revision: u64) {
+        self.history.mark_revision_saved(revision);
+    }
+
+    /// The revision represented by the current document state.
+    pub fn current_revision(&self) -> u64 {
+        self.history.current_revision()
+    }
+
     /// Whether the current document differs from its saved revision.
     pub fn is_dirty(&self) -> bool {
         self.history.is_dirty()
