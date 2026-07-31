@@ -14,7 +14,8 @@ use image::{ExtendedColorType, ImageEncoder};
 use crate::{canvas, document_io};
 
 const MAX_RASTER_DIMENSION: u32 = 16_384;
-const MAX_RASTER_PIXELS: u64 = 64_000_000;
+// Keep the base RGBA pixmap below roughly 64 MB before encoder working buffers.
+const MAX_RASTER_PIXELS: u64 = 16_000_000;
 const JPEG_QUALITY: u8 = 92;
 
 static OUTLINE_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
@@ -154,7 +155,7 @@ fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, E
     }
 
     let (width, height) = checked_raster_dimensions(size)?;
-    let pixmap = canvas::render_svg_pixmap(svg.as_bytes(), width, height)
+    let mut pixmap = canvas::render_svg_pixmap(svg.as_bytes(), width, height)
         .ok_or_else(|| ExportError::Rasterize("the SVG renderer rejected the data".into()))?;
 
     match format {
@@ -165,7 +166,7 @@ fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, E
             .encode_png()
             .map_err(|error| encoding_error(format, error)),
         ExportFormat::Jpeg => encode_jpeg(pixmap.data(), width, height),
-        ExportFormat::WebP => encode_webp(pixmap.data(), width, height),
+        ExportFormat::WebP => encode_webp(pixmap.data_mut(), width, height),
     }
 }
 
@@ -271,13 +272,16 @@ fn encode_jpeg(premultiplied_rgba: &[u8], width: u32, height: u32) -> Result<Vec
     Ok(encoded)
 }
 
-fn encode_webp(premultiplied_rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ExportError> {
-    let mut rgba = premultiplied_rgba.to_vec();
-    unpremultiply_rgba(&mut rgba);
+fn encode_webp(
+    premultiplied_rgba: &mut [u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, ExportError> {
+    unpremultiply_rgba(premultiplied_rgba);
 
     let mut encoded = Vec::new();
     WebPEncoder::new_lossless(&mut encoded)
-        .write_image(&rgba, width, height, ExtendedColorType::Rgba8)
+        .write_image(premultiplied_rgba, width, height, ExtendedColorType::Rgba8)
         .map_err(|error| encoding_error(ExportFormat::WebP, error))?;
     Ok(encoded)
 }
@@ -478,5 +482,20 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn raster_pixel_limit_accepts_the_boundary_and_rejects_the_next_row() {
+        assert_eq!(
+            checked_raster_dimensions(Vec2::splat(4_000.0)).unwrap(),
+            (4_000, 4_000)
+        );
+        assert!(matches!(
+            checked_raster_dimensions(Vec2::new(4_000.0, 4_001.0)),
+            Err(ExportError::RasterTooLarge {
+                width: 4_000,
+                height: 4_001
+            })
+        ));
     }
 }
