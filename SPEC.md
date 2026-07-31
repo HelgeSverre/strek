@@ -53,7 +53,7 @@ The editor follows a three-layer architecture with strict separation of concerns
 │                    RENDER BACKENDS                              │
 │  ┌─────────────────────┐       ┌─────────────────────┐          │
 │  │    render_wgpu      │       │     render_svg      │          │
-│  │  (GPU triangles)    │       │  (SVG string/DOM)   │          │
+│  │  (GPU triangles)    │       │    (SVG string)     │          │
 │  └─────────────────────┘       └─────────────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -72,7 +72,7 @@ The editor follows a three-layer architecture with strict separation of concerns
 - **Snapping/alignment**: Guides, distribute, align operations
 - **Transactions**: Interactive edit sessions (drag start → updates → commit)
 
-#### B. Edit Layer (`editor_core::edit`)
+#### B. Edit Layer (`editor_core::editor`)
 - Intent-to-mutation translation
 - Tool state machines
 - Interactive editing sessions
@@ -97,27 +97,24 @@ vector-editor/
 │   ├── editor_core/              # Document + tools + undo + snapping + layout
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs            # Editor entry point
-│   │       ├── document.rs       # Document struct, node storage
+│   │       ├── lib.rs            # Document graph, queries, serialization
+│   │       ├── editor.rs         # Editor state machines and operations
+│   │       ├── action.rs         # Core action catalog
 │   │       ├── node.rs           # Node types and properties
 │   │       ├── style.rs          # Paint, stroke, style
-│   │       ├── path.rs           # Path commands and data
+│   │       ├── path.rs           # Contours, anchors, and geometry
 │   │       ├── text.rs           # Text data and font spec
 │   │       ├── layout.rs         # Auto-layout types and engine
 │   │       ├── transform.rs      # Affine transforms, view
-│   │       ├── query.rs          # Bounds, hit-test, traversal
 │   │       ├── cache.rs          # Derived data caching
 │   │       ├── selection.rs      # Selection state
-│   │       ├── tools/            # Tool implementations
-│   │       │   ├── mod.rs
-│   │       │   ├── select.rs
-│   │       │   ├── move_tool.rs
-│   │       │   └── text_edit.rs
 │   │       ├── command.rs        # Command/patch system
 │   │       ├── history.rs        # Undo/redo stack
 │   │       ├── input.rs          # Platform-agnostic input events
-│   │       ├── effects.rs        # Output effects (redraw, cursor)
-│   │       └── view.rs           # Camera/viewport state
+│   │       ├── layers.rs         # Layer-panel projection
+│   │       ├── render.rs         # Document-to-display-list conversion
+│   │       ├── snap.rs           # Snapping and alignment
+│   │       └── transaction.rs    # Reversible pointer transactions
 │   │
 │   ├── editor_render/            # Display list IR (backend-agnostic)
 │   │   ├── Cargo.toml
@@ -129,16 +126,27 @@ vector-editor/
 │   │   └── src/
 │   │       └── lib.rs            # wgpu + lyon tessellation
 │   │
-│   └── render_svg/               # SVG export renderer
-│       ├── Cargo.toml
-│       └── src/
-│           └── lib.rs            # SVG string generation
+│   ├── render_svg/               # SVG export renderer
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── lib.rs            # SVG string generation
+│   │
+│   └── ui/                       # Legacy renderer UI primitives
 │
 └── apps/
     ├── gpui/                     # Primary product UI
     │   ├── Cargo.toml
     │   └── src/
-    │       └── main.rs           # GPUI shell, menus, native input
+    │       ├── main.rs           # GPUI shell and event routing
+    │       ├── canvas.rs         # GPUI display-list renderer
+    │       ├── commands.rs       # Command registry and keymap
+    │       ├── command_palette.rs
+    │       ├── document_io.rs
+    │       ├── export.rs
+    │       ├── layer_panel.rs
+    │       ├── properties_panel.rs
+    │       ├── text_input.rs
+    │       └── toolbar.rs
     │
     └── desktop/                  # Legacy wgpu renderer harness
     │   ├── Cargo.toml
@@ -154,18 +162,20 @@ vector-editor/
 members = [
     "crates/editor_core",
     "crates/editor_render",
-    "crates/render_wgpu",
     "crates/render_svg",
+    "crates/render_wgpu",
+    "crates/ui",
     "apps/desktop",
     "apps/gpui",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-glam = "0.29"
+glam = { version = "0.29", features = ["serde"] }
 slotmap = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+unicode-segmentation = "1.12"
 ```
 
 ---
@@ -641,8 +651,10 @@ pub struct PositionedGlyph {
 ```
 
 **Platform implementations:**
-- Desktop: `rustybuzz`/`harfbuzz` for shaping, custom or `fontdue` for rasterization
-- Web: Browser handles text via SVG `<text>` elements
+- Core: deterministic fallback metrics and line wrapping
+- GPUI: native shaping, caret geometry, IME composition, and rasterization
+- SVG export: resolved line positions serialized as `<text>` elements
+- Legacy wgpu harness: `fontdue` glyph rasterization
 
 ---
 
@@ -1035,7 +1047,7 @@ impl WgpuRenderer {
 
 ### 11.4 SVG Backend (`render_svg`)
 
-For web:
+For file export and interchange:
 
 ```rust
 pub fn to_svg_string(display_list: &DisplayList) -> String {
@@ -1426,267 +1438,122 @@ pub fn export_svg(doc: &Document, frame_id: Option<NodeId>) -> String {
 
 ## 15. Implementation Milestones
 
+Completed items describe the current implementation. Unchecked items are
+intentional product backlog.
+
 ### Milestone 1: Core Foundation
-- [ ] Generational arena with `NodeId`
-- [ ] Document structure with root node
-- [ ] Node types: Group, Shape (PathData)
-- [ ] Basic transform system
-- [ ] DFS traversal (paint order)
-- [ ] World transform computation and caching
+- [x] Generational arena with `NodeId`
+- [x] Document structure with root node
+- [x] Group, frame, shape, and text nodes
+- [x] Affine transform system
+- [x] Paint-order traversal
+- [x] World-transform and bounds caching
 
 ### Milestone 2: Basic Editing
-- [ ] Selection model (single and multi-select)
-- [ ] Hit testing
-- [ ] Move tool with transactions
-- [ ] Patch-based undo/redo
-- [ ] Group/ungroup operations
+- [x] Single, multi, scoped, and marquee selection
+- [x] Geometry-aware hit testing
+- [x] Move, resize, and rotate transactions
+- [x] Patch-based undo/redo
+- [x] Group/ungroup operations
 
 ### Milestone 3: Rendering
-- [ ] DisplayList generation
-- [ ] SVG backend (string output)
-- [ ] Basic wgpu backend (path tessellation)
+- [x] Display-list generation
+- [x] SVG backend
+- [x] wgpu renderer harness
+- [x] GPUI canvas renderer
 
-### Milestone 4: Web Frontend
-- [ ] WASM build setup
-- [ ] Pointer event handling
-- [ ] SVG DOM rendering
-- [ ] requestAnimationFrame loop
+### Milestone 4: GPUI Product Frontend
+- [x] Native application shell
+- [x] Pointer, keyboard, IME, and clipboard routing
+- [x] Layers and design panels
+- [x] Menus, tool rail, command palette, and configurable shortcuts
+- [x] Native open, save, and export dialogs
 
-### Milestone 5: Desktop Frontend
-- [ ] winit event loop
-- [ ] wgpu renderer integration
-- [ ] Cursor management
+### Milestone 5: Legacy Desktop Harness
+- [x] winit event loop
+- [x] wgpu renderer integration
+- [x] Cursor management
 
 ### Milestone 6: Text Support
-- [ ] TextData model
-- [ ] TextEngine trait
-- [ ] Web: SVG text rendering
-- [ ] Desktop: font loading and glyph rendering
+- [x] Semantic `TextData` model
+- [x] Deterministic fallback layout
+- [x] GPUI-shaped text, caret, selection, and composition
+- [x] SVG text export
 
 ### Milestone 7: Auto-Layout
-- [ ] AutoLayout configuration
-- [ ] Layout computation engine
-- [ ] Dual transform model (author + layout)
+- [x] Auto-layout configuration
+- [x] Layout computation engine
+- [x] Author transforms plus derived layout offsets
+- [ ] GPUI auto-layout controls
 
 ### Milestone 8: Snapping & Alignment
-- [ ] Snap point generation
-- [ ] Snapping during drag
-- [ ] Align/distribute commands
+- [x] Snap-point generation
+- [x] Snapping and guides during move and shape creation
+- [x] Align/distribute commands
 
 ### Milestone 9: Polish
-- [ ] JSON save/load
-- [ ] SVG export
-- [ ] Keyboard shortcuts
-- [ ] Layers panel (basic UI)
+- [x] Validated, versioned JSON save/load
+- [x] SVG and PNG export
+- [x] Configurable keyboard shortcuts
+- [x] Resizable Layers and Design panels
 
 ### Milestone 10: Action System & Command Palette
-- [ ] `EditorAction` enum cataloging all operations
-- [ ] Action registry with metadata (name, description, icon, default shortcut)
-- [ ] Key binding system (configurable shortcuts)
-- [ ] Command palette UI component (fuzzy search, keyboard navigation)
-- [ ] Action execution via `editor.execute_action()`
-- [ ] Recent actions tracking
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EditorAction {
-    // Selection
-    SelectAll,
-    DeselectAll,
-    InvertSelection,
-
-    // Edit
-    Undo,
-    Redo,
-    Cut,
-    Copy,
-    Paste,
-    Duplicate,
-    Delete,
-
-    // Arrange
-    Group,
-    Ungroup,
-    BringToFront,
-    SendToBack,
-    BringForward,
-    SendBackward,
-
-    // View
-    ZoomIn,
-    ZoomOut,
-    ZoomToFit,
-    ZoomToSelection,
-    ResetZoom,
-
-    // Tools
-    ToolSelect,
-    ToolRectangle,
-    ToolEllipse,
-    ToolPen,
-    ToolText,
-}
-
-pub struct ActionMeta {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub default_shortcut: Option<Shortcut>,
-    pub category: ActionCategory,
-}
-```
+- [x] `EditorAction` catalog
+- [x] Unified command metadata and default shortcuts
+- [x] Validated user keymap overrides
+- [x] Fuzzy command palette with keyboard navigation
+- [x] Context-aware action enablement and execution
+- [x] Recent-command ranking
 
 ### Milestone 11: Layer Panel
-- [ ] Layer tree view component
-- [ ] Node name display and inline rename
-- [ ] Visibility toggle (eye icon)
-- [ ] Lock toggle (lock icon)
-- [ ] Selection sync (click to select, highlight selected)
-- [ ] Drag-to-reorder within parent
-- [ ] Drag-to-reparent (into groups)
-- [ ] Expand/collapse groups
+- [x] Layer tree
+- [x] Node names and inline rename
+- [x] Visibility toggle
+- [x] Lock toggle
+- [x] Canvas/panel selection synchronization
+- [x] Drag-to-reorder within a parent
+- [x] Drag-to-reparent into containers
+- [x] Expand/collapse containers
 - [ ] Context menu (duplicate, delete, group, ungroup)
 
-```rust
-impl Document {
-    /// Get layer tree for UI display
-    pub fn layer_tree(&self) -> LayerTree;
-
-    /// Reorder child within same parent
-    pub fn reorder_child(&mut self, id: NodeId, new_index: usize) -> Patch;
-}
-
-pub struct LayerEntry {
-    pub id: NodeId,
-    pub name: String,
-    pub kind: NodeKindTag,  // Group, Shape, Text
-    pub visible: bool,
-    pub locked: bool,
-    pub depth: usize,
-    pub expanded: bool,     // For groups
-    pub selected: bool,
-    pub is_primary: bool,
-}
-```
-
 ### Milestone 12: Properties Panel
-- [ ] Transform section (X, Y, W, H, Rotation)
+- [x] Transform position, bounds, and rotation controls
 - [ ] Transform decomposition helpers (Affine2 → translate/rotate/scale)
-- [ ] Fill section (color picker, opacity)
-- [ ] Stroke section (color, width, opacity)
-- [ ] Text section (font family, size, weight, alignment) — when text selected
-- [ ] Node info (name, type badge)
-- [ ] Multi-selection: show "Mixed" for differing values
+- [x] Validated hexadecimal fill editing and opacity
+- [x] Validated stroke color and width editing
+- [x] Text size and alignment controls
+- [x] Node name and type
+- [x] Mixed-value handling for multi-selection
+- [ ] Font family and weight controls
 - [ ] Live preview during value scrubbing (uses Transaction)
 - [ ] Numeric input with drag-to-adjust
 
-```rust
-/// Decomposed transform for UI editing
-#[derive(Debug, Clone, Copy)]
-pub struct TransformComponents {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,   // from bounds
-    pub height: f32,  // from bounds
-    pub rotation: f32, // degrees
-    pub scale_x: f32,
-    pub scale_y: f32,
-}
-
-impl TransformComponents {
-    pub fn from_node(doc: &Document, id: NodeId) -> Self;
-    pub fn to_affine(&self) -> Affine2;
-}
-
-/// Property value that may be mixed across selection
-pub enum PropertyValue<T> {
-    Single(T),
-    Mixed,
-    None,  // No selection
-}
-```
-
-**Properties Panel Layout (minimal Figma-style):**
-```
-┌─────────────────────────┐
-│ ◆ Rectangle            │  <- Node name + type icon
-├─────────────────────────┤
-│ Position                │
-│ X: [120.0]  Y: [80.0]  │
-│ W: [200.0]  H: [150.0] │
-│ ↻: [0.0°]              │  <- Rotation
-├─────────────────────────┤
-│ Fill                    │
-│ [■ #3366CC] [100%]     │  <- Color swatch + opacity
-├─────────────────────────┤
-│ Stroke                  │
-│ [■ #000000] [1.0px]    │  <- Color + width
-└─────────────────────────┘
-```
-
 ### Milestone 13: Drawing Tools
-- [ ] Rectangle tool (drag to create, shift for square)
-- [ ] Ellipse tool (drag to create, shift for circle)
-- [ ] Line tool
-- [ ] Pen tool (click to add points, drag for curves)
-- [ ] Text tool (click to place text, then edit)
+- [x] Rectangle tool with constrained and centered drawing
+- [x] Ellipse tool with constrained and centered drawing
+- [x] Line tool with 45-degree and centered drawing
+- [x] Pen tool with anchor and handle editing
+- [x] Text tool with point and fixed-width creation
 - [ ] Tool options bar (stroke/fill presets for new shapes)
-- [ ] Double-click to enter path edit mode (for existing shapes)
-
-```rust
-pub enum Tool {
-    Select,
-    Rectangle,
-    Ellipse,
-    Line,
-    Pen { points: Vec<PenPoint> },
-    Text,
-    PathEdit { node: NodeId },
-}
-
-pub struct PenPoint {
-    pub anchor: Vec2,
-    pub handle_in: Option<Vec2>,
-    pub handle_out: Option<Vec2>,
-}
-```
+- [x] Direct vector editing for existing paths
 
 ### Milestone 14: Toolbar & Status Bar
-- [ ] Tool buttons with icons and keyboard hints
-- [ ] Active tool highlight
-- [ ] Quick color picker for fill/stroke
-- [ ] Zoom control (dropdown + slider)
-- [ ] Status bar: selection count, cursor position, zoom level
-- [ ] Tooltips on hover
+- [x] Tool buttons with icons and keyboard hints
+- [x] Active-tool state
+- [x] Fill and stroke editors
+- [x] Direct zoom buttons, percentage input, and menu
+- [x] Selection, cursor, interaction, and zoom status
+- [x] Tooltips
 
 ### Milestone 15: Export & File Operations
-- [ ] Save/Open dialogs (native file picker integration)
-- [ ] JSON document save/load with version migration
-- [ ] Export SVG with options (embed fonts, outline text)
-- [ ] Export PNG/JPEG rasterization (via wgpu offscreen render)
-- [ ] Recent files list
-- [ ] Dirty document tracking (unsaved changes warning)
-
-```rust
-pub struct SvgExportOptions {
-    pub outline_text: bool,      // Convert text to paths
-    pub embed_fonts: bool,       // Base64 embed used fonts
-    pub minify: bool,            // Remove whitespace
-    pub precision: u8,           // Decimal places for coordinates
-}
-
-pub struct RasterExportOptions {
-    pub format: RasterFormat,    // PNG, JPEG, WebP
-    pub scale: f32,              // 1.0 = 1x, 2.0 = 2x (retina)
-    pub background: Option<[f32; 4]>, // None = transparent (PNG only)
-    pub quality: u8,             // JPEG quality 0-100
-}
-
-pub enum RasterFormat {
-    Png,
-    Jpeg,
-    WebP,
-}
-```
+- [x] Native open/save dialogs
+- [x] Validated JSON documents with version migration
+- [x] Artwork-bounded SVG export
+- [x] Transparent PNG export
+- [x] Recent files
+- [x] Dirty-state tracking and unsaved-change prompts
+- [ ] SVG font embedding and text outlining
+- [ ] JPEG and WebP export
 
 ---
 
