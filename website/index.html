@@ -1,15 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="A native vector editor for logos and icons. Eight tools, two panels, remappable shortcuts, and SVG or PNG export cropped to your artwork. Written in Rust."
-    >
+      content="A native vector editor for logos and icons. Eight tools, two panels, remappable shortcuts, five export formats, AppleScript, and MCP automation. Written in Rust."
+    />
     <title>Strek — a small native editor for logos and icons</title>
-    <link rel="icon" href="./app-icon.png" type="image/png">
-    <link rel="apple-touch-icon" href="./app-icon.png">
+    <link rel="icon" href="./app-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="./app-icon.png" />
     <style>
       @layer reset, tokens, base, layout, components, responsive, motion;
 
@@ -552,10 +552,9 @@
           .editor-workspace {
             display: grid;
             min-block-size: clamp(19rem, 39vi, 27rem);
-            grid-template-columns: minmax(6.5rem, 0.7fr) minmax(
-                12rem,
-                2.2fr
-              ) minmax(7rem, 0.82fr);
+            grid-template-columns:
+              minmax(6.5rem, 0.7fr) minmax(12rem, 2.2fr)
+              minmax(7rem, 0.82fr);
           }
 
           .mock-panel {
@@ -1095,6 +1094,12 @@
           text-align: start;
         }
 
+        .automation-config {
+          inline-size: min(48rem, 100%);
+          margin-block-start: 1rem;
+          margin-inline: auto;
+        }
+
         .install-head {
           display: flex;
           min-block-size: 2.5rem;
@@ -1262,10 +1267,9 @@
           }
 
           .editor-workspace {
-            grid-template-columns: minmax(4.8rem, 0.68fr) minmax(
-                7rem,
-                1.9fr
-              ) minmax(4.9rem, 0.72fr);
+            grid-template-columns:
+              minmax(4.8rem, 0.68fr) minmax(7rem, 1.9fr)
+              minmax(4.9rem, 0.72fr);
           }
 
           .panel-heading,
@@ -1384,12 +1388,13 @@
             fetchpriority="high"
             decoding="sync"
             alt="Strek app icon"
-          >
+          />
           <span>Strek</span>
         </a>
         <ul>
           <li><a class="nav-link" href="#tools">Tools</a></li>
           <li><a class="nav-link" href="#selection">Selection</a></li>
+          <li><a class="nav-link" href="#automation">Automation</a></li>
           <li>
             <a
               class="nav-link nav-link-strong"
@@ -1410,9 +1415,9 @@
           </h1>
           <p class="lede">
             You shouldn't need a full design suite to draw a 24-pixel icon.
-            Strek is a native app with eight tools, two panels, and an
-            export that crops to your artwork instead of the canvas. It's
-            written in Rust.
+            Strek is a native app with eight tools, two panels, and an export
+            that crops to your artwork instead of the canvas. It's written in
+            Rust.
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="#install">Install Strek</a>
@@ -1508,10 +1513,13 @@
       </section>
 
       <ul class="signal-strip" aria-label="At a glance">
-        <li><span>8 tools</span>Select, frame, rect, ellipse, line, pen, text, node edit</li>
+        <li>
+          <span>8 tools</span>Select, frame, rect, ellipse, line, pen, text,
+          node edit
+        </li>
         <li><span>2 panels</span>Layers and Design, both always reachable</li>
         <li><span>1 keymap</span>Every command remappable in a JSON file</li>
-        <li><span>2 formats</span>SVG and PNG, cropped to the artwork</li>
+        <li><span>5 exports</span>SVG, outlined SVG, PNG, JPEG and WebP</li>
       </ul>
 
       <section
@@ -1561,10 +1569,10 @@
             <i class="feature-glyph glyph-export" aria-hidden="true"></i>
             <h3>Files you can hand over.</h3>
             <p>
-              SVG and PNG both crop to the visible artwork, so there's no dead
-              margin around the mark and PNGs come out transparent. Documents
-              save as plain <code>.strek.json</code>, which reviews in a pull
-              request like any other text file.
+              Standard and outlined SVG, PNG, JPEG and WebP all crop to the
+              visible artwork, so there's no dead margin around the mark.
+              Documents save as plain <code>.strek.json</code>, which reviews in
+              a pull request like any other text file.
             </p>
           </article>
         </div>
@@ -1624,6 +1632,80 @@
         </ol>
       </section>
 
+      <section
+        id="automation"
+        class="features page-width"
+        aria-labelledby="automation-title"
+      >
+        <header class="section-heading">
+          <div>
+            <p class="kicker">Automation</p>
+            <h2 id="automation-title">
+              Drive the canvas without borrowing the cursor.
+            </h2>
+          </div>
+          <p class="section-intro">
+            A running Strek window exposes the same commands, pointer events and
+            screenshots used by the app over a local, per-user socket.
+          </p>
+        </header>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-number">01 / Command line</span>
+            <i class="feature-glyph glyph-draw" aria-hidden="true"></i>
+            <h3>Script the existing editor.</h3>
+            <p>
+              Use <code>strek automate</code> to read state, run editor actions,
+              send canvas-local pointer events, insert text, show or hide UI,
+              and save a PNG screenshot. No synthetic mouse movement required.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">02 / AppleScript</span>
+            <i class="feature-glyph glyph-panels" aria-hidden="true"></i>
+            <h3>Native macOS handlers included.</h3>
+            <p>
+              The app bundles <code>Strek Automation.applescript</code> with
+              <code>strekState</code>, <code>strekAction</code>,
+              <code>strekPointer</code>, <code>strekText</code>,
+              <code>strekUi</code> and <code>strekScreenshot</code> handlers.
+              Run it directly with <code>osascript</code> or load it from your
+              own AppleScript.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">03 / MCP</span>
+            <i class="feature-glyph glyph-export" aria-hidden="true"></i>
+            <h3>Give an agent typed tools.</h3>
+            <p>
+              Launch <code>strek mcp</code> over stdio to expose
+              <code>get_state</code>, <code>perform_action</code>,
+              <code>pointer</code>, <code>insert_text</code>,
+              <code>set_ui</code> and <code>screenshot</code>. Strek must
+              already be running when a tool is called.
+            </p>
+          </article>
+        </div>
+
+        <div class="install automation-config">
+          <div class="install-head">
+            <span>MCP client configuration</span>
+            <button class="copy-button" type="button" data-copy>Copy</button>
+          </div>
+          <pre tabindex="0"><code>{
+  "mcpServers": {
+    "strek": {
+      "command": "/opt/homebrew/bin/strek",
+      "args": ["mcp"]
+    }
+  }
+}</code></pre>
+        </div>
+      </section>
+
       <section id="install" class="closing" aria-labelledby="closing-title">
         <div class="closing-copy page-width">
           <p class="kicker">Under the hood</p>
@@ -1643,7 +1725,9 @@
               <span>install</span>
               <button class="copy-button" type="button" data-copy>Copy</button>
             </div>
-            <pre><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HelgeSverre/strek/releases/latest/download/strek-installer.sh | sh</code></pre>
+            <pre
+              tabindex="0"
+            ><code>curl -fsSL https://github.com/HelgeSverre/strek/releases/latest/download/strek-installer.sh | sh</code></pre>
           </div>
 
           <p class="fine-print">macOS · Apple Silicon and Intel</p>
