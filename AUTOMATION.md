@@ -116,10 +116,10 @@ Tool values are `select`, `frame`, `rectangle`, `ellipse`, `line`, `pen`,
 `rotating`, `marquee`, `creating_shape`, `creating_frame`, `pen`,
 `creating_text`, `text_editing`, `vector_editing`, and `panning`.
 
-Only editor commands appear in `actions`; application-level operations with
-dedicated automation commands are intentionally excluded. Always use the IDs
-reported by the running version of Strek. Typical IDs include
-`tool.rectangle` and `edit.undo`.
+Only editor commands appear in `actions`; file open/save/export operations are
+not currently exposed through these automation requests. Always use the IDs
+reported by the running version of Strek. Typical IDs include `tool.rectangle`
+and `edit.undo`.
 
 ### Examples
 
