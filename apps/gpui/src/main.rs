@@ -18,7 +18,9 @@ mod toolbar;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use editor_core::{Editor, EditorAction, NodeId};
+use editor_core::{
+    Editor, EditorAction, NodeId, NumericPropertyScrubSession, NumericPropertyTarget,
+};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
     DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu,
@@ -194,6 +196,13 @@ struct ZoomInput {
     invalid: bool,
 }
 
+#[derive(Debug)]
+struct ActiveNumericPropertyScrub {
+    session: NumericPropertyScrubSession,
+    target: NumericPropertyTarget,
+    pointer_origin_x: f32,
+}
+
 /// Main application state as a GPUI Entity.
 struct Strek {
     editor: Editor,
@@ -207,6 +216,7 @@ struct Strek {
     command_palette: Option<Entity<command_palette::CommandPalette>>,
     property_color_input: Option<PropertyColorInput>,
     zoom_input: Option<ZoomInput>,
+    numeric_property_scrub: Option<ActiveNumericPropertyScrub>,
     focus_handle: FocusHandle,
     show_layers_panel: bool,
     show_design_panel: bool,
@@ -235,6 +245,7 @@ impl Strek {
             command_palette: None,
             property_color_input: None,
             zoom_input: None,
+            numeric_property_scrub: None,
             focus_handle: cx.focus_handle(),
             show_layers_panel: true,
             show_design_panel: true,
@@ -403,6 +414,7 @@ impl Strek {
     }
 
     fn reset_document(&mut self) {
+        self.cancel_numeric_property_scrub();
         self.editor = editor_preserving_creation_styles(&self.editor, Editor::new());
         self.document_path = None;
         self.object_clipboard = None;
@@ -412,6 +424,7 @@ impl Strek {
     }
 
     fn replace_document(&mut self, document: editor_core::Document, path: PathBuf) {
+        self.cancel_numeric_property_scrub();
         self.editor =
             editor_preserving_creation_styles(&self.editor, Editor::from_document(document));
         self.document_path = Some(path.clone());
@@ -641,7 +654,7 @@ impl Strek {
 
         self.finish_layer_rename(true, cx);
         self.dismiss_menus();
-        self.editor.settle_for_document_io();
+        self.settle_for_document_io();
         if !self.editor.is_dirty() {
             self.perform_document_action(action, window, cx);
             return;
@@ -822,7 +835,7 @@ impl Strek {
         if self.file_operation != FileOperation::Idle {
             return;
         }
-        self.editor.settle_for_document_io();
+        self.settle_for_document_io();
         if self.editor.artwork_bounds().is_none() {
             self.show_error(
                 "Nothing to export",
@@ -877,7 +890,7 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.editor.settle_for_document_io();
+        self.settle_for_document_io();
         let Some(snapshot) = self.editor.artwork_snapshot() else {
             self.show_error(
                 "Nothing to export",
@@ -921,7 +934,7 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.editor.settle_for_document_io();
+        self.settle_for_document_io();
         let json = match document_io::serialize_document(self.editor.document()) {
             Ok(json) => json,
             Err(error) => {
@@ -994,7 +1007,7 @@ impl Strek {
             return false;
         }
 
-        self.editor.settle_for_document_io();
+        self.settle_for_document_io();
         if self.editor.is_dirty() {
             self.request_document_action(PendingDocumentAction::Close, window, cx);
             false
@@ -1012,25 +1025,36 @@ impl Strek {
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
         self.property_color_input = None;
         self.zoom_input = None;
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let executed = self.editor.execute_action(action);
         if executed {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
-        if executed || menu_closed {
+        if executed || menu_closed || scrub_cancelled {
             cx.notify();
         }
     }
 
     fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
+        if scrub_cancelled {
+            cx.notify();
+            return;
+        }
         if self.editor.undo_in_context() || menu_closed {
             cx.notify();
         }
     }
 
     fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
+        if scrub_cancelled {
+            cx.notify();
+            return;
+        }
         if self.editor.redo_in_context() || menu_closed {
             cx.notify();
         }
@@ -1364,6 +1388,94 @@ impl Strek {
             cx.notify();
         }
         cx.stop_propagation();
+    }
+
+    fn begin_numeric_property_scrub(
+        &mut self,
+        target: NumericPropertyTarget,
+        pointer_origin_x: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !pointer_origin_x.is_finite() {
+            return;
+        }
+        self.cancel_numeric_property_scrub();
+        self.finish_layer_rename(true, cx);
+        let Some(session) = self.editor.begin_numeric_property_scrub(target) else {
+            return;
+        };
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.dismiss_menus();
+        self.numeric_property_scrub = Some(ActiveNumericPropertyScrub {
+            session,
+            target,
+            pointer_origin_x,
+        });
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn preview_numeric_property_scrub_at(
+        &mut self,
+        pointer_x: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(scrub) = self.numeric_property_scrub.as_ref() else {
+            return false;
+        };
+        if !pointer_x.is_finite() {
+            return false;
+        }
+        let pointer_delta = pointer_x - scrub.pointer_origin_x;
+        let delta = properties_panel::numeric_property_delta(scrub.target, pointer_delta);
+        let changed = self
+            .editor
+            .preview_numeric_property_scrub(&scrub.session, delta);
+        cx.notify();
+        changed
+    }
+
+    fn preview_numeric_property_scrub(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button == Some(MouseButton::Left) {
+            self.preview_numeric_property_scrub_at(event.position.x.0, cx);
+        }
+    }
+
+    fn finish_numeric_property_scrub(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        self.preview_numeric_property_scrub_at(event.position.x.0, cx);
+        let Some(scrub) = self.numeric_property_scrub.take() else {
+            return;
+        };
+        self.editor.commit_numeric_property_scrub(scrub.session);
+        cx.notify();
+    }
+
+    fn cancel_numeric_property_scrub(&mut self) -> bool {
+        let Some(scrub) = self.numeric_property_scrub.take() else {
+            return false;
+        };
+        self.editor.cancel_numeric_property_scrub(scrub.session);
+        true
+    }
+
+    fn settle_for_document_io(&mut self) {
+        self.cancel_numeric_property_scrub();
+        self.editor.settle_for_document_io();
     }
 
     fn select_tool(&mut self, _: &SelectTool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2054,6 +2166,7 @@ impl Strek {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         if let Some(snapshot) = self.editor.text_input_snapshot() {
             if let Some(selected) = snapshot.text.get(snapshot.selection) {
@@ -2068,12 +2181,13 @@ impl Strek {
                 cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             }
         }
-        if menu_closed {
+        if menu_closed || scrub_cancelled {
             cx.notify();
         }
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let mut changed = false;
         if let Some(snapshot) = self.editor.text_input_snapshot() {
@@ -2091,12 +2205,13 @@ impl Strek {
             self.editor.delete_selection();
             changed = true;
         }
-        if changed || menu_closed {
+        if changed || menu_closed || scrub_cancelled {
             cx.notify();
         }
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let mut changed = false;
         if self.editor.text_input_snapshot().is_some() {
@@ -2111,30 +2226,38 @@ impl Strek {
             }
             self.object_clipboard = Some(clipboard);
         }
-        if changed || menu_closed {
+        if changed || menu_closed || scrub_cancelled {
             cx.notify();
         }
     }
 
     fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.text_input_snapshot().is_some() {
-            self.editor.replace_text(None, "\n");
-            cx.notify();
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
+        let changed = if self.editor.text_input_snapshot().is_some() {
+            self.editor.replace_text(None, "\n")
         } else if matches!(
             self.editor.interaction_kind(),
             editor_core::InteractionKind::Pen | editor_core::InteractionKind::VectorEditing
         ) {
-            self.editor.finish_editing();
-            cx.notify();
+            self.editor.finish_editing()
         } else if self.editor.enter_selection() {
             self.current_cursor = convert_cursor(self.editor.cursor());
+            true
+        } else {
+            false
+        };
+        if changed || scrub_cancelled {
             cx.notify();
         }
     }
 
     fn select_parent(&mut self, _: &SelectParent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.select_parent() {
+        let scrub_cancelled = self.cancel_numeric_property_scrub();
+        let changed = self.editor.select_parent();
+        if changed {
             self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        if changed || scrub_cancelled {
             cx.notify();
         }
     }
@@ -2188,6 +2311,10 @@ impl Strek {
     }
 
     fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_numeric_property_scrub() {
+            cx.notify();
+            return;
+        }
         if self.dismiss_menus() {
             cx.notify();
         } else {
@@ -2634,6 +2761,7 @@ impl Render for Strek {
         let layer_entries = self.editor.build_layer_tree();
         let canvas_child_index = usize::from(show_layers_panel);
         let editor_entity = cx.entity().downgrade();
+        let canvas_bounds_entity = editor_entity.clone();
 
         div()
             .id("strek")
@@ -2764,6 +2892,12 @@ impl Render for Strek {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_mouse_move(cx.listener(Self::preview_numeric_property_scrub))
+            .capture_any_mouse_up(cx.listener(Self::finish_numeric_property_scrub))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(Self::finish_numeric_property_scrub),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::dismiss_inline_input_from_mouse),
@@ -2804,7 +2938,7 @@ impl Render for Strek {
                         let Some(bounds) = children_bounds.get(canvas_child_index).copied() else {
                             return;
                         };
-                        editor_entity
+                        canvas_bounds_entity
                             .update(cx, |editor, _| {
                                 editor.canvas_input_bounds = Some(bounds);
                             })
@@ -2858,6 +2992,7 @@ impl Render for Strek {
                         this.child(layer_panel::render_design_panel(
                             properties_snapshot,
                             design_panel_width,
+                            editor_entity.clone(),
                         ))
                     }),
             )

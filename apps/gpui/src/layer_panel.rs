@@ -5,7 +5,8 @@ use std::borrow::BorrowMut;
 use editor_core::{Editor, EditorAction, LayerEntry, LayerIcon, NodeId};
 use gpui::{
     anchored, div, prelude::*, px, rgb, rgba, Action, Context, Corner, Entity, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, SharedString, StatefulInteractiveElement, Window,
+    MouseDownEvent, Pixels, Point, Render, SharedString, StatefulInteractiveElement, WeakEntity,
+    Window,
 };
 
 use crate::{
@@ -324,7 +325,11 @@ fn layer_menu_separator() -> impl IntoElement {
 }
 
 /// Render the persistent design inspector on the right side of the window.
-pub fn render_design_panel(properties: PropertiesSnapshot, width: f32) -> impl IntoElement {
+pub fn render_design_panel(
+    properties: PropertiesSnapshot,
+    width: f32,
+    editor_entity: WeakEntity<Strek>,
+) -> impl IntoElement {
     div()
         .id("design-panel")
         .relative()
@@ -338,7 +343,7 @@ pub fn render_design_panel(properties: PropertiesSnapshot, width: f32) -> impl I
         .border_l_1()
         .border_color(rgb(0x414349))
         .child(sidebar_section_header("Design", Icon::Properties))
-        .child(properties_panel::render(properties))
+        .child(properties_panel::render(properties, editor_entity))
         .child(panel_resize_handle(PanelSide::Design))
 }
 

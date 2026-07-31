@@ -1,10 +1,13 @@
 //! Figma-style design inspector for the current selection.
 
 use editor_core::{
-    Direction, Editor, FrameData, Layout, NodeKind, Paint, Rect, Style, TextAlign, TextData,
-    TransformComponents,
+    Direction, Editor, FrameData, Layout, NodeKind, NumericPropertyTarget, Paint, Rect, Style,
+    TextAlign, TextData, TransformComponents,
 };
-use gpui::{div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, SharedString, Window};
+use gpui::{
+    div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, MouseButton, SharedString,
+    WeakEntity, Window,
+};
 
 use crate::{
     toolbar::{editor_tooltip, font_family_label, PortableFontFamily},
@@ -15,7 +18,7 @@ use crate::{
     PropertyToggleStroke, SetLayoutFree, SetLayoutHorizontal, SetLayoutVertical,
     SetTextFamilyMonospace, SetTextFamilySerif, SetTextFamilySystem, StartFillColorInput,
     StartStrokeColorInput, StepLayoutPaddingDown, StepLayoutPaddingUp, StepLayoutSpacingDown,
-    StepLayoutSpacingUp, TextLarger, TextSmaller, TextWeightDown, TextWeightUp,
+    StepLayoutSpacingUp, Strek, TextLarger, TextSmaller, TextWeightDown, TextWeightUp,
     ToggleFrameBackground, ToggleTextItalic,
 };
 
@@ -52,6 +55,31 @@ pub(crate) struct ColorInputSnapshot {
     pub target: ColorTarget,
     pub value: String,
     pub invalid: bool,
+}
+
+pub(crate) fn numeric_property_delta(target: NumericPropertyTarget, pointer_delta: f32) -> f32 {
+    let scale = match target {
+        NumericPropertyTarget::Opacity => 0.01,
+        NumericPropertyTarget::StrokeWidth => 0.1,
+        NumericPropertyTarget::WorldX
+        | NumericPropertyTarget::WorldY
+        | NumericPropertyTarget::TextSize
+        | NumericPropertyTarget::AutoLayoutSpacing
+        | NumericPropertyTarget::AutoLayoutPadding => 1.0,
+    };
+    pointer_delta * scale
+}
+
+fn numeric_property_element_id(target: NumericPropertyTarget) -> &'static str {
+    match target {
+        NumericPropertyTarget::WorldX => "property-scrub-world-x",
+        NumericPropertyTarget::WorldY => "property-scrub-world-y",
+        NumericPropertyTarget::Opacity => "property-scrub-opacity",
+        NumericPropertyTarget::StrokeWidth => "property-scrub-stroke-width",
+        NumericPropertyTarget::TextSize => "property-scrub-text-size",
+        NumericPropertyTarget::AutoLayoutSpacing => "property-scrub-layout-spacing",
+        NumericPropertyTarget::AutoLayoutPadding => "property-scrub-layout-padding",
+    }
 }
 
 pub(crate) fn snapshot(
@@ -124,7 +152,7 @@ pub(crate) fn snapshot(
     }
 }
 
-pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
+pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Strek>) -> AnyElement {
     if snapshot.selection_count == 0 {
         return div()
             .flex_1()
@@ -141,7 +169,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
             .child(
                 div()
                     .text_size(px(10.0))
-                    .text_color(rgb(0x777a82))
+                    .text_color(rgb(0x8f929a))
                     .child("Select a layer to edit its design properties."),
             )
             .into_any_element();
@@ -200,6 +228,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         "Move right",
                         PropertyMoveLeft,
                         PropertyMoveRight,
+                        Some((NumericPropertyTarget::WorldX, &editor_entity)),
                     ))
                     .child(value_stepper(
                         "Y",
@@ -208,6 +237,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         "Move down",
                         PropertyMoveUp,
                         PropertyMoveDown,
+                        Some((NumericPropertyTarget::WorldY, &editor_entity)),
                     ))
                     .child(readonly_pair(
                         "W",
@@ -224,6 +254,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         "Rotate clockwise",
                         PropertyRotateLeft,
                         PropertyRotateRight,
+                        None,
                     ))
                     .when_some(transform, |transform_section, components| {
                         transform_section
@@ -241,7 +272,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
             )
         })
         .when_some(group_layout, |panel, layout| {
-            panel.child(layout_section(layout))
+            panel.child(layout_section(layout, &editor_entity))
         })
         .child(
             section("Appearance")
@@ -254,6 +285,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                     "Increase opacity",
                     PropertyOpacityDown,
                     PropertyOpacityUp,
+                    Some((NumericPropertyTarget::Opacity, &editor_entity)),
                 ))
                 .child(property_label("Fill"))
                 .child(color_value_editor(
@@ -325,7 +357,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         .items_center()
                         .gap(px(6.0))
                         .px(px(10.0))
-                        .child(div().w(px(62.0)).text_size(px(10.0)).child("Stroke"))
+                        .child(row_label("Stroke"))
                         .child(property_button(
                             "stroke-toggle",
                             if stroke_width.is_some() { "On" } else { "Off" },
@@ -339,18 +371,13 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                             "Decrease stroke width",
                             PropertyStrokeDown,
                         ))
-                        .child(
-                            div()
-                                .w(px(38.0))
-                                .text_align(gpui::TextAlign::Center)
-                                .text_size(px(10.0))
-                                .text_color(rgb(TEXT))
-                                .child(
-                                    stroke_width
-                                        .map(format_number)
-                                        .unwrap_or_else(|| "—".to_owned()),
-                                ),
-                        )
+                        .child(numeric_value(
+                            stroke_width
+                                .map(format_number)
+                                .unwrap_or_else(|| "—".to_owned()),
+                            stroke_width
+                                .map(|_| (NumericPropertyTarget::StrokeWidth, &editor_entity)),
+                        ))
                         .child(property_button(
                             "stroke-up",
                             "+",
@@ -382,6 +409,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         "Increase font size",
                         TextSmaller,
                         TextLarger,
+                        Some((NumericPropertyTarget::TextSize, &editor_entity)),
                     ))
                     .child(value_stepper(
                         "Weight",
@@ -390,6 +418,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         "Increase font weight",
                         TextWeightDown,
                         TextWeightUp,
+                        None,
                     ))
                     .child(
                         div()
@@ -399,7 +428,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                             .items_center()
                             .gap(px(4.0))
                             .px(px(10.0))
-                            .child(div().w(px(62.0)).text_size(px(10.0)).child("Style"))
+                            .child(row_label("Style"))
                             .child(property_choice_button(
                                 "text-italic",
                                 "Italic",
@@ -416,7 +445,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                             .items_center()
                             .gap(px(4.0))
                             .px(px(10.0))
-                            .child(div().w(px(62.0)).text_size(px(10.0)).child("Align"))
+                            .child(row_label("Align"))
                             .child(property_choice_button(
                                 "text-left",
                                 "Left",
@@ -465,7 +494,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
         .into_any_element()
 }
 
-fn layout_section(layout: Layout) -> gpui::Div {
+fn layout_section(layout: Layout, editor_entity: &WeakEntity<Strek>) -> gpui::Div {
     let (mode, auto_layout) = match layout {
         Layout::Free => (None, None),
         Layout::Auto(layout) => (Some(layout.direction), Some(layout)),
@@ -480,7 +509,7 @@ fn layout_section(layout: Layout) -> gpui::Div {
                 .items_center()
                 .gap(px(4.0))
                 .px(px(10.0))
-                .child(div().w(px(62.0)).text_size(px(10.0)).child("Mode"))
+                .child(row_label("Mode"))
                 .child(property_choice_button(
                     "layout-free",
                     "Free",
@@ -513,6 +542,7 @@ fn layout_section(layout: Layout) -> gpui::Div {
                     "Increase layout spacing",
                     StepLayoutSpacingDown,
                     StepLayoutSpacingUp,
+                    Some((NumericPropertyTarget::AutoLayoutSpacing, editor_entity)),
                 ))
                 .child(value_stepper(
                     "Padding",
@@ -523,6 +553,7 @@ fn layout_section(layout: Layout) -> gpui::Div {
                     "Increase uniform padding",
                     StepLayoutPaddingDown,
                     StepLayoutPaddingUp,
+                    Some((NumericPropertyTarget::AutoLayoutPadding, editor_entity)),
                 ))
         })
 }
@@ -541,7 +572,7 @@ fn font_family_controls(text: &TextData) -> gpui::Div {
                 .items_center()
                 .gap(px(5.0))
                 .px(px(10.0))
-                .child(div().w(px(62.0)).text_size(px(10.0)).child("Family"))
+                .child(row_label("Family"))
                 .child(
                     div()
                         .h(px(26.0))
@@ -627,6 +658,14 @@ fn property_label(label: &'static str) -> impl IntoElement {
         .child(label)
 }
 
+fn row_label(label: &'static str) -> impl IntoElement {
+    div()
+        .w(px(62.0))
+        .text_size(px(10.0))
+        .text_color(rgb(MUTED))
+        .child(label)
+}
+
 fn readonly_pair(
     first_label: &'static str,
     first_value: String,
@@ -667,6 +706,7 @@ fn value_stepper<A: Action + Clone, B: Action + Clone>(
     increase_tooltip: &'static str,
     decrease: A,
     increase: B,
+    scrub: Option<(NumericPropertyTarget, &WeakEntity<Strek>)>,
 ) -> impl IntoElement {
     div()
         .h(px(34.0))
@@ -675,22 +715,52 @@ fn value_stepper<A: Action + Clone, B: Action + Clone>(
         .items_center()
         .gap(px(5.0))
         .px(px(10.0))
-        .child(div().w(px(62.0)).text_size(px(10.0)).child(label))
+        .child(row_label(label))
         .child(property_button("decrease", "−", decrease_tooltip, decrease))
-        .child(
-            div()
-                .flex_1()
-                .h(px(26.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(SURFACE_RAISED))
-                .rounded(px(4.0))
-                .text_size(px(10.0))
-                .text_color(rgb(TEXT))
-                .child(value),
-        )
+        .child(numeric_value(value, scrub))
         .child(property_button("increase", "+", increase_tooltip, increase))
+}
+
+fn numeric_value(
+    value: String,
+    scrub: Option<(NumericPropertyTarget, &WeakEntity<Strek>)>,
+) -> AnyElement {
+    let value = div()
+        .flex_1()
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(SURFACE_RAISED))
+        .rounded(px(4.0))
+        .text_size(px(10.0))
+        .text_color(rgb(TEXT))
+        .child(value);
+
+    let Some((target, editor_entity)) = scrub else {
+        return value.into_any_element();
+    };
+    let editor_entity = editor_entity.clone();
+    value
+        .id(numeric_property_element_id(target))
+        .cursor_col_resize()
+        .tooltip(editor_tooltip(
+            "Drag horizontally to adjust; Escape cancels",
+            None,
+        ))
+        .on_mouse_down(MouseButton::Left, {
+            let editor_entity = editor_entity.clone();
+            move |event, window, cx| {
+                let pointer_x = event.position.x.0;
+                editor_entity
+                    .update(cx, |editor, cx| {
+                        editor.begin_numeric_property_scrub(target, pointer_x, window, cx);
+                    })
+                    .ok();
+                cx.stop_propagation();
+            }
+        })
+        .into_any_element()
 }
 
 fn property_button<A: Action + Clone>(
@@ -946,12 +1016,30 @@ fn format_percent(scale: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_degrees, format_paint, format_percent, parse_hex_paint, snapshot, uniform_padding,
+        format_degrees, format_paint, format_percent, numeric_property_delta, parse_hex_paint,
+        snapshot, uniform_padding,
     };
     use editor_core::{
-        AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, Paint, PathData,
+        AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, NumericPropertyTarget,
+        Paint, PathData,
     };
     use glam::{Affine2, Vec2};
+
+    #[test]
+    fn numeric_scrub_pixels_use_property_appropriate_units() {
+        assert_eq!(
+            numeric_property_delta(NumericPropertyTarget::WorldX, 12.0),
+            12.0
+        );
+        assert_eq!(
+            numeric_property_delta(NumericPropertyTarget::Opacity, 12.0),
+            0.12
+        );
+        assert_eq!(
+            numeric_property_delta(NumericPropertyTarget::StrokeWidth, 12.0),
+            1.2
+        );
+    }
 
     #[test]
     fn hex_colors_support_short_rgb_and_alpha_forms() {
