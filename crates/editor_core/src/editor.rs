@@ -104,7 +104,7 @@ impl TransformComponents {
 
         let scale_y = scale_y_magnitude.copysign(determinant);
         let rotation_radians = x_axis.y.atan2(x_axis.x);
-        let skew_radians = shear.atan2(scale_y_magnitude);
+        let skew_radians = (shear / scale_y).atan();
         if !rotation_radians.is_finite() || !skew_radians.is_finite() {
             return None;
         }
@@ -7736,6 +7736,18 @@ mod tests {
         );
         let components = TransformComponents::from_affine(sheared).unwrap();
         assert!((components.skew_radians - 1.0f32.atan2(3.0)).abs() < 0.0001);
+
+        let reflected_skew = 0.25_f32;
+        let reflected_sheared = Affine2::from_mat2_translation(
+            glam::Mat2::from_cols(
+                Vec2::new(2.0, 0.0),
+                Vec2::new(reflected_skew.tan() * -3.0, -3.0),
+            ),
+            Vec2::ZERO,
+        );
+        let components = TransformComponents::from_affine(reflected_sheared).unwrap();
+        assert!((components.scale.y + 3.0).abs() < 0.0001);
+        assert!((components.skew_radians - reflected_skew).abs() < 0.0001);
 
         assert!(TransformComponents::from_affine(Affine2::from_scale(Vec2::ZERO)).is_none());
         assert!(
