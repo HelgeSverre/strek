@@ -5,6 +5,7 @@
 mod assets;
 mod canvas;
 mod document_io;
+mod layer_name_input;
 mod layer_panel;
 mod status_bar;
 mod text_input;
@@ -13,10 +14,10 @@ mod toolbar;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use editor_core::{Editor, EditorAction};
+use editor_core::{Editor, EditorAction, NodeId};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
+    Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds, WindowOptions,
 };
@@ -127,6 +128,7 @@ struct VectorEditor {
     object_clipboard: Option<editor_core::EditorClipboard>,
     focus_handle: FocusHandle,
     show_layer_panel: bool,
+    layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
     canvas_input_bounds: Option<Bounds<gpui::Pixels>>,
@@ -145,6 +147,7 @@ impl VectorEditor {
             object_clipboard: None,
             focus_handle: cx.focus_handle(),
             show_layer_panel: true,
+            layer_name_input: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
             canvas_input_bounds: None,
@@ -184,6 +187,131 @@ impl VectorEditor {
         ));
     }
 
+    pub(crate) fn begin_layer_rename(
+        &mut self,
+        id: NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .layer_name_input
+            .as_ref()
+            .is_some_and(|(active_id, _)| *active_id == id)
+        {
+            if let Some((_, input)) = &self.layer_name_input {
+                input.read(cx).focus(window);
+            }
+            return;
+        }
+        self.finish_layer_rename(true, cx);
+
+        let Some(name) = self.editor.document().get(id).map(|node| node.name.clone()) else {
+            return;
+        };
+        self.editor.select_layer(id, false);
+
+        let input =
+            cx.new(|input_cx| layer_name_input::LayerNameInput::new(id, name, window, input_cx));
+        cx.subscribe_in(
+            &input,
+            window,
+            |editor, _, event: &layer_name_input::LayerNameEvent, window, cx| {
+                let event_id = match event {
+                    layer_name_input::LayerNameEvent::Commit { id, name } => {
+                        editor.editor.rename_layer(*id, name);
+                        *id
+                    }
+                    layer_name_input::LayerNameEvent::Cancel { id } => *id,
+                };
+                if editor
+                    .layer_name_input
+                    .as_ref()
+                    .is_some_and(|(active_id, _)| *active_id == event_id)
+                {
+                    editor.layer_name_input = None;
+                }
+                editor.focus_handle.focus(window);
+                cx.notify();
+            },
+        )
+        .detach();
+        self.layer_name_input = Some((id, input.clone()));
+        cx.defer_in(window, move |_, window, cx| {
+            input.read(cx).focus(window);
+            cx.notify();
+        });
+    }
+
+    fn finish_layer_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some((_, input)) = self.layer_name_input.take() else {
+            return;
+        };
+        let (id, name) = input.update(cx, |input, _| input.finish_from_parent());
+        if commit {
+            self.editor.rename_layer(id, &name);
+        }
+    }
+
+    pub(crate) fn drop_layer_on(&mut self, dragged: NodeId, target: NodeId) -> bool {
+        if dragged == target {
+            return false;
+        }
+
+        let Some(target_node) = self.editor.document().get(target) else {
+            return false;
+        };
+        let (after_parent, after_index) = if matches!(
+            target_node.kind,
+            editor_core::NodeKind::Group | editor_core::NodeKind::Frame(_)
+        ) {
+            let dragged_is_child = self
+                .editor
+                .document()
+                .get(dragged)
+                .is_some_and(|node| node.parent == Some(target));
+            (
+                target,
+                target_node
+                    .children
+                    .len()
+                    .saturating_sub(usize::from(dragged_is_child)),
+            )
+        } else {
+            let Some(parent) = target_node.parent else {
+                return false;
+            };
+            let Some(target_index) = self
+                .editor
+                .document()
+                .get(parent)
+                .and_then(|node| node.children.iter().position(|child| *child == target))
+            else {
+                return false;
+            };
+            let dragged_precedes_target = self
+                .editor
+                .document()
+                .get(dragged)
+                .filter(|node| node.parent == Some(parent))
+                .and_then(|_| {
+                    self.editor
+                        .document()
+                        .get(parent)?
+                        .children
+                        .iter()
+                        .position(|child| *child == dragged)
+                })
+                .is_some_and(|dragged_index| dragged_index < target_index);
+            (
+                parent,
+                target_index.saturating_sub(usize::from(dragged_precedes_target)) + 1,
+            )
+        };
+
+        self.editor
+            .reparent_layer(dragged, after_parent, after_index)
+    }
+
     fn reset_document(&mut self) {
         self.editor = Editor::new();
         self.document_path = None;
@@ -216,6 +344,7 @@ impl VectorEditor {
     }
 
     fn save_document(&mut self, _: &SaveDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_layer_rename(true, cx);
         self.open_menu = None;
         if self.file_operation != FileOperation::Idle {
             return;
@@ -233,6 +362,7 @@ impl VectorEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.finish_layer_rename(true, cx);
         self.open_menu = None;
         if self.file_operation == FileOperation::Idle {
             self.begin_save_dialog(None, window, cx);
@@ -258,6 +388,7 @@ impl VectorEditor {
             return;
         }
 
+        self.finish_layer_rename(true, cx);
         self.open_menu = None;
         self.editor.settle_for_document_io();
         if !self.editor.is_dirty() {
@@ -1270,6 +1401,7 @@ impl Render for VectorEditor {
         let selection_count = self.editor.selection().len();
         let zoom = self.editor.view().zoom;
         let show_layer_panel = self.show_layer_panel;
+        let layer_name_input = self.layer_name_input.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
         let document_name = self.document_name();
@@ -1442,7 +1574,11 @@ impl Render for VectorEditor {
                     )
                     // Layer panel (conditionally shown)
                     .when(show_layer_panel, |this| {
-                        this.child(layer_panel::render_layer_panel(layer_entries, cx))
+                        this.child(layer_panel::render_layer_panel(
+                            layer_entries,
+                            layer_name_input,
+                            cx,
+                        ))
                     }),
             )
             // Status bar at bottom
@@ -1607,6 +1743,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
             register_keybindings(cx);
+            layer_name_input::register_keybindings(cx);
             cx.set_menus(vec![
                 Menu {
                     name: "Vector Editor".into(),

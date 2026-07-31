@@ -1,10 +1,14 @@
 //! Layer panel UI component.
 
-use editor_core::{LayerEntry, LayerIcon};
-use gpui::{div, prelude::*, px, rgb, rgba, Context, SharedString, StatefulInteractiveElement};
+use editor_core::{LayerEntry, LayerIcon, NodeId};
+use gpui::{
+    div, prelude::*, px, rgb, rgba, Context, Entity, Render, SharedString,
+    StatefulInteractiveElement, Window,
+};
 
 use crate::{
     assets::{icon, Icon},
+    layer_name_input::LayerNameInput,
     toolbar::editor_tooltip,
     VectorEditor,
 };
@@ -14,11 +18,18 @@ pub const WIDTH: f32 = 248.0;
 /// Render the layer panel on the right side of the window.
 pub fn render_layer_panel(
     layer_entries: Vec<LayerEntry>,
+    layer_name_input: Option<(NodeId, Entity<LayerNameInput>)>,
     cx: &mut Context<VectorEditor>,
 ) -> impl IntoElement {
     let rows = layer_entries
         .into_iter()
-        .map(|entry| render_layer_entry(entry, cx).into_any_element())
+        .map(|entry| {
+            let input = layer_name_input
+                .as_ref()
+                .filter(|(id, _)| *id == entry.id)
+                .map(|(_, input)| input.clone());
+            render_layer_entry(entry, input, cx).into_any_element()
+        })
         .collect::<Vec<_>>();
 
     div()
@@ -43,6 +54,20 @@ pub fn render_layer_panel(
                 .text_color(rgb(0xf1f3f4))
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
+                .drag_over::<DraggedLayer>(|style, _, _, _| style.bg(rgb(0x164f73)))
+                .on_drop(cx.listener(|editor, dragged: &DraggedLayer, _window, cx| {
+                    let root = editor.editor.document().root;
+                    let index = editor
+                        .editor
+                        .document()
+                        .get(root)
+                        .map(|node| node.children.len())
+                        .unwrap_or_default();
+                    if editor.editor.reparent_layer(dragged.id, root, index) {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }))
                 .child(icon(Icon::Layers, 15.0, rgb(0xa8abb2)))
                 .child("Layers")
                 .child(div().flex_1())
@@ -67,7 +92,38 @@ pub fn render_layer_panel(
         )
 }
 
-fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl IntoElement {
+#[derive(Clone)]
+struct DraggedLayer {
+    id: NodeId,
+    name: SharedString,
+}
+
+struct DraggedLayerPreview {
+    name: SharedString,
+}
+
+impl Render for DraggedLayerPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.0))
+            .py(px(6.0))
+            .bg(rgb(0x292a2e))
+            .border_1()
+            .border_color(rgb(0x0c8ce9))
+            .rounded(px(5.0))
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(rgb(0xf1f3f4))
+            .child(self.name.clone())
+    }
+}
+
+fn render_layer_entry(
+    entry: LayerEntry,
+    name_input: Option<Entity<LayerNameInput>>,
+    cx: &mut Context<VectorEditor>,
+) -> impl IntoElement {
+    let is_renaming = name_input.is_some();
     let indent = entry.depth as f32 * 16.0;
     let bg = if entry.selected {
         rgb(0x164f73)
@@ -105,6 +161,11 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         " "
     };
     let layer_id = entry.id;
+    let drag_payload = DraggedLayer {
+        id: entry.id,
+        name: entry.name.clone().into(),
+    };
+    let drop_target = entry.id;
     let expand_id = entry.id;
     let visibility_id = entry.id;
     let lock_id = entry.id;
@@ -142,11 +203,38 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         })
         .text_color(text_color)
         .text_size(px(12.0))
+        .on_drag(drag_payload, |dragged, _, _, cx| {
+            cx.new(|_| DraggedLayerPreview {
+                name: dragged.name.clone(),
+            })
+        })
+        .drag_over::<DraggedLayer>(move |style, dragged, _, _| {
+            if dragged.id == drop_target {
+                style
+            } else {
+                style
+                    .bg(rgb(0x164f73))
+                    .border_1()
+                    .border_color(rgb(0x0c8ce9))
+            }
+        })
+        .on_drop(
+            cx.listener(move |editor, dragged: &DraggedLayer, _window, cx| {
+                if editor.drop_layer_on(dragged.id, drop_target) {
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }),
+        )
         .on_click(
-            cx.listener(move |editor, event: &gpui::ClickEvent, _window, cx| {
-                editor
-                    .editor
-                    .select_layer(layer_id, event.modifiers().shift);
+            cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
+                if event.down.click_count >= 2 {
+                    editor.begin_layer_rename(layer_id, window, cx);
+                } else {
+                    editor
+                        .editor
+                        .select_layer(layer_id, event.modifiers().shift);
+                }
                 cx.notify();
             }),
         )
@@ -187,7 +275,13 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
                 .child(icon(type_icon, 13.0, rgb(0x8f929a))),
         )
         // Layer name
-        .child(div().flex_1().overflow_hidden().child(entry.name.clone()))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .when_some(name_input, |name, input| name.child(input))
+                .when(!is_renaming, |name| name.child(entry.name.clone())),
+        )
         // Visibility toggle
         .child(
             div()
