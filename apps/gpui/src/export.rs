@@ -1,4 +1,4 @@
-//! SVG and PNG artwork export.
+//! Artwork encoding and atomic export writes.
 
 use std::error::Error;
 use std::fmt;
@@ -7,17 +7,22 @@ use std::path::{Path, PathBuf};
 
 use editor_core::{ArtworkSnapshot, Rect};
 use glam::Vec2;
+use image::codecs::{jpeg::JpegEncoder, webp::WebPEncoder};
+use image::{ExtendedColorType, ImageEncoder};
 
 use crate::{canvas, document_io};
 
 const MAX_RASTER_DIMENSION: u32 = 16_384;
 const MAX_RASTER_PIXELS: u64 = 64_000_000;
+const JPEG_QUALITY: u8 = 92;
 
 /// User-selectable artwork export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Svg,
     Png,
+    Jpeg,
+    WebP,
 }
 
 impl ExportFormat {
@@ -25,6 +30,17 @@ impl ExportFormat {
         match self {
             Self::Svg => "svg",
             Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::WebP => "webp",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG",
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::WebP => "WebP",
         }
     }
 }
@@ -33,9 +49,19 @@ impl ExportFormat {
 #[derive(Debug)]
 pub enum ExportError {
     InvalidBounds,
-    RasterTooLarge { width: u32, height: u32 },
+    RasterTooLarge {
+        width: u32,
+        height: u32,
+    },
     Rasterize(String),
-    Write { path: PathBuf, source: io::Error },
+    Encode {
+        format: ExportFormat,
+        detail: String,
+    },
+    Write {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for ExportError {
@@ -44,9 +70,16 @@ impl fmt::Display for ExportError {
             Self::InvalidBounds => write!(formatter, "artwork has invalid bounds"),
             Self::RasterTooLarge { width, height } => write!(
                 formatter,
-                "PNG dimensions {width} × {height} exceed the safe export limit"
+                "raster dimensions {width} × {height} exceed the safe export limit"
             ),
             Self::Rasterize(detail) => write!(formatter, "could not rasterize artwork: {detail}"),
+            Self::Encode { format, detail } => {
+                write!(
+                    formatter,
+                    "could not encode {} artwork: {detail}",
+                    format.label()
+                )
+            }
             Self::Write { path, source } => {
                 write!(formatter, "could not write {}: {source}", path.display())
             }
@@ -58,7 +91,10 @@ impl Error for ExportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Write { source, .. } => Some(source),
-            Self::InvalidBounds | Self::RasterTooLarge { .. } | Self::Rasterize(_) => None,
+            Self::InvalidBounds
+            | Self::RasterTooLarge { .. }
+            | Self::Rasterize(_)
+            | Self::Encode { .. } => None,
         }
     }
 }
@@ -94,22 +130,80 @@ fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, E
     let svg =
         render_svg::to_svg_string_export_with_view_box(&snapshot.display_list, view_min, size);
 
+    if format == ExportFormat::Svg {
+        return Ok(svg.into_bytes());
+    }
+
+    let (width, height) = checked_raster_dimensions(size)?;
+    let pixmap = canvas::render_svg_pixmap(svg.as_bytes(), width, height)
+        .ok_or_else(|| ExportError::Rasterize("the SVG renderer rejected the data".into()))?;
+
     match format {
-        ExportFormat::Svg => Ok(svg.into_bytes()),
-        ExportFormat::Png => {
-            let width = raster_dimension(size.x)?;
-            let height = raster_dimension(size.y)?;
-            if width > MAX_RASTER_DIMENSION
-                || height > MAX_RASTER_DIMENSION
-                || u64::from(width) * u64::from(height) > MAX_RASTER_PIXELS
-            {
-                return Err(ExportError::RasterTooLarge { width, height });
+        ExportFormat::Svg => unreachable!("SVG exports return before rasterization"),
+        ExportFormat::Png => pixmap
+            .encode_png()
+            .map_err(|error| encoding_error(format, error)),
+        ExportFormat::Jpeg => encode_jpeg(pixmap.data(), width, height),
+        ExportFormat::WebP => encode_webp(pixmap.data(), width, height),
+    }
+}
+
+fn checked_raster_dimensions(size: Vec2) -> Result<(u32, u32), ExportError> {
+    let width = raster_dimension(size.x)?;
+    let height = raster_dimension(size.y)?;
+    if width > MAX_RASTER_DIMENSION
+        || height > MAX_RASTER_DIMENSION
+        || u64::from(width) * u64::from(height) > MAX_RASTER_PIXELS
+    {
+        return Err(ExportError::RasterTooLarge { width, height });
+    }
+    Ok((width, height))
+}
+
+fn encode_jpeg(premultiplied_rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ExportError> {
+    let mut rgb = Vec::with_capacity(premultiplied_rgba.len() / 4 * 3);
+    for pixel in premultiplied_rgba.chunks_exact(4) {
+        let white = 255 - pixel[3];
+        rgb.extend_from_slice(&[
+            pixel[0].saturating_add(white),
+            pixel[1].saturating_add(white),
+            pixel[2].saturating_add(white),
+        ]);
+    }
+
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY)
+        .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
+        .map_err(|error| encoding_error(ExportFormat::Jpeg, error))?;
+    Ok(encoded)
+}
+
+fn encode_webp(premultiplied_rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ExportError> {
+    let mut rgba = premultiplied_rgba.to_vec();
+    unpremultiply_rgba(&mut rgba);
+
+    let mut encoded = Vec::new();
+    WebPEncoder::new_lossless(&mut encoded)
+        .write_image(&rgba, width, height, ExtendedColorType::Rgba8)
+        .map_err(|error| encoding_error(ExportFormat::WebP, error))?;
+    Ok(encoded)
+}
+
+fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha > 0 && alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
             }
-            canvas::render_svg_pixmap(svg.as_bytes(), width, height)
-                .ok_or_else(|| ExportError::Rasterize("the SVG renderer rejected the data".into()))?
-                .encode_png()
-                .map_err(|error| ExportError::Rasterize(error.to_string()))
         }
+    }
+}
+
+fn encoding_error(format: ExportFormat, error: impl fmt::Display) -> ExportError {
+    ExportError::Encode {
+        format,
+        detail: error.to_string(),
     }
 }
 
@@ -144,7 +238,7 @@ mod tests {
     use super::*;
     use editor_render::{DisplayItem, DisplayList, Paint, PathData};
     use glam::Affine2;
-    use image::GenericImageView;
+    use image::{GenericImageView, Pixel};
 
     fn snapshot() -> ArtworkSnapshot {
         let mut display_list = DisplayList::new();
@@ -160,6 +254,20 @@ mod tests {
         }
     }
 
+    fn translucent_red_snapshot() -> ArtworkSnapshot {
+        let mut display_list = DisplayList::new();
+        display_list.push(DisplayItem::FillPath {
+            path: PathData::rect(0.0, 0.0, 8.0, 8.0),
+            paint: Paint::rgb(1.0, 0.0, 0.0),
+            transform: Affine2::IDENTITY,
+            opacity: 0.5,
+        });
+        ArtworkSnapshot {
+            display_list,
+            bounds: Rect::new(Vec2::ZERO, Vec2::splat(8.0)),
+        }
+    }
+
     #[test]
     fn normalizes_the_extension_to_the_selected_format() {
         assert_eq!(
@@ -169,6 +277,14 @@ mod tests {
         assert_eq!(
             normalize_path(PathBuf::from("/tmp/drawing.PNG"), ExportFormat::Png),
             PathBuf::from("/tmp/drawing.PNG")
+        );
+        assert_eq!(
+            normalize_path(PathBuf::from("/tmp/drawing.jpeg"), ExportFormat::Jpeg),
+            PathBuf::from("/tmp/drawing.jpg")
+        );
+        assert_eq!(
+            normalize_path(PathBuf::from("/tmp/drawing.WEBP"), ExportFormat::WebP),
+            PathBuf::from("/tmp/drawing.WEBP")
         );
     }
 
@@ -191,16 +307,51 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_encoding_is_rgb_and_composites_transparency_over_white() {
+        let bytes = encode(ExportFormat::Jpeg, &translucent_red_snapshot()).unwrap();
+        assert_eq!(&bytes[..3], &[0xff, 0xd8, 0xff]);
+
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(image.dimensions(), (8, 8));
+        assert!(!image.color().has_alpha());
+        let pixel = image.get_pixel(4, 4).to_rgb().0;
+        assert!(pixel[0] >= 245, "red channel was {}", pixel[0]);
+        assert!(
+            (115..=140).contains(&pixel[1]),
+            "green channel was {}",
+            pixel[1]
+        );
+        assert!(
+            (115..=140).contains(&pixel[2]),
+            "blue channel was {}",
+            pixel[2]
+        );
+    }
+
+    #[test]
+    fn webp_encoding_is_lossless_and_preserves_straight_alpha() {
+        let bytes = encode(ExportFormat::WebP, &translucent_red_snapshot()).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::WebP).unwrap();
+        assert_eq!(image.dimensions(), (8, 8));
+        assert_eq!(image.get_pixel(4, 4).0, [255, 0, 0, 128]);
+    }
+
+    #[test]
     fn rejects_oversized_raster_exports_before_allocating() {
         let mut snapshot = snapshot();
         snapshot.bounds.max = snapshot.bounds.min + Vec2::splat(20_000.0);
 
-        assert!(matches!(
-            encode(ExportFormat::Png, &snapshot),
-            Err(ExportError::RasterTooLarge {
-                width: 20_000,
-                height: 20_000
-            })
-        ));
+        for format in [ExportFormat::Png, ExportFormat::Jpeg, ExportFormat::WebP] {
+            assert!(matches!(
+                encode(format, &snapshot),
+                Err(ExportError::RasterTooLarge {
+                    width: 20_000,
+                    height: 20_000
+                })
+            ));
+        }
     }
 }
