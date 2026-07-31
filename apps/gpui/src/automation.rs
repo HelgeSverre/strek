@@ -573,9 +573,30 @@ fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> 
     )
 }
 
-fn write_json_line(mut writer: impl Write, value: &impl Serialize) -> io::Result<()> {
-    serde_json::to_writer(&mut writer, value).map_err(io::Error::other)?;
-    writer.write_all(b"\n")
+fn write_json_line(mut writer: impl Write, response: &AutomationResponse) -> io::Result<()> {
+    writer.write_all(&serialize_response_line(response)?)
+}
+
+fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(response).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    if bytes.len() <= MAX_RESPONSE_BYTES {
+        return Ok(bytes);
+    }
+
+    let fallback = AutomationResponse {
+        ok: response.ok,
+        message: Some(if response.ok {
+            "request completed, but its state exceeded the automation response limit".to_owned()
+        } else {
+            "request was rejected, but its details exceeded the automation response limit"
+                .to_owned()
+        }),
+        state: None,
+    };
+    let mut bytes = serde_json::to_vec(&fallback).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, String> {
@@ -1133,6 +1154,26 @@ mod tests {
                 .kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+
+    #[test]
+    fn response_writer_preserves_outcome_when_state_is_too_large() {
+        let response = AutomationResponse {
+            ok: true,
+            message: Some("x".repeat(MAX_RESPONSE_BYTES)),
+            state: None,
+        };
+
+        let line = serialize_response_line(&response).unwrap();
+        assert!(line.len() <= MAX_RESPONSE_BYTES);
+        assert!(line.ends_with(b"\n"));
+        let fallback: AutomationResponse = serde_json::from_slice(&line).unwrap();
+        assert!(fallback.ok);
+        assert!(fallback.state.is_none());
+        assert!(fallback
+            .message
+            .unwrap()
+            .contains("exceeded the automation response limit"));
     }
 
     #[cfg(unix)]
