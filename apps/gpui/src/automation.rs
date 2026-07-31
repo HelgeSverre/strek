@@ -24,15 +24,21 @@ use core_foundation::number::CFNumber;
 #[cfg(target_os = "macos")]
 use core_foundation::string::{CFString, CFStringRef};
 #[cfg(target_os = "macos")]
+use core_graphics::geometry::CGRect;
+#[cfg(target_os = "macos")]
 use core_graphics::window::{
-    copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
-    kCGWindowListOptionOnScreenOnly, kCGWindowNumber, kCGWindowOwnerPID,
+    copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
+    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowNumber,
+    kCGWindowOwnerPID,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const SOCKET_ENV: &str = "STREK_AUTOMATION_SOCKET";
+#[cfg(unix)]
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
 #[cfg(unix)]
 const CONNECTION_WORKERS: usize = 4;
 #[cfg(unix)]
@@ -233,6 +239,12 @@ pub(crate) struct PendingRequest {
     deadline: Instant,
 }
 
+#[cfg(unix)]
+struct QueuedConnection {
+    stream: std::os::unix::net::UnixStream,
+    deadline: Instant,
+}
+
 impl PendingRequest {
     pub(crate) fn respond_with(
         self,
@@ -275,7 +287,8 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (connection_sender, connection_receiver) = mpsc::sync_channel(MAX_QUEUED_CONNECTIONS);
+        let (connection_sender, connection_receiver) =
+            mpsc::sync_channel::<QueuedConnection>(MAX_QUEUED_CONNECTIONS);
         let connection_receiver = Arc::new(Mutex::new(connection_receiver));
 
         for index in 0..CONNECTION_WORKERS {
@@ -290,10 +303,12 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
                         };
                         receiver.recv()
                     };
-                    let Ok(stream) = stream else {
+                    let Ok(connection) = stream else {
                         return;
                     };
-                    if let Err(error) = serve_connection(stream, &sender) {
+                    if let Err(error) =
+                        serve_connection(connection.stream, &sender, connection.deadline)
+                    {
                         log::warn!("automation request failed: {error}");
                     }
                 })?;
@@ -304,9 +319,14 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
             .spawn(move || {
                 for stream in listener.incoming() {
                     match stream {
-                        Ok(stream) => match connection_sender.try_send(stream) {
+                        Ok(stream) => match connection_sender.try_send(QueuedConnection {
+                            stream,
+                            deadline: Instant::now() + RESPONSE_TIMEOUT,
+                        }) {
                             Ok(()) => {}
-                            Err(mpsc::TrySendError::Full(mut stream)) => {
+                            Err(mpsc::TrySendError::Full(QueuedConnection {
+                                mut stream, ..
+                            })) => {
                                 let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
                                 let _ = write_protocol_error(
                                     &mut stream,
@@ -335,9 +355,16 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
 fn serve_connection(
     mut stream: std::os::unix::net::UnixStream,
     sender: &tokio::sync::mpsc::UnboundedSender<PendingRequest>,
+    deadline: Instant,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + RESPONSE_TIMEOUT;
     stream.set_write_timeout(Some(RESPONSE_TIMEOUT))?;
+    if Instant::now() >= deadline {
+        write_protocol_error(
+            &mut stream,
+            "Strek did not process the automation request in time",
+        )?;
+        return Ok(());
+    }
     let request_json = match read_request_line(&mut stream, deadline) {
         Ok(request_json) => request_json,
         Err(error) => {
@@ -418,6 +445,12 @@ fn read_request_line(
 
         if let Some(newline) = chunk[..count].iter().position(|byte| *byte == b'\n') {
             bytes.extend_from_slice(&chunk[..=newline]);
+            if bytes.len() > MAX_REQUEST_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
+                ));
+            }
             break;
         }
         bytes.extend_from_slice(&chunk[..count]);
@@ -454,12 +487,18 @@ pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, 
     {
         use std::os::unix::net::UnixStream;
 
+        let request_line = serialize_request_line(&request)?;
         let mut stream = UnixStream::connect(socket_path())
             .map_err(|error| format!("could not connect to Strek: {error}"))?;
         stream
-            .set_read_timeout(Some(RESPONSE_TIMEOUT))
+            .set_read_timeout(Some(CLIENT_TIMEOUT))
             .map_err(|error| error.to_string())?;
-        write_json_line(&mut stream, &request).map_err(|error| error.to_string())?;
+        stream
+            .set_write_timeout(Some(CLIENT_TIMEOUT))
+            .map_err(|error| error.to_string())?;
+        stream
+            .write_all(&request_line)
+            .map_err(|error| error.to_string())?;
         let mut response_json = String::new();
         BufReader::new(stream)
             .read_line(&mut response_json)
@@ -473,6 +512,18 @@ pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, 
         let _ = request;
         Err("Strek automation currently requires a Unix-domain socket".to_owned())
     }
+}
+
+#[cfg(unix)]
+fn serialize_request_line(request: &AutomationRequest) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_REQUEST_BYTES {
+        return Err(format!(
+            "automation request exceeds {MAX_REQUEST_BYTES} bytes"
+        ));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn run_cli(mut args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -600,17 +651,18 @@ fn capture_window(process_id: u32, legacy_bounds: AutomationBounds) -> Result<Ve
     if process_id == 0 {
         return capture_bounds(legacy_bounds);
     }
-    let window_id = window_id_for_process(process_id)
+    let window_id = window_id_for_process(process_id, legacy_bounds)
         .ok_or_else(|| "could not find Strek's visible macOS window".to_owned())?;
     capture_with_arguments(&["-x".to_owned(), "-o".to_owned(), format!("-l{window_id}")])
 }
 
 #[cfg(target_os = "macos")]
-fn window_id_for_process(process_id: u32) -> Option<u32> {
+fn window_id_for_process(process_id: u32, expected_bounds: AutomationBounds) -> Option<u32> {
     let windows = copy_window_info(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID,
     )?;
+    let mut best_match = None;
     for raw_window in windows.iter() {
         let Some(window) =
             unsafe { CFType::wrap_under_get_rule(*raw_window as _) }.downcast::<CFDictionary>()
@@ -623,12 +675,23 @@ fn window_id_for_process(process_id: u32) -> Option<u32> {
         let Some(layer) = dictionary_number(&window, unsafe { kCGWindowLayer }) else {
             continue;
         };
-        if owner_pid == i64::from(process_id) && layer == 0 {
-            return dictionary_number(&window, unsafe { kCGWindowNumber })
-                .and_then(|number| u32::try_from(number).ok());
+        if owner_pid != i64::from(process_id) || layer != 0 {
+            continue;
+        }
+        let Some(window_id) = dictionary_number(&window, unsafe { kCGWindowNumber })
+            .and_then(|number| u32::try_from(number).ok())
+        else {
+            continue;
+        };
+        let Some(bounds) = dictionary_bounds(&window, unsafe { kCGWindowBounds }) else {
+            continue;
+        };
+        let score = window_bounds_distance(bounds, expected_bounds);
+        if best_match.is_none_or(|(_, best_score)| score < best_score) {
+            best_match = Some((window_id, score));
         }
     }
-    None
+    best_match.map(|(window_id, _)| window_id)
 }
 
 #[cfg(target_os = "macos")]
@@ -637,6 +700,22 @@ fn dictionary_number(dictionary: &CFDictionary, key: CFStringRef) -> Option<i64>
     let value = dictionary.find(key.as_CFTypeRef())?;
     let value = unsafe { CFType::wrap_under_get_rule(*value as _) };
     value.downcast::<CFNumber>()?.to_i64()
+}
+
+#[cfg(target_os = "macos")]
+fn dictionary_bounds(dictionary: &CFDictionary, key: CFStringRef) -> Option<CGRect> {
+    let key = unsafe { CFString::wrap_under_get_rule(key) };
+    let value = dictionary.find(key.as_CFTypeRef())?;
+    let value = unsafe { CFType::wrap_under_get_rule(*value as _) };
+    CGRect::from_dict_representation(&value.downcast::<CFDictionary>()?)
+}
+
+#[cfg(target_os = "macos")]
+fn window_bounds_distance(bounds: CGRect, expected: AutomationBounds) -> f64 {
+    (bounds.origin.x - f64::from(expected.x)).abs()
+        + (bounds.origin.y - f64::from(expected.y)).abs()
+        + (bounds.size.width - f64::from(expected.width)).abs()
+        + (bounds.size.height - f64::from(expected.height)).abs()
 }
 
 #[cfg(target_os = "macos")]
@@ -805,6 +884,46 @@ mod tests {
             response.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_queued_connection_is_rejected_before_enqueue() {
+        use std::os::unix::net::UnixStream;
+
+        let (client, server) = UnixStream::pair().expect("socket pair should open");
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before now should be representable");
+
+        serve_connection(server, &sender, deadline).expect("expired connection should be rejected");
+
+        let mut response_json = String::new();
+        BufReader::new(client)
+            .read_line(&mut response_json)
+            .expect("protocol error should be readable");
+        let response: AutomationResponse =
+            serde_json::from_str(&response_json).expect("protocol error should be JSON");
+        assert!(!response.ok);
+        assert!(response
+            .message
+            .is_some_and(|message| message.contains("in time")));
+        assert!(matches!(
+            requests.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_request_is_rejected_before_connecting() {
+        let request = AutomationRequest::Text {
+            text: "x".repeat(MAX_REQUEST_BYTES),
+        };
+        assert!(serialize_request_line(&request)
+            .expect_err("oversized request should be rejected")
+            .contains("exceeds"));
     }
 
     #[cfg(unix)]
