@@ -1,4 +1,4 @@
-# Vector Editor Specification
+# Strek Specification
 
 A minimal, cross-platform vector editor core written in Rust. Designed for creating logos and icons with support for groups/layers, text/fonts, basic editing/positioning, and simple auto-layout alignment.
 
@@ -90,7 +90,7 @@ The editor follows a three-layer architecture with strict separation of concerns
 ## 2. Workspace Structure
 
 ```
-vector-editor/
+strek/
 ├── Cargo.toml                    # Workspace manifest
 ├── SPEC.md                       # This document
 ├── crates/
@@ -1263,7 +1263,7 @@ use editor_core::{Editor, EditorEvent};
 fn main() {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("Vector Editor")
+        .with_title("Strek")
         .build(&event_loop)
         .unwrap();
 

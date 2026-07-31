@@ -1,6 +1,6 @@
-# Vector Editor
+# Strek
 
-An experimental native vector editor written in Rust. The primary frontend is
+Strek is an experimental native vector editor written in Rust. The primary frontend is
 the GPUI desktop application in `apps/gpui`, with a workspace of reusable editor,
 rendering, and export crates underneath it.
 
@@ -24,7 +24,7 @@ The current reference platform and CI environment is macOS. Install a stable
 Rust toolchain and the Xcode Command Line Tools, then run:
 
 ```sh
-cargo run -p vector-editor-gpui
+cargo run -p strek
 ```
 
 With [just](https://github.com/casey/just) installed, the equivalent command is:
@@ -66,14 +66,14 @@ just run-legacy
 | Pan | Middle-button drag or trackpad/scroll wheel |
 
 The in-app command palette and menus expose the complete command set. Choose
-**Vector Editor → Keyboard Shortcuts…** to create and open the user
+**Strek → Keyboard Shortcuts…** to create and open the user
 `keybindings.json`; changes take effect after restarting the app. A string
 replaces a binding, an array assigns alternatives, and `null` disables it.
 
 ## Documents and export
 
 Documents are stored as versioned JSON. Saving an extensionless filename adds
-the native `.vector.json` extension. The loader validates the scene graph before
+the native `.strek.json` extension. The loader validates the scene graph before
 opening it, and writes use a same-directory temporary file before replacement.
 
 Use the File menu to export visible artwork as SVG or PNG. Export bounds are
@@ -106,7 +106,7 @@ build the bundle:
 
 ```sh
 cargo install cargo-packager --locked
-cargo packager -p vector-editor-gpui --release --formats app
+cargo packager -p strek --release --formats app
 ```
 
 The bundle is written below `target/release/`. Signing, notarization, and a
@@ -122,6 +122,6 @@ The workspace is split by responsibility:
 - `crates/render_wgpu` and `apps/desktop` — legacy wgpu renderer and shell
 - `crates/ui` — shared UI-facing abstractions used by the legacy shell
 
-`SPEC.md` describes intended editor behavior. `Rust Vector Editor
-Architecture.md` contains the broader architecture notes; when either differs
-from working code, tests and implementation are authoritative.
+`SPEC.md` describes intended editor behavior. `Strek Architecture.md` contains
+the broader architecture notes; when either differs from working code, tests
+and implementation are authoritative.

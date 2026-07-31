@@ -662,7 +662,7 @@ impl Editor {
             .with_style(Style::fill(Paint::rgb(0.1, 0.1, 0.1)))
             .with_transform(glam::Affine2::from_translation(Vec2::new(400.0, 80.0)));
 
-        let text2 = Node::text("Title", "Vector Editor")
+        let text2 = Node::text("Title", "Strek")
             .with_style(Style::fill(Paint::rgb(0.3, 0.3, 0.8)))
             .with_transform(glam::Affine2::from_translation(Vec2::new(450.0, 250.0)));
 

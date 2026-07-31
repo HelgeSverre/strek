@@ -12,11 +12,11 @@ lint:
 
 # Run the GPUI desktop application
 run:
-    cargo run -p vector-editor-gpui
+    cargo run -p strek
 
 # Run the legacy wgpu desktop application
 run-legacy:
-    cargo run -p vector-editor-desktop
+    cargo run -p strek-legacy
 
 # Format code
 format:

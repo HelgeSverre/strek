@@ -1,4 +1,4 @@
-# Rust Vector Editor Architecture
+# Strek Architecture
 
 > Historical design transcript. The current implementation and `SPEC.md` are
 > authoritative; the experimental web frontend described below has been retired.
@@ -844,7 +844,7 @@ ___________
 -------------------------
 
 ```
-vector-editor/
+strek/
   Cargo.toml                # workspace
   crates/
     editor_core/            # document + tools + undo + snapping + layout
@@ -1052,7 +1052,7 @@ fn mods(m: winit::event::ModifiersState) -> Mods {
 
 fn main() {
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().with_title("Vector Editor").build(&event_loop).unwrap();
+    let window = WindowBuilder::new().with_title("Strek").build(&event_loop).unwrap();
 
     let mut editor = Editor::new();
 

@@ -4647,6 +4647,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strek"
+version = "0.1.0"
+dependencies = [
+ "editor_core",
+ "editor_render",
+ "env_logger",
+ "glam",
+ "gpui",
+ "image",
+ "log",
+ "lyon",
+ "render_svg",
+ "resvg",
+ "serde_json",
+ "smallvec",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "strek-legacy"
+version = "0.1.0"
+dependencies = [
+ "editor_core",
+ "env_logger",
+ "glam",
+ "log",
+ "pollster 0.4.0",
+ "render_wgpu",
+ "ui",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5400,40 +5434,6 @@ dependencies = [
  "sval_json",
  "sval_ref",
  "sval_serde",
-]
-
-[[package]]
-name = "vector-editor-desktop"
-version = "0.1.0"
-dependencies = [
- "editor_core",
- "env_logger",
- "glam",
- "log",
- "pollster 0.4.0",
- "render_wgpu",
- "ui",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "vector-editor-gpui"
-version = "0.1.0"
-dependencies = [
- "editor_core",
- "editor_render",
- "env_logger",
- "glam",
- "gpui",
- "image",
- "log",
- "lyon",
- "render_svg",
- "resvg",
- "serde_json",
- "smallvec",
- "unicode-segmentation",
 ]
 
 [[package]]

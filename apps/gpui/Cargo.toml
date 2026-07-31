@@ -1,9 +1,13 @@
 [package]
-name = "vector-editor-gpui"
+name = "strek"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "GPUI-based desktop application for the vector editor"
+description = "A native vector editor for logos and icons"
+authors = ["Helge Sverre <helge.sverre@gmail.com>"]
+repository = "https://github.com/HelgeSverre/strek"
+homepage = "https://github.com/HelgeSverre/strek"
+readme = "../../README.md"
 
 [dependencies]
 editor_core = { path = "../../crates/editor_core" }
@@ -21,13 +25,13 @@ smallvec = "1"
 unicode-segmentation = { workspace = true }
 
 [[bin]]
-name = "vector-editor-gpui"
+name = "strek"
 path = "src/main.rs"
 
 [package.metadata.packager]
-before-packaging-command = "cargo build --release --locked -p vector-editor-gpui"
-product-name = "Vector Editor"
-identifier = "io.github.helgesverre.vector-editor"
+before-packaging-command = "cargo build --release --locked -p strek"
+product-name = "Strek"
+identifier = "no.helgesverre.strek"
 icons = ["assets/app-icon.icns"]
 license-file = "../../LICENSE"
 formats = ["app"]

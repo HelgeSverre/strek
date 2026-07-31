@@ -27,7 +27,7 @@ use gpui::{
 };
 
 actions!(
-    vector_editor,
+    strek,
     [
         NewDocument,
         OpenDocument,
@@ -190,7 +190,7 @@ struct ZoomInput {
 }
 
 /// Main application state as a GPUI Entity.
-struct VectorEditor {
+struct Strek {
     editor: Editor,
     document_path: Option<PathBuf>,
     recent_files: document_io::RecentFiles,
@@ -216,7 +216,7 @@ struct VectorEditor {
     did_focus: bool,
 }
 
-impl VectorEditor {
+impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
         Self {
             editor: Editor::new(),
@@ -251,7 +251,7 @@ impl VectorEditor {
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .map(|name| {
-                name.strip_suffix(".vector.json")
+                name.strip_suffix(".strek.json")
                     .or_else(|| name.strip_suffix(".json"))
                     .unwrap_or(name)
                     .to_owned()
@@ -269,11 +269,7 @@ impl VectorEditor {
 
     fn update_window_title(&self, window: &mut Window) {
         let dirty_marker = if self.editor.is_dirty() { " •" } else { "" };
-        window.set_window_title(&format!(
-            "{}{} — Vector Editor",
-            self.document_name(),
-            dirty_marker
-        ));
+        window.set_window_title(&format!("{}{} — Strek", self.document_name(), dirty_marker));
     }
 
     pub(crate) fn begin_layer_rename(
@@ -2558,13 +2554,13 @@ impl VectorEditor {
     }
 }
 
-impl Focusable for VectorEditor {
+impl Focusable for Strek {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl Render for VectorEditor {
+impl Render for Strek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.did_focus {
             self.focus_handle.focus(window);
@@ -2650,7 +2646,7 @@ impl Render for VectorEditor {
         let editor_entity = cx.entity().downgrade();
 
         div()
-            .id("vector-editor")
+            .id("strek")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_document))
@@ -2929,13 +2925,13 @@ fn canvas_position(
 
 fn editor_key_context(has_modal: bool, has_menu: bool, editing_text: bool) -> &'static str {
     if has_modal {
-        "VectorModal"
+        "StrekModal"
     } else if has_menu {
-        "VectorMenu"
+        "StrekMenu"
     } else if editing_text {
-        "VectorTextEditor"
+        "StrekTextEditor"
     } else {
-        "VectorEditor"
+        "Strek"
     }
 }
 
@@ -3036,18 +3032,18 @@ fn convert_cursor(cursor: editor_core::Cursor) -> gpui::CursorStyle {
 fn register_keybindings(cx: &mut App, keymap: &commands::Keymap) {
     commands::register_keybindings(cx, keymap);
     cx.bind_keys([
-        KeyBinding::new("enter", Enter, Some("VectorEditor")),
-        KeyBinding::new("shift-enter", SelectParent, Some("VectorEditor")),
-        KeyBinding::new("escape", Escape, Some("VectorEditor")),
-        KeyBinding::new("left", TextLeft, Some("VectorTextEditor")),
-        KeyBinding::new("right", TextRight, Some("VectorTextEditor")),
-        KeyBinding::new("shift-left", TextSelectLeft, Some("VectorTextEditor")),
-        KeyBinding::new("shift-right", TextSelectRight, Some("VectorTextEditor")),
-        KeyBinding::new("home", TextHome, Some("VectorTextEditor")),
-        KeyBinding::new("end", TextEnd, Some("VectorTextEditor")),
-        KeyBinding::new("enter", Enter, Some("VectorTextEditor")),
-        KeyBinding::new("escape", Escape, Some("VectorTextEditor")),
-        KeyBinding::new("escape", Escape, Some("VectorMenu")),
+        KeyBinding::new("enter", Enter, Some("Strek")),
+        KeyBinding::new("shift-enter", SelectParent, Some("Strek")),
+        KeyBinding::new("escape", Escape, Some("Strek")),
+        KeyBinding::new("left", TextLeft, Some("StrekTextEditor")),
+        KeyBinding::new("right", TextRight, Some("StrekTextEditor")),
+        KeyBinding::new("shift-left", TextSelectLeft, Some("StrekTextEditor")),
+        KeyBinding::new("shift-right", TextSelectRight, Some("StrekTextEditor")),
+        KeyBinding::new("home", TextHome, Some("StrekTextEditor")),
+        KeyBinding::new("end", TextEnd, Some("StrekTextEditor")),
+        KeyBinding::new("enter", Enter, Some("StrekTextEditor")),
+        KeyBinding::new("escape", Escape, Some("StrekTextEditor")),
+        KeyBinding::new("escape", Escape, Some("StrekMenu")),
     ]);
 }
 
@@ -3063,11 +3059,11 @@ fn main() {
             layer_name_input::register_keybindings(cx);
             cx.set_menus(vec![
                 Menu {
-                    name: "Vector Editor".into(),
+                    name: "Strek".into(),
                     items: vec![
                         MenuItem::action("Keyboard Shortcuts…", OpenKeyboardShortcuts),
                         MenuItem::separator(),
-                        MenuItem::action("Quit Vector Editor", QuitApplication),
+                        MenuItem::action("Quit Strek", QuitApplication),
                     ],
                 },
                 Menu {
@@ -3105,7 +3101,7 @@ fn main() {
                     ..Default::default()
                 },
                 move |window, cx| {
-                    let editor = cx.new(|editor_cx| VectorEditor::new(keymap.clone(), editor_cx));
+                    let editor = cx.new(|editor_cx| Strek::new(keymap.clone(), editor_cx));
                     let weak_editor = editor.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         weak_editor
@@ -3177,11 +3173,11 @@ mod layout_tests {
 
     #[test]
     fn modal_context_blocks_canvas_shortcuts_while_typing() {
-        assert_eq!(editor_key_context(true, false, false), "VectorModal");
-        assert_eq!(editor_key_context(true, true, true), "VectorModal");
-        assert_eq!(editor_key_context(false, true, true), "VectorMenu");
-        assert_eq!(editor_key_context(false, false, true), "VectorTextEditor");
-        assert_eq!(editor_key_context(false, false, false), "VectorEditor");
+        assert_eq!(editor_key_context(true, false, false), "StrekModal");
+        assert_eq!(editor_key_context(true, true, true), "StrekModal");
+        assert_eq!(editor_key_context(false, true, true), "StrekMenu");
+        assert_eq!(editor_key_context(false, false, true), "StrekTextEditor");
+        assert_eq!(editor_key_context(false, false, false), "Strek");
     }
 
     #[test]

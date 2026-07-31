@@ -14,7 +14,7 @@ use crate::{
     layer_name_input::LayerNameInput,
     properties_panel::{self, PropertiesSnapshot},
     toolbar::editor_tooltip,
-    Delete, Duplicate, Group, Ungroup, VectorEditor,
+    Delete, Duplicate, Group, Strek, Ungroup,
 };
 
 pub const DEFAULT_PANEL_WIDTH: f32 = 248.0;
@@ -72,7 +72,7 @@ fn layer_menu_availability(editor: &Editor, target: NodeId) -> LayerMenuAvailabi
     }
 }
 
-impl VectorEditor {
+impl Strek {
     fn open_layer_context_menu(
         &mut self,
         target: NodeId,
@@ -133,7 +133,7 @@ pub fn render_layers_panel(
     layer_entries: Vec<LayerEntry>,
     layer_name_input: Option<(NodeId, Entity<LayerNameInput>)>,
     width: f32,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let rows = layer_entries
         .into_iter()
@@ -191,7 +191,7 @@ pub(crate) fn render_layer_context_menu(
     menu: LayerContextMenu,
     editor: &Editor,
     keymap: &Keymap,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let availability = layer_menu_availability(editor, menu.target);
     let title = editor
@@ -205,7 +205,7 @@ pub(crate) fn render_layer_context_menu(
         .absolute()
         .inset_0()
         .occlude()
-        .on_any_mouse_down(cx.listener(VectorEditor::close_layer_context_menu_from_mouse))
+        .on_any_mouse_down(cx.listener(Strek::close_layer_context_menu_from_mouse))
         .child(
             anchored()
                 .anchor(Corner::TopLeft)
@@ -283,7 +283,7 @@ fn layer_action_menu_item<A: Action + Clone>(
     shortcut: SharedString,
     enabled: bool,
     action: A,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!(
@@ -416,7 +416,7 @@ impl Render for DraggedLayerPreview {
 fn render_layer_entry(
     entry: LayerEntry,
     name_input: Option<Entity<LayerNameInput>>,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let is_renaming = name_input.is_some();
     let indent = entry.depth as f32 * 16.0;

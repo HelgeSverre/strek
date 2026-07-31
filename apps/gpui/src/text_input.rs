@@ -8,9 +8,9 @@ use gpui::{
     Styled, UTF16Selection, Window,
 };
 
-use crate::VectorEditor;
+use crate::Strek;
 
-pub fn canvas_text_input(editor: Entity<VectorEditor>) -> impl IntoElement {
+pub fn canvas_text_input(editor: Entity<Strek>) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -18,7 +18,7 @@ pub fn canvas_text_input(editor: Entity<VectorEditor>) -> impl IntoElement {
 }
 
 struct CanvasTextInputElement {
-    editor: Entity<VectorEditor>,
+    editor: Entity<Strek>,
 }
 
 impl IntoElement for CanvasTextInputElement {
@@ -83,7 +83,7 @@ impl Element for CanvasTextInputElement {
     }
 }
 
-impl EntityInputHandler for VectorEditor {
+impl EntityInputHandler for Strek {
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,

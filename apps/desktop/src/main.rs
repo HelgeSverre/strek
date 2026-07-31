@@ -187,7 +187,7 @@ impl ApplicationHandler for App {
         }
 
         let window_attributes = Window::default_attributes()
-            .with_title("Vector Editor")
+            .with_title("Strek")
             .with_inner_size(LogicalSize::new(1024, 768));
 
         let window = Arc::new(

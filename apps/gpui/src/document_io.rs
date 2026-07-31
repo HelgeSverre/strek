@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{Document, DocumentLoadError};
 
-const DOCUMENT_EXTENSION: &str = "vector.json";
+const DOCUMENT_EXTENSION: &str = "strek.json";
 const MAX_RECENT_FILES: usize = 8;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -167,7 +167,7 @@ fn recent_files_path() -> Option<PathBuf> {
 
 /// Per-user directory for editor preferences and recent state.
 pub(crate) fn app_config_directory() -> Option<PathBuf> {
-    config_root().map(|root| root.join("vector-editor"))
+    config_root().map(|root| root.join("strek"))
 }
 
 #[cfg(target_os = "macos")]
@@ -255,17 +255,14 @@ mod tests {
 
     fn temporary_test_directory(name: &str) -> PathBuf {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        env::temp_dir().join(format!(
-            "vector-editor-{name}-{}-{sequence}",
-            std::process::id()
-        ))
+        env::temp_dir().join(format!("strek-{name}-{}-{sequence}", std::process::id()))
     }
 
     #[test]
     fn document_round_trip_uses_atomic_writer() {
         let directory = temporary_test_directory("document-io");
         fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("drawing.vector.json");
+        let path = directory.join("drawing.strek.json");
         let mut document = Document::new();
         document
             .add_child(
@@ -286,7 +283,7 @@ mod tests {
     fn extensionless_paths_receive_native_extension() {
         assert_eq!(
             normalize_document_path(PathBuf::from("/tmp/drawing")),
-            PathBuf::from("/tmp/drawing.vector.json")
+            PathBuf::from("/tmp/drawing.strek.json")
         );
         assert_eq!(
             normalize_document_path(PathBuf::from("/tmp/drawing.json")),

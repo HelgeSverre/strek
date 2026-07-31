@@ -18,10 +18,10 @@ use crate::{
     ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool, Group, InvertSelection,
     JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
     RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool,
-    SendBackward, SendToBack, ShowCommandPalette, SplitPath, StartZoomInput, TextLarger,
+    SendBackward, SendToBack, ShowCommandPalette, SplitPath, StartZoomInput, Strek, TextLarger,
     TextSmaller, TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel,
-    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut,
-    ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
+    ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -884,7 +884,7 @@ pub fn render_menu(
     editor: &Editor,
     state: MenuState<'_>,
     viewport_width: f32,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let (anchor, corner, panel): (_, _, AnyElement) = match kind {
         MenuKind::Main => (
@@ -913,10 +913,7 @@ pub fn render_menu(
         .absolute()
         .inset_0()
         .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(VectorEditor::close_menu_from_mouse),
-        )
+        .on_mouse_down(MouseButton::Left, cx.listener(Strek::close_menu_from_mouse))
         .child(
             anchored()
                 .anchor(corner)
@@ -940,7 +937,7 @@ fn render_main_menu(
     recent_files: &[PathBuf],
     file_busy: bool,
     keymap: &Keymap,
-    cx: &mut Context<VectorEditor>,
+    cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let can_copy_or_cut = editor.text_input_snapshot().map_or_else(
         || !editor.selection().is_empty(),
@@ -1257,7 +1254,7 @@ fn render_main_menu(
         ))
 }
 
-fn recent_file_item(index: usize, path: &Path, cx: &mut Context<VectorEditor>) -> impl IntoElement {
+fn recent_file_item(index: usize, path: &Path, cx: &mut Context<Strek>) -> impl IntoElement {
     let path = path.to_path_buf();
     let label = path
         .file_name()

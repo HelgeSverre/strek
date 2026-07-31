@@ -23,9 +23,9 @@ use crate::{
 };
 
 const KEYMAP_VERSION: u64 = 1;
-const EDITOR_CONTEXT: &str = "VectorEditor";
-const TEXT_CONTEXT: &str = "VectorTextEditor";
-const MENU_CONTEXT: &str = "VectorMenu";
+const EDITOR_CONTEXT: &str = "Strek";
+const TEXT_CONTEXT: &str = "StrekTextEditor";
+const MENU_CONTEXT: &str = "StrekMenu";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AppCommand {
@@ -180,7 +180,7 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
     ),
     app_command!(
         "application.quit",
-        "Quit Vector Editor",
+        "Quit Strek",
         "Quit the application",
         "Application",
         ["secondary-q"],
@@ -799,7 +799,7 @@ impl Keymap {
                 bindings.insert(spec.id.to_owned(), value);
             }
             let json = serde_json::to_vec_pretty(&json!({
-                "_note": "Changes take effect after restarting Vector Editor.",
+                "_note": "Changes take effect after restarting Strek.",
                 "version": KEYMAP_VERSION,
                 "bindings": bindings,
             }))
