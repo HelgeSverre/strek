@@ -97,6 +97,7 @@ actions!(
         Cut,
         Paste,
         Enter,
+        SelectParent,
         Escape,
     ]
 );
@@ -1180,8 +1181,16 @@ impl VectorEditor {
         ) {
             self.editor.finish_editing();
             cx.notify();
-        } else {
-            self.execute_editor_action(EditorAction::EnterVectorEdit, cx);
+        } else if self.editor.enter_selection() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+            cx.notify();
+        }
+    }
+
+    fn select_parent(&mut self, _: &SelectParent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.select_parent() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+            cx.notify();
         }
     }
 
@@ -1514,6 +1523,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::select_parent))
             .on_action(cx.listener(Self::escape))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
@@ -1693,6 +1703,7 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("secondary-x", Cut, Some("VectorEditor")),
         KeyBinding::new("secondary-v", Paste, Some("VectorEditor")),
         KeyBinding::new("enter", Enter, Some("VectorEditor")),
+        KeyBinding::new("shift-enter", SelectParent, Some("VectorEditor")),
         KeyBinding::new("escape", Escape, Some("VectorEditor")),
         KeyBinding::new("secondary-n", NewDocument, Some("VectorTextEditor")),
         KeyBinding::new("secondary-o", OpenDocument, Some("VectorTextEditor")),

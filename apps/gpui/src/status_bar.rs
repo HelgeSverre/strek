@@ -43,7 +43,7 @@ pub fn render_status_bar(
     let hint = match interaction {
         InteractionKind::Idle => match tool {
             Tool::Select => {
-                "Shift-click toggles selection · drag handles to transform · Space pans"
+                "Click selects containers · Ctrl/Cmd-click selects inside · Enter drills in · Shift+Enter goes up"
             }
             Tool::Frame => "Drag an artboard · enclosed objects become children · Esc exits tool",
             Tool::Rectangle | Tool::Ellipse => {
