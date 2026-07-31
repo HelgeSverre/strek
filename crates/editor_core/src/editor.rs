@@ -636,6 +636,30 @@ impl Editor {
             EditorAction::SendBackward => {
                 self.send_selection_backward();
             }
+            EditorAction::AlignLeft => {
+                self.align_selection(crate::snap::AlignAxis::Left);
+            }
+            EditorAction::AlignCenter => {
+                self.align_selection(crate::snap::AlignAxis::CenterX);
+            }
+            EditorAction::AlignRight => {
+                self.align_selection(crate::snap::AlignAxis::Right);
+            }
+            EditorAction::AlignTop => {
+                self.align_selection(crate::snap::AlignAxis::Top);
+            }
+            EditorAction::AlignMiddle => {
+                self.align_selection(crate::snap::AlignAxis::CenterY);
+            }
+            EditorAction::AlignBottom => {
+                self.align_selection(crate::snap::AlignAxis::Bottom);
+            }
+            EditorAction::DistributeHorizontal => {
+                self.distribute_selection(crate::snap::DistributeAxis::Horizontal);
+            }
+            EditorAction::DistributeVertical => {
+                self.distribute_selection(crate::snap::DistributeAxis::Vertical);
+            }
 
             // Nudge
             EditorAction::NudgeUp => {
@@ -782,6 +806,17 @@ impl Editor {
                         })
             }
 
+            EditorAction::AlignLeft
+            | EditorAction::AlignCenter
+            | EditorAction::AlignRight
+            | EditorAction::AlignTop
+            | EditorAction::AlignMiddle
+            | EditorAction::AlignBottom => self.transform_selection_count() >= 2,
+
+            EditorAction::DistributeHorizontal | EditorAction::DistributeVertical => {
+                self.transform_selection_count() >= 3
+            }
+
             // Ungroup requires grouped selection
             EditorAction::Ungroup => self
                 .selection
@@ -792,11 +827,13 @@ impl Editor {
             EditorAction::Undo => self.can_undo_in_context(),
             EditorAction::Redo => self.can_redo_in_context(),
 
-            EditorAction::EnterVectorEdit => self.selection.iter().any(|id| {
-                self.document
-                    .get(id)
-                    .is_some_and(|node| matches!(node.kind, NodeKind::Shape(_)))
-            }),
+            EditorAction::EnterVectorEdit => {
+                self.selection.len() == 1
+                    && self
+                        .selection
+                        .primary()
+                        .is_some_and(|id| self.document.get(id).and_then(Node::path).is_some())
+            }
             EditorAction::FinishEditing => matches!(
                 self.drag,
                 DragState::Pen(_) | DragState::TextEditing(_) | DragState::VectorEditing(_)
@@ -807,6 +844,13 @@ impl Editor {
                 matches!(self.drag, DragState::VectorEditing(_))
             }
         }
+    }
+
+    fn transform_selection_count(&self) -> usize {
+        let selected: Vec<_> = self.selection.iter().collect();
+        self.document
+            .filter_selection_for_transform(&selected)
+            .len()
     }
 
     /// Find the action for a key press.
@@ -1232,16 +1276,16 @@ impl Editor {
         self.needs_redraw = true;
     }
 
-    /// Select a node from the layer panel (replacing current selection).
-    pub fn select_layer(&mut self, id: NodeId, add_to_selection: bool) {
-        self.settle_interaction();
+    /// Select a node from the layer panel, or toggle it in a multi-selection.
+    pub fn select_layer(&mut self, id: NodeId, toggle_selection: bool) {
         if !self.document.is_effectively_editable(id) {
             return;
         }
-        if add_to_selection {
-            self.selection.add(id);
+        self.settle_interaction();
+        if toggle_selection {
+            self.selection.toggle(id);
         } else {
-            self.selection.set(vec![id]);
+            self.selection.select(id);
         }
         self.needs_redraw = true;
     }
@@ -1976,11 +2020,20 @@ impl Editor {
             };
         }
 
-        if key == Key::Escape && !modifiers.any() && self.cancel_interaction() {
-            return Effects {
-                redraw: true,
-                cursor: Some(self.cursor_for_state()),
-            };
+        if key == Key::Escape && !modifiers.any() {
+            if self.cancel_interaction() {
+                return Effects {
+                    redraw: true,
+                    cursor: Some(self.cursor_for_state()),
+                };
+            }
+            if self.tool != Tool::Select {
+                self.set_tool(Tool::Select);
+                return Effects {
+                    redraw: true,
+                    cursor: Some(self.cursor_for_state()),
+                };
+            }
         }
 
         // Use the action system to handle keyboard shortcuts
@@ -4726,7 +4779,8 @@ impl Editor {
 
     /// Align selected nodes along an axis.
     pub fn align_selection(&mut self, axis: crate::snap::AlignAxis) {
-        let nodes: Vec<_> = self.selection.iter().collect();
+        let selected: Vec<_> = self.selection.iter().collect();
+        let nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 2 {
             return;
         }
@@ -4779,7 +4833,8 @@ impl Editor {
 
     /// Distribute selected nodes evenly along an axis.
     pub fn distribute_selection(&mut self, axis: crate::snap::DistributeAxis) {
-        let nodes: Vec<_> = self.selection.iter().collect();
+        let selected: Vec<_> = self.selection.iter().collect();
+        let nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 3 {
             return; // Need at least 3 nodes to distribute
         }
@@ -5833,6 +5888,51 @@ mod tests {
     }
 
     #[test]
+    fn alignment_is_undoable_and_ignores_selected_descendants() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Group")
+                    .with_transform(Affine2::from_translation(Vec2::new(30.0, 0.0))),
+            )
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let sibling = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Sibling", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(80.0, 0.0))),
+            )
+            .unwrap();
+        let child_before = editor.document.world_transform(child);
+        let sibling_before = editor.document.world_transform(sibling);
+        editor.selection.set([group, child, sibling]);
+
+        assert!(editor.can_execute(EditorAction::AlignLeft));
+        assert!(!editor.can_execute(EditorAction::DistributeHorizontal));
+        assert!(editor.execute_action(EditorAction::AlignLeft));
+        assert_eq!(
+            editor.document.world_bounds(group).unwrap().min.x,
+            editor.document.world_bounds(sibling).unwrap().min.x
+        );
+        assert_affine_approx_eq(editor.document.world_transform(child), child_before);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_affine_approx_eq(editor.document.world_transform(child), child_before);
+        assert_affine_approx_eq(editor.document.world_transform(sibling), sibling_before);
+    }
+
+    #[test]
     fn grouping_uses_scene_order_not_selection_hash_order() {
         let (mut editor, ids) = editor_with_named_shapes(&["A", "B", "C"]);
         let root = editor.document.root;
@@ -6369,6 +6469,58 @@ mod tests {
     }
 
     #[test]
+    fn layer_multi_selection_mode_toggles_and_single_selection_replaces() {
+        let (mut editor, ids) = editor_with_named_shapes(&["First", "Second", "Third"]);
+
+        editor.select_layer(ids[0], false);
+        editor.select_layer(ids[1], true);
+        assert_eq!(editor.selection.iter().collect::<Vec<_>>(), ids[..2]);
+        assert_eq!(editor.selection.primary(), Some(ids[0]));
+
+        editor.select_layer(ids[0], true);
+        assert_eq!(editor.selection.iter().collect::<Vec<_>>(), [ids[1]]);
+        assert_eq!(editor.selection.primary(), Some(ids[1]));
+
+        editor.select_layer(ids[2], false);
+        assert_eq!(editor.selection.iter().collect::<Vec<_>>(), [ids[2]]);
+        assert_eq!(editor.selection.primary(), Some(ids[2]));
+    }
+
+    #[test]
+    fn uneditable_layer_selection_does_not_settle_active_editing() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let editing = editor
+            .document
+            .add_child(root, Node::text("Editing", "A"))
+            .unwrap();
+        let hidden = editor
+            .document
+            .add_child(root, Node::text("Hidden", "B"))
+            .unwrap();
+        editor.document.get_mut(hidden).unwrap().visible = false;
+        let locked = editor
+            .document
+            .add_child(root, Node::text("Locked", "C"))
+            .unwrap();
+        editor.document.get_mut(locked).unwrap().locked = true;
+        editor.begin_existing_text_edit(editing);
+        assert!(editor.replace_text(None, "!"));
+
+        for id in [hidden, locked] {
+            editor.select_layer(id, false);
+            assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
+            assert_eq!(editor.selection.primary(), Some(editing));
+            assert!(!editor.history.can_undo());
+        }
+
+        let NodeKind::Text(text) = &editor.document.get(editing).unwrap().kind else {
+            panic!("expected text");
+        };
+        assert_eq!(text.content, "A!");
+    }
+
+    #[test]
     fn marquee_ignores_hidden_and_ancestor_locked_nodes() {
         let mut editor = Editor::new();
         let root = editor.document.root;
@@ -6403,6 +6555,37 @@ mod tests {
         assert!(!selected.contains(&hidden_child));
         assert!(!selected.contains(&locked_child));
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn vector_edit_requires_exactly_one_selected_path() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let path = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Path", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let text = editor
+            .document
+            .add_child(root, Node::text("Text", "A"))
+            .unwrap();
+
+        editor.selection.select(text);
+        assert!(!editor.can_execute(EditorAction::EnterVectorEdit));
+        assert!(!editor.execute_action(EditorAction::EnterVectorEdit));
+
+        editor.selection.set([path, text]);
+        assert_eq!(editor.selection.primary(), Some(path));
+        assert!(!editor.can_execute(EditorAction::EnterVectorEdit));
+        assert!(!editor.execute_action(EditorAction::EnterVectorEdit));
+
+        editor.selection.select(path);
+        assert!(editor.can_execute(EditorAction::EnterVectorEdit));
+        assert!(editor.execute_action(EditorAction::EnterVectorEdit));
+        assert_eq!(editor.interaction_kind(), InteractionKind::VectorEditing);
     }
 
     #[test]
@@ -7258,6 +7441,44 @@ mod tests {
 
         assert_eq!(editor.document.descendants(editor.document.root).count(), 0);
         assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn escape_cancels_then_selects_then_deselects() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Selected"]);
+        editor.selection.select(ids[0]);
+        editor.execute_action(EditorAction::ToolRectangle);
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(20.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(40.0, 40.0),
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.interaction_kind(), InteractionKind::CreatingShape);
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.tool, Tool::Rectangle);
+        assert_eq!(editor.selection.primary(), Some(ids[0]));
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.tool, Tool::Select);
+        assert_eq!(editor.selection.primary(), Some(ids[0]));
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.selection.is_empty());
     }
 
     #[test]

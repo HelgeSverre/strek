@@ -6,11 +6,11 @@ use crate::path::Rect;
 /// Selection state for the editor.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
-    /// Set of selected node IDs
-    nodes: HashSet<NodeId>,
+    /// Selected node IDs in insertion order.
+    nodes: Vec<NodeId>,
 
-    /// Primary/anchor node (for multi-select operations)
-    primary: Option<NodeId>,
+    /// Membership index for efficient selection checks.
+    membership: HashSet<NodeId>,
 }
 
 impl Selection {
@@ -31,12 +31,12 @@ impl Selection {
 
     /// Check if a node is selected.
     pub fn contains(&self, id: NodeId) -> bool {
-        self.nodes.contains(&id)
+        self.membership.contains(&id)
     }
 
     /// Get the primary (anchor) node.
     pub fn primary(&self) -> Option<NodeId> {
-        self.primary
+        self.nodes.first().copied()
     }
 
     /// Iterate over selected nodes.
@@ -46,41 +46,40 @@ impl Selection {
 
     /// Get selected nodes as a vector.
     pub fn to_vec(&self) -> Vec<NodeId> {
-        self.nodes.iter().copied().collect()
+        self.nodes.clone()
     }
 
     /// Clear the selection.
     pub fn clear(&mut self) {
         self.nodes.clear();
-        self.primary = None;
+        self.membership.clear();
     }
 
     /// Select a single node (replacing any existing selection).
     pub fn select(&mut self, id: NodeId) {
         self.nodes.clear();
-        self.nodes.insert(id);
-        self.primary = Some(id);
+        self.nodes.push(id);
+        self.membership.clear();
+        self.membership.insert(id);
     }
 
     /// Add a node to the selection.
     pub fn add(&mut self, id: NodeId) {
-        self.nodes.insert(id);
-        if self.primary.is_none() {
-            self.primary = Some(id);
+        if self.membership.insert(id) {
+            self.nodes.push(id);
         }
     }
 
     /// Remove a node from the selection.
     pub fn remove(&mut self, id: NodeId) {
-        self.nodes.remove(&id);
-        if self.primary == Some(id) {
-            self.primary = self.nodes.iter().next().copied();
+        if self.membership.remove(&id) {
+            self.nodes.retain(|selected| *selected != id);
         }
     }
 
     /// Toggle selection of a node.
     pub fn toggle(&mut self, id: NodeId) {
-        if self.nodes.contains(&id) {
+        if self.membership.contains(&id) {
             self.remove(id);
         } else {
             self.add(id);
@@ -89,9 +88,10 @@ impl Selection {
 
     /// Set the selection to multiple nodes.
     pub fn set(&mut self, ids: impl IntoIterator<Item = NodeId>) {
-        self.nodes.clear();
-        self.nodes.extend(ids);
-        self.primary = self.nodes.iter().next().copied();
+        self.clear();
+        for id in ids {
+            self.add(id);
+        }
     }
 
     /// Select all nodes within a rectangle (marquee selection).
@@ -103,7 +103,14 @@ impl Selection {
         // This is called with a closure that has access to the document
         // to check bounds intersection
         let _ = rect; // rect is used by the closure
-        self.nodes.retain(|&id| intersects(id));
+        let membership = &mut self.membership;
+        self.nodes.retain(|&id| {
+            let retain = intersects(id);
+            if !retain {
+                membership.remove(&id);
+            }
+            retain
+        });
     }
 }
 
@@ -197,6 +204,56 @@ mod tests {
         assert!(sel.contains(a));
 
         sel.toggle(a);
+        assert!(!sel.contains(a));
+    }
+
+    #[test]
+    fn set_preserves_first_occurrence_order() {
+        let (a, b, c) = make_ids();
+        let mut sel = Selection::new();
+
+        sel.set([b, a, b, c]);
+
+        assert_eq!(sel.iter().collect::<Vec<_>>(), [b, a, c]);
+        assert_eq!(sel.to_vec(), [b, a, c]);
+        assert_eq!(sel.primary(), Some(b));
+    }
+
+    #[test]
+    fn removing_primary_promotes_the_next_inserted_node() {
+        let (a, b, c) = make_ids();
+        let mut sel = Selection::new();
+        sel.set([a, b, c]);
+
+        sel.remove(b);
+        assert_eq!(sel.iter().collect::<Vec<_>>(), [a, c]);
+        assert_eq!(sel.primary(), Some(a));
+
+        sel.remove(a);
+        assert_eq!(sel.iter().collect::<Vec<_>>(), [c]);
+        assert_eq!(sel.primary(), Some(c));
+
+        sel.remove(c);
+        assert!(sel.is_empty());
+        assert_eq!(sel.primary(), None);
+    }
+
+    #[test]
+    fn select_in_rect_retains_order_and_promotes_primary() {
+        let (a, b, c) = make_ids();
+        let mut sel = Selection::new();
+        sel.set([a, b, c]);
+        let mut visited = Vec::new();
+
+        sel.select_in_rect(Rect::empty(), |id| {
+            visited.push(id);
+            id != a
+        });
+
+        assert_eq!(visited, [a, b, c]);
+        assert_eq!(sel.iter().collect::<Vec<_>>(), [b, c]);
+        assert_eq!(sel.primary(), Some(b));
+        assert!(sel.contains(b));
         assert!(!sel.contains(a));
     }
 

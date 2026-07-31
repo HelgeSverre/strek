@@ -368,8 +368,15 @@ pub fn calculate_alignment(bounds: &[Rect], axis: AlignAxis) -> Vec<Vec2> {
     let reference = match axis {
         AlignAxis::Left => bounds.iter().map(|b| b.min.x).fold(f32::INFINITY, f32::min),
         AlignAxis::CenterX => {
-            let total: f32 = bounds.iter().map(|b| b.center().x).sum();
-            total / bounds.len() as f32
+            let min = bounds
+                .iter()
+                .map(|bounds| bounds.min.x)
+                .fold(f32::INFINITY, f32::min);
+            let max = bounds
+                .iter()
+                .map(|bounds| bounds.max.x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            (min + max) * 0.5
         }
         AlignAxis::Right => bounds
             .iter()
@@ -377,8 +384,15 @@ pub fn calculate_alignment(bounds: &[Rect], axis: AlignAxis) -> Vec<Vec2> {
             .fold(f32::NEG_INFINITY, f32::max),
         AlignAxis::Top => bounds.iter().map(|b| b.min.y).fold(f32::INFINITY, f32::min),
         AlignAxis::CenterY => {
-            let total: f32 = bounds.iter().map(|b| b.center().y).sum();
-            total / bounds.len() as f32
+            let min = bounds
+                .iter()
+                .map(|bounds| bounds.min.y)
+                .fold(f32::INFINITY, f32::min);
+            let max = bounds
+                .iter()
+                .map(|bounds| bounds.max.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            (min + max) * 0.5
         }
         AlignAxis::Bottom => bounds
             .iter()
@@ -407,48 +421,34 @@ pub fn calculate_distribution(bounds: &[Rect], axis: DistributeAxis) -> Vec<Vec2
         return vec![Vec2::ZERO; bounds.len()];
     }
 
-    // Get centers and sort by position
-    let mut indexed: Vec<(usize, Vec2)> = bounds
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (i, b.center()))
-        .collect();
-
-    match axis {
-        DistributeAxis::Horizontal => {
-            indexed.sort_by(|a, b| a.1.x.partial_cmp(&b.1.x).unwrap());
-        }
-        DistributeAxis::Vertical => {
-            indexed.sort_by(|a, b| a.1.y.partial_cmp(&b.1.y).unwrap());
-        }
-    }
-
-    // Calculate total span and spacing
-    let first_center = indexed.first().unwrap().1;
-    let last_center = indexed.last().unwrap().1;
-
-    let total_span = match axis {
-        DistributeAxis::Horizontal => last_center.x - first_center.x,
-        DistributeAxis::Vertical => last_center.y - first_center.y,
+    let start = |bounds: &Rect| match axis {
+        DistributeAxis::Horizontal => bounds.min.x,
+        DistributeAxis::Vertical => bounds.min.y,
     };
+    let end = |bounds: &Rect| match axis {
+        DistributeAxis::Horizontal => bounds.max.x,
+        DistributeAxis::Vertical => bounds.max.y,
+    };
+    let size = |bounds: &Rect| end(bounds) - start(bounds);
 
-    let spacing = total_span / (bounds.len() - 1) as f32;
+    let mut indexed = bounds.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(_, a), (_, b)| start(a).total_cmp(&start(b)));
 
-    // Calculate deltas
+    let first_start = start(indexed[0].1);
+    let last_end = end(indexed[indexed.len() - 1].1);
+    let occupied = indexed.iter().map(|(_, bounds)| size(bounds)).sum::<f32>();
+    let gap = (last_end - first_start - occupied) / (bounds.len() - 1) as f32;
+
     let mut deltas = vec![Vec2::ZERO; bounds.len()];
-
-    for (sorted_idx, (original_idx, center)) in indexed.iter().enumerate() {
-        let target = match axis {
-            DistributeAxis::Horizontal => first_center.x + spacing * sorted_idx as f32,
-            DistributeAxis::Vertical => first_center.y + spacing * sorted_idx as f32,
-        };
-
+    let mut next_start = first_start;
+    for (original_idx, bounds) in indexed {
+        let delta = next_start - start(bounds);
         let delta = match axis {
-            DistributeAxis::Horizontal => Vec2::new(target - center.x, 0.0),
-            DistributeAxis::Vertical => Vec2::new(0.0, target - center.y),
+            DistributeAxis::Horizontal => Vec2::new(delta, 0.0),
+            DistributeAxis::Vertical => Vec2::new(0.0, delta),
         };
-
-        deltas[*original_idx] = delta;
+        deltas[original_idx] = delta;
+        next_start += size(bounds) + gap;
     }
 
     deltas
@@ -534,6 +534,36 @@ mod tests {
         assert!((deltas[0].x - 0.0).abs() < 0.001);
         assert!((deltas[1].x - 0.0).abs() < 0.001);
         assert!((deltas[2].x - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn distribution_uses_equal_gaps_for_different_sizes() {
+        let bounds = vec![
+            Rect::new(Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0)),
+            Rect::new(Vec2::new(20.0, 0.0), Vec2::new(40.0, 10.0)),
+            Rect::new(Vec2::new(100.0, 0.0), Vec2::new(110.0, 10.0)),
+        ];
+
+        let deltas = calculate_distribution(&bounds, DistributeAxis::Horizontal);
+
+        assert_eq!(deltas[0], Vec2::ZERO);
+        assert_eq!(deltas[1], Vec2::new(25.0, 0.0));
+        assert_eq!(deltas[2], Vec2::ZERO);
+    }
+
+    #[test]
+    fn center_alignment_uses_the_selection_bounds_center() {
+        let bounds = vec![
+            Rect::new(Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0)),
+            Rect::new(Vec2::new(20.0, 0.0), Vec2::new(30.0, 10.0)),
+            Rect::new(Vec2::new(90.0, 0.0), Vec2::new(100.0, 10.0)),
+        ];
+
+        let deltas = calculate_alignment(&bounds, AlignAxis::CenterX);
+
+        assert_eq!(deltas[0], Vec2::new(45.0, 0.0));
+        assert_eq!(deltas[1], Vec2::new(25.0, 0.0));
+        assert_eq!(deltas[2], Vec2::new(-45.0, 0.0));
     }
 
     #[test]

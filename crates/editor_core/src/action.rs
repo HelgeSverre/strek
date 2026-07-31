@@ -39,6 +39,22 @@ pub enum EditorAction {
     BringForward,
     /// Send selection backward one step
     SendBackward,
+    /// Align selected layers to their left edge
+    AlignLeft,
+    /// Align selected layers to their horizontal center
+    AlignCenter,
+    /// Align selected layers to their right edge
+    AlignRight,
+    /// Align selected layers to their top edge
+    AlignTop,
+    /// Align selected layers to their vertical center
+    AlignMiddle,
+    /// Align selected layers to their bottom edge
+    AlignBottom,
+    /// Distribute selected layers with equal horizontal gaps
+    DistributeHorizontal,
+    /// Distribute selected layers with equal vertical gaps
+    DistributeVertical,
 
     // === Nudge ===
     /// Move selection up by 1 pixel
@@ -263,6 +279,54 @@ impl EditorAction {
                 category: ActionCategory::Arrange,
                 default_shortcut: Some(Shortcut::ctrl(Key::BracketLeft)),
             },
+            EditorAction::AlignLeft => ActionMeta {
+                name: "Align Left",
+                description: "Align selected layers to their left edge",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::AlignCenter => ActionMeta {
+                name: "Align Horizontal Centers",
+                description: "Align selected layers to their horizontal center",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::AlignRight => ActionMeta {
+                name: "Align Right",
+                description: "Align selected layers to their right edge",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::AlignTop => ActionMeta {
+                name: "Align Top",
+                description: "Align selected layers to their top edge",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::AlignMiddle => ActionMeta {
+                name: "Align Vertical Centers",
+                description: "Align selected layers to their vertical center",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::AlignBottom => ActionMeta {
+                name: "Align Bottom",
+                description: "Align selected layers to their bottom edge",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::DistributeHorizontal => ActionMeta {
+                name: "Distribute Horizontally",
+                description: "Distribute selected layers with equal horizontal gaps",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
+            EditorAction::DistributeVertical => ActionMeta {
+                name: "Distribute Vertically",
+                description: "Distribute selected layers with equal vertical gaps",
+                category: ActionCategory::Arrange,
+                default_shortcut: None,
+            },
 
             // Nudge
             EditorAction::NudgeUp => ActionMeta {
@@ -447,6 +511,14 @@ impl EditorAction {
             EditorAction::SendToBack,
             EditorAction::BringForward,
             EditorAction::SendBackward,
+            EditorAction::AlignLeft,
+            EditorAction::AlignCenter,
+            EditorAction::AlignRight,
+            EditorAction::AlignTop,
+            EditorAction::AlignMiddle,
+            EditorAction::AlignBottom,
+            EditorAction::DistributeHorizontal,
+            EditorAction::DistributeVertical,
             // Nudge
             EditorAction::NudgeUp,
             EditorAction::NudgeDown,
