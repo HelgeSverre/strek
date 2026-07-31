@@ -4,22 +4,31 @@
 
 mod assets;
 mod canvas;
+mod document_io;
 mod layer_panel;
 mod status_bar;
 mod text_input;
 mod toolbar;
 
+use std::env;
+use std::path::{Path, PathBuf};
+
 use editor_core::{Editor, EditorAction};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Window,
-    WindowBounds, WindowOptions,
+    FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu, MenuItem,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds, WindowOptions,
 };
 
 actions!(
     vector_editor,
     [
+        NewDocument,
+        OpenDocument,
+        SaveDocument,
+        SaveDocumentAs,
+        QuitApplication,
         Undo,
         Redo,
         SelectAll,
@@ -83,9 +92,30 @@ actions!(
     ]
 );
 
+#[derive(Debug, Clone)]
+enum PendingDocumentAction {
+    New,
+    OpenPicker,
+    OpenPath(PathBuf),
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FileOperation {
+    #[default]
+    Idle,
+    Prompting,
+    Opening,
+    Saving,
+}
+
 /// Main application state as a GPUI Entity.
 struct VectorEditor {
     editor: Editor,
+    document_path: Option<PathBuf>,
+    recent_files: document_io::RecentFiles,
+    file_operation: FileOperation,
+    allow_window_close: bool,
     object_clipboard: Option<editor_core::EditorClipboard>,
     focus_handle: FocusHandle,
     show_layer_panel: bool,
@@ -99,7 +129,11 @@ struct VectorEditor {
 impl VectorEditor {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            editor: Editor::with_demo_content(),
+            editor: Editor::new(),
+            document_path: None,
+            recent_files: document_io::RecentFiles::load(),
+            file_operation: FileOperation::Idle,
+            allow_window_close: false,
             object_clipboard: None,
             focus_handle: cx.focus_handle(),
             show_layer_panel: true,
@@ -108,6 +142,371 @@ impl VectorEditor {
             canvas_input_bounds: None,
             text_image_cache: canvas::TextImageCache::default(),
             did_focus: false,
+        }
+    }
+
+    fn document_name(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.strip_suffix(".vector.json")
+                    .or_else(|| name.strip_suffix(".json"))
+                    .unwrap_or(name)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "Untitled".to_owned())
+    }
+
+    fn document_location(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_else(|| "Unsaved document".to_owned())
+    }
+
+    fn update_window_title(&self, window: &mut Window) {
+        let dirty_marker = if self.editor.is_dirty() { " •" } else { "" };
+        window.set_window_title(&format!(
+            "{}{} — Vector Editor",
+            self.document_name(),
+            dirty_marker
+        ));
+    }
+
+    fn reset_document(&mut self) {
+        self.editor = Editor::new();
+        self.document_path = None;
+        self.object_clipboard = None;
+        self.text_image_cache = canvas::TextImageCache::default();
+        self.current_cursor = gpui::CursorStyle::Arrow;
+        self.open_menu = None;
+    }
+
+    fn replace_document(&mut self, document: editor_core::Document, path: PathBuf) {
+        self.editor = Editor::from_document(document);
+        self.document_path = Some(path.clone());
+        self.recent_files.record(&path);
+        self.object_clipboard = None;
+        self.text_image_cache = canvas::TextImageCache::default();
+        self.current_cursor = gpui::CursorStyle::Arrow;
+        self.open_menu = None;
+    }
+
+    fn new_document(&mut self, _: &NewDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_document_action(PendingDocumentAction::New, window, cx);
+    }
+
+    fn open_document(&mut self, _: &OpenDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_document_action(PendingDocumentAction::OpenPicker, window, cx);
+    }
+
+    fn open_recent_document(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_document_action(PendingDocumentAction::OpenPath(path), window, cx);
+    }
+
+    fn save_document(&mut self, _: &SaveDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_menu = None;
+        if self.file_operation != FileOperation::Idle {
+            return;
+        }
+        if let Some(path) = self.document_path.clone() {
+            self.begin_save_to_path(path, None, window, cx);
+        } else {
+            self.begin_save_dialog(None, window, cx);
+        }
+    }
+
+    fn save_document_as(
+        &mut self,
+        _: &SaveDocumentAs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu = None;
+        if self.file_operation == FileOperation::Idle {
+            self.begin_save_dialog(None, window, cx);
+        }
+    }
+
+    fn quit_application(
+        &mut self,
+        _: &QuitApplication,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_document_action(PendingDocumentAction::Close, window, cx);
+    }
+
+    fn request_document_action(
+        &mut self,
+        action: PendingDocumentAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_operation != FileOperation::Idle {
+            return;
+        }
+
+        self.open_menu = None;
+        self.editor.settle_for_document_io();
+        if !self.editor.is_dirty() {
+            self.perform_document_action(action, window, cx);
+            return;
+        }
+
+        self.file_operation = FileOperation::Prompting;
+        let document_name = self.document_name();
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            &format!("Save changes to “{document_name}”?"),
+            Some("Your changes will be lost if you continue without saving."),
+            &["Save", "Discard", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |editor, cx| {
+            let answer = prompt.await.unwrap_or(2);
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match answer {
+                        0 => {
+                            if let Some(path) = editor.document_path.clone() {
+                                editor.begin_save_to_path(path, Some(action), window, cx);
+                            } else {
+                                editor.begin_save_dialog(Some(action), window, cx);
+                            }
+                        }
+                        1 => editor.perform_document_action(action, window, cx),
+                        _ => cx.notify(),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn perform_document_action(
+        &mut self,
+        action: PendingDocumentAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PendingDocumentAction::New => {
+                self.reset_document();
+                cx.notify();
+            }
+            PendingDocumentAction::OpenPicker => self.begin_open_dialog(window, cx),
+            PendingDocumentAction::OpenPath(path) => self.begin_open_path(path, window, cx),
+            PendingDocumentAction::Close => {
+                self.allow_window_close = true;
+                window.remove_window();
+            }
+        }
+    }
+
+    fn begin_open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_operation = FileOperation::Prompting;
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+        });
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = prompt.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(Ok(Some(paths))) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                editor.begin_open_path(path, window, cx);
+                            }
+                        }
+                        Ok(Ok(None)) | Err(_) => cx.notify(),
+                        Ok(Err(error)) => {
+                            editor.show_error(
+                                "Could not open file picker",
+                                error.to_string(),
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn begin_open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_operation = FileOperation::Opening;
+        let load_path = path.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { document_io::read_document(&load_path) });
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = task.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(document) => {
+                            editor.replace_document(document, path);
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            if !path.is_file() {
+                                editor.recent_files.remove(&path);
+                            }
+                            editor.show_error(
+                                "Could not open document",
+                                error.to_string(),
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        self.update_window_title(window);
+        cx.notify();
+    }
+
+    fn begin_save_dialog(
+        &mut self,
+        resume: Option<PendingDocumentAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_operation = FileOperation::Prompting;
+        let directory = self
+            .document_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&directory);
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = prompt.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(Ok(Some(path))) => editor.begin_save_to_path(
+                            document_io::normalize_document_path(path),
+                            resume,
+                            window,
+                            cx,
+                        ),
+                        Ok(Ok(None)) | Err(_) => cx.notify(),
+                        Ok(Err(error)) => editor.show_error(
+                            "Could not open save dialog",
+                            error.to_string(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        self.update_window_title(window);
+        cx.notify();
+    }
+
+    fn begin_save_to_path(
+        &mut self,
+        path: PathBuf,
+        resume: Option<PendingDocumentAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.settle_for_document_io();
+        let json = match document_io::serialize_document(self.editor.document()) {
+            Ok(json) => json,
+            Err(error) => {
+                self.show_error("Could not prepare document", error.to_string(), window, cx);
+                return;
+            }
+        };
+        let revision = self.editor.current_revision();
+        self.file_operation = FileOperation::Saving;
+        let save_path = path.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { document_io::write_document(&save_path, &json) });
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = task.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(()) => {
+                            editor.editor.mark_revision_saved(revision);
+                            editor.document_path = Some(path.clone());
+                            editor.recent_files.record(&path);
+                            if let Some(action) = resume {
+                                if editor.editor.is_dirty() {
+                                    editor.request_document_action(action, window, cx);
+                                } else {
+                                    editor.perform_document_action(action, window, cx);
+                                }
+                            } else {
+                                cx.notify();
+                            }
+                        }
+                        Err(error) => editor.show_error(
+                            "Could not save document",
+                            error.to_string(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        self.update_window_title(window);
+        cx.notify();
+    }
+
+    fn show_error(
+        &mut self,
+        title: &str,
+        detail: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_operation = FileOperation::Idle;
+        let prompt = window.prompt(PromptLevel::Critical, title, Some(&detail), &["OK"], cx);
+        cx.spawn(async move |_, _| {
+            let _ = prompt.await;
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.allow_window_close {
+            return true;
+        }
+        if self.file_operation != FileOperation::Idle {
+            return false;
+        }
+
+        self.editor.settle_for_document_io();
+        if self.editor.is_dirty() {
+            self.request_document_action(PendingDocumentAction::Close, window, cx);
+            false
+        } else {
+            true
         }
     }
 
@@ -759,6 +1158,7 @@ impl Render for VectorEditor {
             self.focus_handle.focus(window);
             self.did_focus = true;
         }
+        self.update_window_title(window);
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
         let key_context = if self.editor.text_input_snapshot().is_some() {
@@ -771,6 +1171,10 @@ impl Render for VectorEditor {
         let show_layer_panel = self.show_layer_panel;
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
+        let document_name = self.document_name();
+        let document_location = self.document_location();
+        let recent_files = self.recent_files.paths().to_vec();
+        let file_busy = self.file_operation != FileOperation::Idle;
         let can_paste = match open_menu {
             Some(toolbar::MenuKind::Main) if self.editor.text_input_snapshot().is_some() => cx
                 .read_from_clipboard()
@@ -805,6 +1209,11 @@ impl Render for VectorEditor {
             .id("vector-editor")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::new_document))
+            .on_action(cx.listener(Self::open_document))
+            .on_action(cx.listener(Self::save_document))
+            .on_action(cx.listener(Self::save_document_as))
+            .on_action(cx.listener(Self::quit_application))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::select_all))
@@ -874,6 +1283,11 @@ impl Render for VectorEditor {
             .flex_col()
             .bg(rgb(0x1e1e1e))
             .child(toolbar::render_header(
+                toolbar::DocumentHeader {
+                    name: document_name,
+                    location: document_location,
+                    dirty: self.editor.is_dirty(),
+                },
                 tool,
                 zoom,
                 show_layer_panel,
@@ -933,8 +1347,12 @@ impl Render for VectorEditor {
                 root.child(toolbar::render_menu(
                     menu,
                     &self.editor,
-                    show_layer_panel,
-                    can_paste,
+                    toolbar::MenuState {
+                        show_layer_panel,
+                        can_paste,
+                        recent_files: &recent_files,
+                        file_busy,
+                    },
                     window_size.width.0,
                     cx,
                 ))
@@ -982,6 +1400,11 @@ fn convert_cursor(cursor: editor_core::Cursor) -> gpui::CursorStyle {
 
 fn register_keybindings(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-n", NewDocument, Some("VectorEditor")),
+        KeyBinding::new("cmd-o", OpenDocument, Some("VectorEditor")),
+        KeyBinding::new("cmd-s", SaveDocument, Some("VectorEditor")),
+        KeyBinding::new("cmd-shift-s", SaveDocumentAs, Some("VectorEditor")),
+        KeyBinding::new("cmd-q", QuitApplication, Some("VectorEditor")),
         KeyBinding::new("cmd-z", Undo, Some("VectorEditor")),
         KeyBinding::new("cmd-shift-z", Redo, Some("VectorEditor")),
         KeyBinding::new("cmd-a", SelectAll, Some("VectorEditor")),
@@ -1025,6 +1448,11 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some("VectorEditor")),
         KeyBinding::new("enter", Enter, Some("VectorEditor")),
         KeyBinding::new("escape", Escape, Some("VectorEditor")),
+        KeyBinding::new("cmd-n", NewDocument, Some("VectorTextEditor")),
+        KeyBinding::new("cmd-o", OpenDocument, Some("VectorTextEditor")),
+        KeyBinding::new("cmd-s", SaveDocument, Some("VectorTextEditor")),
+        KeyBinding::new("cmd-shift-s", SaveDocumentAs, Some("VectorTextEditor")),
+        KeyBinding::new("cmd-q", QuitApplication, Some("VectorTextEditor")),
         KeyBinding::new("cmd-z", Undo, Some("VectorTextEditor")),
         KeyBinding::new("cmd-shift-z", Redo, Some("VectorTextEditor")),
         KeyBinding::new("cmd-a", SelectAll, Some("VectorTextEditor")),
@@ -1052,6 +1480,22 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
             register_keybindings(cx);
+            cx.set_menus(vec![
+                Menu {
+                    name: "Vector Editor".into(),
+                    items: vec![MenuItem::action("Quit Vector Editor", QuitApplication)],
+                },
+                Menu {
+                    name: "File".into(),
+                    items: vec![
+                        MenuItem::action("New", NewDocument),
+                        MenuItem::action("Open…", OpenDocument),
+                        MenuItem::separator(),
+                        MenuItem::action("Save", SaveDocument),
+                        MenuItem::action("Save As…", SaveDocumentAs),
+                    ],
+                },
+            ]);
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
 
@@ -1060,9 +1504,24 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| cx.new(VectorEditor::new),
+                |window, cx| {
+                    let editor = cx.new(VectorEditor::new);
+                    let weak_editor = editor.downgrade();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        weak_editor
+                            .update(cx, |editor, cx| editor.should_close_window(window, cx))
+                            .unwrap_or(true)
+                    });
+                    editor
+                },
             )
             .unwrap();
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
             cx.activate(true);
         });
 }

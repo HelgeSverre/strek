@@ -1,5 +1,7 @@
 //! Editor chrome: document bar, floating tool dock, and command menus.
 
+use std::path::{Path, PathBuf};
+
 use editor_core::{Editor, EditorAction, InteractionKind, TextAlign, Tool};
 use gpui::{
     anchored, div, point, prelude::*, px, rgb, rgba, Action, AnyElement, App, Context, Corner,
@@ -10,11 +12,11 @@ use crate::{
     assets::{icon, Icon},
     AlignTextCenter, AlignTextLeft, AlignTextRight, BringForward, BringToFront, Copy, Cut, Delete,
     DeselectAll, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
-    InvertSelection, JoinPaths, Paste, PenTool, RectangleTool, Redo, ReversePath, SelectAll,
-    SelectTool, SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool,
-    ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu,
-    Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
-    ZoomToSelection,
+    InvertSelection, JoinPaths, NewDocument, OpenDocument, Paste, PenTool, RectangleTool, Redo,
+    ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
+    SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground, ToggleLayerPanel,
+    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut,
+    ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -33,7 +35,21 @@ pub enum MenuKind {
     Zoom,
 }
 
+pub struct DocumentHeader {
+    pub name: String,
+    pub location: String,
+    pub dirty: bool,
+}
+
+pub struct MenuState<'a> {
+    pub show_layer_panel: bool,
+    pub can_paste: bool,
+    pub recent_files: &'a [PathBuf],
+    pub file_busy: bool,
+}
+
 pub fn render_header(
+    document: DocumentHeader,
     current_tool: Tool,
     zoom: f32,
     show_layer_panel: bool,
@@ -73,13 +89,17 @@ pub fn render_header(
                         .text_color(rgb(TEXT))
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("Untitled canvas"),
+                        .child(if document.dirty {
+                            format!("{} •", document.name)
+                        } else {
+                            document.name
+                        }),
                 )
                 .child(
                     div()
                         .text_color(rgb(TEXT_MUTED))
                         .text_size(px(10.0))
-                        .child("Local draft"),
+                        .child(document.location),
                 ),
         )
         .child(div().flex_1())
@@ -357,8 +377,7 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
 pub fn render_menu(
     kind: MenuKind,
     editor: &Editor,
-    show_layer_panel: bool,
-    can_paste: bool,
+    state: MenuState<'_>,
     viewport_width: f32,
     cx: &mut Context<VectorEditor>,
 ) -> impl IntoElement {
@@ -366,7 +385,15 @@ pub fn render_menu(
         MenuKind::Main => (
             point(px(8.0), px(HEADER_HEIGHT + 6.0)),
             Corner::TopLeft,
-            render_main_menu(editor, show_layer_panel, can_paste).into_any_element(),
+            render_main_menu(
+                editor,
+                state.show_layer_panel,
+                state.can_paste,
+                state.recent_files,
+                state.file_busy,
+                cx,
+            )
+            .into_any_element(),
         ),
         MenuKind::Zoom => (
             point(px(viewport_width - 44.0), px(HEADER_HEIGHT + 6.0)),
@@ -400,13 +427,34 @@ pub fn render_menu(
         )
 }
 
-fn render_main_menu(editor: &Editor, show_layer_panel: bool, can_paste: bool) -> impl IntoElement {
+fn render_main_menu(
+    editor: &Editor,
+    show_layer_panel: bool,
+    can_paste: bool,
+    recent_files: &[PathBuf],
+    file_busy: bool,
+    cx: &mut Context<VectorEditor>,
+) -> impl IntoElement {
     let can_copy_or_cut = editor.text_input_snapshot().map_or_else(
         || !editor.selection().is_empty(),
         |snapshot| !snapshot.selection.is_empty(),
     );
+    let recent_items = recent_files
+        .iter()
+        .enumerate()
+        .map(|(index, path)| recent_file_item(index, path, cx).into_any_element())
+        .collect::<Vec<_>>();
 
     menu_panel("Main menu", 272.0)
+        .child(menu_section("File"))
+        .child(menu_item("New", "⌘N", !file_busy, NewDocument))
+        .child(menu_item("Open…", "⌘O", !file_busy, OpenDocument))
+        .child(menu_item("Save", "⌘S", !file_busy, SaveDocument))
+        .child(menu_item("Save as…", "⇧⌘S", !file_busy, SaveDocumentAs))
+        .when(!recent_items.is_empty(), |menu| {
+            menu.child(menu_section("Recent")).children(recent_items)
+        })
+        .child(menu_separator())
         .child(menu_section("Tools"))
         .child(menu_item(
             "Select",
@@ -565,6 +613,51 @@ fn render_main_menu(editor: &Editor, show_layer_panel: bool, can_paste: bool) ->
             true,
             ToggleLayerPanel,
         ))
+}
+
+fn recent_file_item(index: usize, path: &Path, cx: &mut Context<VectorEditor>) -> impl IntoElement {
+    let path = path.to_path_buf();
+    let label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Untitled")
+        .to_owned();
+
+    div()
+        .id(SharedString::from(format!("recent-file-{index}")))
+        .h(px(29.0))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(9.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .text_color(rgb(TEXT))
+                .text_size(px(11.0))
+                .child(label),
+        )
+        .child(
+            div()
+                .max_w(px(116.0))
+                .overflow_hidden()
+                .text_color(rgb(TEXT_MUTED))
+                .text_size(px(9.0))
+                .child(
+                    path.parent()
+                        .map(|parent| parent.display().to_string())
+                        .unwrap_or_default(),
+                ),
+        )
+        .on_click(cx.listener(move |editor, _, window, cx| {
+            editor.open_recent_document(path.clone(), window, cx);
+        }))
 }
 
 fn render_zoom_menu(editor: &Editor) -> impl IntoElement {
