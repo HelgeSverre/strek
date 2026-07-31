@@ -1446,6 +1446,7 @@ impl Editor {
                 selected: self.selection.contains(id),
                 visible: node.visible,
                 locked: node.locked,
+                editable: self.document.is_effectively_editable(id),
                 is_container,
                 expanded,
                 has_children,
@@ -8359,6 +8360,40 @@ mod tests {
         editor.select_layer(ids[2], false);
         assert_eq!(editor.selection.iter().collect::<Vec<_>>(), [ids[2]]);
         assert_eq!(editor.selection.primary(), Some(ids[2]));
+    }
+
+    #[test]
+    fn layer_tree_marks_descendants_of_locked_containers_uneditable() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(root, Node::group("Locked group"))
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        editor.document.get_mut(group).unwrap().locked = true;
+
+        let entries = editor.build_layer_tree();
+        assert!(
+            !entries
+                .iter()
+                .find(|entry| entry.id == group)
+                .unwrap()
+                .editable
+        );
+        assert!(
+            !entries
+                .iter()
+                .find(|entry| entry.id == child)
+                .unwrap()
+                .editable
+        );
     }
 
     #[test]

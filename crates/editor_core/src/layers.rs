@@ -26,6 +26,9 @@ pub struct LayerEntry {
     /// Whether this node is locked
     pub locked: bool,
 
+    /// Whether the node and all its ancestors currently permit editing.
+    pub editable: bool,
+
     /// Whether this is a container (group/frame) that can have children
     pub is_container: bool,
 

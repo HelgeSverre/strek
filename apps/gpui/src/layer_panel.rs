@@ -466,6 +466,7 @@ fn render_layer_entry(
     let lock_id = entry.id;
     let context_menu_id = entry.id;
     let more_menu_id = entry.id;
+    let context_menu_enabled = entry.editable;
     let expand_tooltip = if entry.expanded {
         format!("Collapse {}", entry.name)
     } else {
@@ -523,13 +524,15 @@ fn render_layer_entry(
                 cx.stop_propagation();
             }),
         )
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |editor, event: &MouseDownEvent, _window, cx| {
-                editor.open_layer_context_menu(context_menu_id, event.position, cx);
-                cx.stop_propagation();
-            }),
-        )
+        .when(context_menu_enabled, |row| {
+            row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |editor, event: &MouseDownEvent, _window, cx| {
+                    editor.open_layer_context_menu(context_menu_id, event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        })
         .on_click(
             cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
                 if event.down.click_count >= 2 {
@@ -597,21 +600,36 @@ fn render_layer_entry(
                 .justify_center()
                 .rounded(px(4.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xa8abb2))
-                .opacity(0.55)
+                .text_color(rgb(if context_menu_enabled {
+                    0xa8abb2
+                } else {
+                    0x666971
+                }))
+                .opacity(if context_menu_enabled { 0.55 } else { 0.3 })
                 .child("•••")
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(0x35363b)).opacity(1.0))
-                .tooltip(editor_tooltip("Layer actions", None))
+                .when(context_menu_enabled, |trigger| {
+                    trigger
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x35363b)).opacity(1.0))
+                        .tooltip(editor_tooltip("Layer actions", None))
+                })
+                .when(!context_menu_enabled, |trigger| {
+                    trigger.tooltip(editor_tooltip(
+                        "Show and unlock the layer to use actions",
+                        None,
+                    ))
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
-                .on_click(
-                    cx.listener(move |editor, event: &gpui::ClickEvent, _window, cx| {
-                        editor.open_layer_context_menu(more_menu_id, event.down.position, cx);
-                        cx.stop_propagation();
-                    }),
-                ),
+                .when(context_menu_enabled, |trigger| {
+                    trigger.on_click(cx.listener(
+                        move |editor, event: &gpui::ClickEvent, _window, cx| {
+                            editor.open_layer_context_menu(more_menu_id, event.down.position, cx);
+                            cx.stop_propagation();
+                        },
+                    ))
+                }),
         )
         // Visibility toggle
         .child(
