@@ -33,6 +33,9 @@ unicode-segmentation = { workspace = true }
 core-foundation = "0.10"
 core-graphics = "0.24"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "strek"
 path = "src/main.rs"

@@ -4840,6 +4840,7 @@ dependencies = [
  "glam",
  "gpui",
  "image",
+ "libc",
  "log",
  "lyon",
  "render_svg",

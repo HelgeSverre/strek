@@ -3,7 +3,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
@@ -253,6 +253,9 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
         use std::os::unix::net::{UnixListener, UnixStream};
 
         let path = socket_path();
+        if env::var_os(SOCKET_ENV).is_none() {
+            prepare_default_socket_directory(&path)?;
+        }
         if let Ok(metadata) = fs::symlink_metadata(&path) {
             if !metadata.file_type().is_socket() {
                 return Err(io::Error::new(
@@ -695,8 +698,61 @@ impl Drop for TemporaryScreenshot {
 
 fn socket_path() -> PathBuf {
     env::var_os(SOCKET_ENV)
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::temp_dir().join("strek-automation.sock"))
+        .unwrap_or_else(default_socket_path)
+}
+
+#[cfg(unix)]
+fn default_socket_path() -> PathBuf {
+    let user_id = unsafe { libc::geteuid() };
+    let base = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(env::temp_dir);
+    base.join(format!("strek-{user_id}"))
+        .join("automation.sock")
+}
+
+#[cfg(not(unix))]
+fn default_socket_path() -> PathBuf {
+    env::temp_dir().join("strek-automation.sock")
+}
+
+#[cfg(unix)]
+fn prepare_default_socket_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let directory = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "automation socket has no parent directory",
+        )
+    })?;
+    match fs::create_dir(directory) {
+        Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a directory", directory.display()),
+        ));
+    }
+    let user_id = unsafe { libc::geteuid() };
+    if metadata.uid() != user_id {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is owned by another user", directory.display()),
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn socket_path_display() -> String {
@@ -749,5 +805,22 @@ mod tests {
             response.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_socket_path_is_scoped_to_the_effective_user() {
+        let path = default_socket_path();
+        let expected_directory = format!("strek-{}", unsafe { libc::geteuid() });
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("automation.sock")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+            Some(expected_directory.as_str())
+        );
     }
 }
