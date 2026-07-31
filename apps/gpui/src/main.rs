@@ -31,6 +31,8 @@ use gpui::{
 };
 
 const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
+const MAX_AUTOMATION_SELECTED_LAYERS: usize = 10_000;
+const MAX_AUTOMATION_SELECTED_LAYER_BYTES: usize = 256 * 1024;
 
 actions!(
     strek,
@@ -481,12 +483,13 @@ impl Strek {
     fn automation_state(&self, window: &Window) -> automation::AutomationState {
         let bounds = window.bounds();
         let view = self.editor.view();
-        let selected_layers = self
-            .editor
-            .selection()
-            .iter()
-            .filter_map(|id| self.editor.document().get(id).map(|node| node.name.clone()))
-            .collect();
+        let (selected_layers, selected_layers_truncated) =
+            bounded_automation_layer_names(self.editor.selection().iter().filter_map(|id| {
+                self.editor
+                    .document()
+                    .get(id)
+                    .map(|node| node.name.as_str())
+            }));
         let actions = commands::COMMANDS
             .iter()
             .filter_map(|spec| {
@@ -509,6 +512,7 @@ impl Strek {
             interaction: automation_interaction_name(self.editor.interaction_kind()).to_owned(),
             selection_count: self.editor.selection().len(),
             selected_layers,
+            selected_layers_truncated,
             zoom: view.zoom,
             pan: automation::AutomationPoint {
                 x: view.pan.x,
@@ -3421,6 +3425,41 @@ fn visible_panel_width(visible: bool, width: f32) -> f32 {
     }
 }
 
+fn bounded_automation_layer_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> (Vec<String>, bool) {
+    let mut names = names.into_iter();
+    let mut selected = Vec::new();
+    let mut remaining_bytes = MAX_AUTOMATION_SELECTED_LAYER_BYTES;
+    let mut truncated = false;
+
+    while selected.len() < MAX_AUTOMATION_SELECTED_LAYERS {
+        let Some(name) = names.next() else {
+            return (selected, truncated);
+        };
+        if remaining_bytes == 0 {
+            truncated = true;
+            break;
+        }
+
+        let mut end = name.len().min(remaining_bytes);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        selected.push(name[..end].to_owned());
+        remaining_bytes -= end;
+        if end != name.len() {
+            truncated = true;
+            break;
+        }
+    }
+
+    if names.next().is_some() {
+        truncated = true;
+    }
+    (selected, truncated)
+}
+
 fn is_strek_object_clipboard(item: &ClipboardItem) -> bool {
     item.metadata()
         .is_some_and(|metadata| metadata == OBJECT_CLIPBOARD_METADATA)
@@ -3886,6 +3925,18 @@ mod layout_tests {
 
         assert!(is_strek_object_clipboard(&owned));
         assert!(!is_strek_object_clipboard(&external));
+    }
+
+    #[test]
+    fn automation_layer_names_are_bounded_without_splitting_utf8() {
+        let oversized = format!("{}é", "a".repeat(MAX_AUTOMATION_SELECTED_LAYER_BYTES - 1));
+        let (names, truncated) =
+            bounded_automation_layer_names([oversized.as_str(), "not included"]);
+
+        assert!(truncated);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].len(), MAX_AUTOMATION_SELECTED_LAYER_BYTES - 1);
+        assert!(names[0].is_char_boundary(names[0].len()));
     }
 
     #[test]

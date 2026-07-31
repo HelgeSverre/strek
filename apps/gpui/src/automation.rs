@@ -204,6 +204,8 @@ pub(crate) struct AutomationState {
     pub interaction: String,
     pub selection_count: usize,
     pub selected_layers: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selected_layers_truncated: bool,
     pub zoom: f32,
     pub pan: AutomationPoint,
     pub window: AutomationBounds,
