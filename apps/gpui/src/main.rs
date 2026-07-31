@@ -31,6 +31,14 @@ actions!(
         Ungroup,
         BringToFront,
         SendToBack,
+        NudgeUp,
+        NudgeDown,
+        NudgeLeft,
+        NudgeRight,
+        NudgeUpLarge,
+        NudgeDownLarge,
+        NudgeLeftLarge,
+        NudgeRightLarge,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -184,6 +192,53 @@ impl VectorEditor {
 
     fn send_to_back(&mut self, _: &SendToBack, _window: &mut Window, cx: &mut Context<Self>) {
         self.execute_editor_action(EditorAction::SendToBack, cx);
+    }
+
+    fn nudge_up(&mut self, _: &NudgeUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::NudgeUp, cx);
+    }
+
+    fn nudge_down(&mut self, _: &NudgeDown, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::NudgeDown, cx);
+    }
+
+    fn nudge_left(&mut self, _: &NudgeLeft, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::NudgeLeft, cx);
+    }
+
+    fn nudge_right(&mut self, _: &NudgeRight, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::NudgeRight, cx);
+    }
+
+    fn nudge_up_large(&mut self, _: &NudgeUpLarge, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::NudgeUpLarge, cx);
+    }
+
+    fn nudge_down_large(
+        &mut self,
+        _: &NudgeDownLarge,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::NudgeDownLarge, cx);
+    }
+
+    fn nudge_left_large(
+        &mut self,
+        _: &NudgeLeftLarge,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::NudgeLeftLarge, cx);
+    }
+
+    fn nudge_right_large(
+        &mut self,
+        _: &NudgeRightLarge,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::NudgeRightLarge, cx);
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
@@ -695,6 +750,14 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::ungroup))
             .on_action(cx.listener(Self::bring_to_front))
             .on_action(cx.listener(Self::send_to_back))
+            .on_action(cx.listener(Self::nudge_up))
+            .on_action(cx.listener(Self::nudge_down))
+            .on_action(cx.listener(Self::nudge_left))
+            .on_action(cx.listener(Self::nudge_right))
+            .on_action(cx.listener(Self::nudge_up_large))
+            .on_action(cx.listener(Self::nudge_down_large))
+            .on_action(cx.listener(Self::nudge_left_large))
+            .on_action(cx.listener(Self::nudge_right_large))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
@@ -874,12 +937,14 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("t", TextTool, Some("VectorEditor")),
         KeyBinding::new("cmd-enter", FinishEditing, Some("VectorEditor")),
         KeyBinding::new("cmd-j", JoinPaths, Some("VectorEditor")),
-        KeyBinding::new("left", TextLeft, Some("VectorEditor")),
-        KeyBinding::new("right", TextRight, Some("VectorEditor")),
-        KeyBinding::new("shift-left", TextSelectLeft, Some("VectorEditor")),
-        KeyBinding::new("shift-right", TextSelectRight, Some("VectorEditor")),
-        KeyBinding::new("home", TextHome, Some("VectorEditor")),
-        KeyBinding::new("end", TextEnd, Some("VectorEditor")),
+        KeyBinding::new("up", NudgeUp, Some("VectorEditor")),
+        KeyBinding::new("down", NudgeDown, Some("VectorEditor")),
+        KeyBinding::new("left", NudgeLeft, Some("VectorEditor")),
+        KeyBinding::new("right", NudgeRight, Some("VectorEditor")),
+        KeyBinding::new("shift-up", NudgeUpLarge, Some("VectorEditor")),
+        KeyBinding::new("shift-down", NudgeDownLarge, Some("VectorEditor")),
+        KeyBinding::new("shift-left", NudgeLeftLarge, Some("VectorEditor")),
+        KeyBinding::new("shift-right", NudgeRightLarge, Some("VectorEditor")),
         KeyBinding::new("cmd-c", Copy, Some("VectorEditor")),
         KeyBinding::new("cmd-x", Cut, Some("VectorEditor")),
         KeyBinding::new("cmd-v", Paste, Some("VectorEditor")),

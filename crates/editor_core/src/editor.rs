@@ -4055,9 +4055,6 @@ impl Editor {
             return;
         }
 
-        // Convert screen delta to world delta
-        let world_delta = delta / self.view.zoom;
-
         // Filter selection to exclude children of selected parents
         let all_nodes: Vec<_> = self.selection.iter().collect();
         let nodes = self.document.filter_selection_for_transform(&all_nodes);
@@ -4071,7 +4068,7 @@ impl Editor {
             let world = self.document.world_transform(id);
             let after = self
                 .document
-                .author_transform_from_world(id, Affine2::from_translation(world_delta) * world);
+                .author_transform_from_world(id, Affine2::from_translation(delta) * world);
             patches.push(Patch::SetTransform { id, before, after });
         }
 
@@ -5839,6 +5836,42 @@ mod tests {
         assert_eq!(editor.tool, Tool::Pen);
         assert!(editor.execute_action(EditorAction::ToolText));
         assert_eq!(editor.tool, Tool::Text);
+    }
+
+    #[test]
+    fn nudge_moves_in_document_units_under_zoom_and_transformed_parent() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let parent = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Parent").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(1.7, 0.8),
+                    0.35,
+                    Vec2::new(30.0, 20.0),
+                )),
+            )
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                parent,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(4.0, 6.0))),
+            )
+            .unwrap();
+        editor.view.zoom = 4.0;
+        editor.selection.select(child);
+        let before = editor.document.world_transform(child);
+
+        assert!(editor.execute_action(EditorAction::NudgeRight));
+
+        let after = editor.document.world_transform(child);
+        assert_affine_approx_eq(after, Affine2::from_translation(Vec2::X) * before);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_affine_approx_eq(editor.document.world_transform(child), before);
     }
 
     #[test]
