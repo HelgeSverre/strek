@@ -45,7 +45,8 @@ the file format and UI should not yet be treated as stable.
 - Editable SVG import for paths and basic shape primitives, with explicit errors
   for unsupported features
 - SVG, outlined-text SVG, PNG, JPEG, and WebP export
-- Copy visible artwork to the clipboard as SVG, PNG, or WebP
+- Copy visible artwork to the clipboard in the image formats supported by the
+  current platform
 
 ## Run the GPUI app
 
@@ -133,9 +134,12 @@ transparent PNG, JPEG, or lossless WebP. Export bounds are derived from the
 artwork rather than the current viewport. JPEG output composites transparent
 pixels over white; PNG and WebP preserve transparency.
 
-The same visible-artwork snapshot can be copied to the system clipboard as SVG,
-PNG, or WebP from the File menu or command palette. Clipboard format support in
-the receiving application may vary by platform.
+The same visible-artwork snapshot can be copied from the File menu or command
+palette. macOS supports SVG, PNG, and WebP clipboard images; Windows supports
+SVG and PNG. Image-copy commands are unavailable on Linux and omitted from its
+File menus because the pinned GPUI backend does not publish image-only clipboard
+payloads there. Receiving applications may still vary in which advertised image
+formats they accept.
 
 Standard SVG keeps text as editable text and relies on compatible fonts being
 available when the file is opened. Outlined-text SVG converts glyphs to paths
@@ -146,15 +150,17 @@ for portable appearance. Strek does not automatically embed fonts in SVG files.
 Opening an `.svg` file imports its supported contents as editable native layers.
 The supported subset includes groups, paths, rectangles, circles, ellipses,
 lines, polylines, and polygons; affine transforms; solid fills and strokes;
-opacity; and visibility. Quadratic curves and SVG shape primitives are converted
-to the editor's path representation.
+fill and stroke opacity; and visibility. Quadratic curves and SVG shape
+primitives are converted to the editor's path representation.
 
 Strek rejects the whole import with a descriptive error when the SVG uses a
 feature that cannot be represented faithfully. This includes text, images,
 gradients, patterns, clipping, masks, filters, markers, nested SVG documents,
 CSS style blocks, even-odd fills, dashed strokes, and advanced stroke caps,
-joins, or paint order. Convert those features to ordinary paths and solid paints
-before importing.
+joins, object/group opacity, or paint order. Excessive nesting, node counts, path
+segments, and geometry attribute sizes are also rejected before conversion.
+Convert unsupported features to ordinary paths and solid paints before
+importing.
 
 An imported SVG is treated as an unsaved native document. Saving opens a Save As
 dialog and writes `.strek.json`; Strek never overwrites the source SVG.

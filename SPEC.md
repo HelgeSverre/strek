@@ -1351,26 +1351,30 @@ The supported formats are:
 - Transparent PNG and lossless WebP raster exports.
 - Opaque JPEG export, compositing transparent pixels over white.
 
-The same snapshot and encoders back Copy as SVG, PNG, and WebP. The current
-product does not export a selected frame or provide custom export presets. Those
-are product-level features rather than part of the backend-neutral display-list
-contract.
+The same snapshot and encoders back clipboard image export. macOS exposes SVG,
+PNG, and WebP; Windows exposes SVG and PNG; Linux exposes no image-copy commands
+because the pinned GPUI backend does not publish image-only clipboard payloads.
+The current product does not export a selected frame or provide custom export
+presets. Those are product-level features rather than part of the
+backend-neutral display-list contract.
 
 ### 14.3 SVG Import
 
 The native frontend can open `.svg` files by converting a deliberately limited
 subset into editable document nodes. Supported source elements are groups,
 paths, rectangles, circles, ellipses, lines, polylines, and polygons. The
-conversion preserves affine transforms, visibility, opacity, solid fills, and
-solid strokes. Shape primitives and quadratic path segments become native path
-commands.
+conversion preserves affine transforms, visibility, solid fills and strokes,
+and per-fill or per-stroke opacity. Shape primitives and quadratic path segments
+become native path commands.
 
 Import is strict: the entire operation fails with a descriptive error when the
 source contains a feature Strek cannot represent faithfully. Unsupported
 features include text, images, gradients, patterns, clipping, masks, filters,
 markers, nested SVG documents, CSS style blocks, even-odd fills, dashed strokes,
-and advanced stroke caps, joins, or paint order. This avoids silently producing
-artwork that differs from the source.
+object/group opacity, and advanced stroke caps, joins, or paint order. Imports
+also enforce bounded nesting, node counts, path segments, and geometry attribute
+sizes before native document construction. This avoids silently producing
+artwork that differs from the source or accepting unreasonable conversion work.
 
 SVG is an interchange format, not a native save format. A successful import is
 treated as an unsaved native document: Save prompts for a `.strek.json`
@@ -1489,7 +1493,7 @@ intentional product backlog.
 - [x] Outlined-text SVG export
 - [x] Transparent PNG export
 - [x] Opaque JPEG and lossless WebP export
-- [x] Copy visible artwork as SVG, PNG, or WebP
+- [x] Copy visible artwork in platform-supported SVG, PNG, or WebP formats
 - [x] Strict editable SVG subset import
 - [x] Recent files
 - [x] Dirty-state tracking and unsaved-change prompts
