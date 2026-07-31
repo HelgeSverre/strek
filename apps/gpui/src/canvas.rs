@@ -26,6 +26,8 @@ use smallvec::smallvec;
 use unicode_segmentation::UnicodeSegmentation;
 
 const TRANSFORMED_TEXT_CACHE_LIMIT: usize = 256;
+const MAX_AFFINE_TEXT_RASTER_DIMENSION: u32 = 16_384;
+const MAX_AFFINE_TEXT_RASTER_PIXELS: u64 = 16_000_000;
 
 static SVG_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
     let mut database = resvg::usvg::fontdb::Database::new();
@@ -593,16 +595,22 @@ fn paint_affine_text(
         return;
     };
     let raster_scale = window.scale_factor() * 2.0;
-    let raster_width = (rendered.size.x * raster_scale).ceil().max(1.0) as i32;
-    let raster_height = (rendered.size.y * raster_scale).ceil().max(1.0) as i32;
+    let Some((raster_width, raster_height)) = affine_text_raster_dimensions(
+        rendered.size,
+        raster_scale,
+        MAX_AFFINE_TEXT_RASTER_DIMENSION,
+        MAX_AFFINE_TEXT_RASTER_PIXELS,
+    ) else {
+        log::warn!(
+            "skipping transformed text raster larger than the supported limit: {:?}",
+            rendered.size
+        );
+        return;
+    };
     let key = format!("{}x{}:{}", raster_width, raster_height, rendered.svg);
 
     let image = text_cache.get(&key).or_else(|| {
-        let pixmap = render_svg_pixmap(
-            rendered.svg.as_bytes(),
-            raster_width as u32,
-            raster_height as u32,
-        )?;
+        let pixmap = render_svg_pixmap(rendered.svg.as_bytes(), raster_width, raster_height)?;
         let mut pixels = pixmap.data().to_vec();
         premultiplied_rgba_to_unpremultiplied_bgra(&mut pixels);
         let buffer = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
@@ -618,6 +626,24 @@ fn paint_affine_text(
         size: gpui::size(px(rendered.size.x), px(rendered.size.y)),
     };
     let _ = window.paint_image(image_bounds, Corners::default(), image, 0, false);
+}
+
+fn affine_text_raster_dimensions(
+    size: Vec2,
+    scale: f32,
+    max_dimension: u32,
+    max_pixels: u64,
+) -> Option<(u32, u32)> {
+    if !size.is_finite() || !scale.is_finite() || size.cmple(Vec2::ZERO).any() || scale <= 0.0 {
+        return None;
+    }
+    let scaled = (size * scale).ceil().max(Vec2::ONE);
+    if scaled.x > max_dimension as f32 || scaled.y > max_dimension as f32 {
+        return None;
+    }
+    let width = scaled.x as u32;
+    let height = scaled.y as u32;
+    (u64::from(width) * u64::from(height) <= max_pixels).then_some((width, height))
 }
 
 fn premultiplied_rgba_to_unpremultiplied_bgra(pixels: &mut [u8]) {
@@ -1212,5 +1238,25 @@ mod tests {
         premultiplied_rgba_to_unpremultiplied_bgra(&mut pixel);
 
         assert_eq!(pixel, [32, 64, 128, 128]);
+    }
+
+    #[test]
+    fn affine_text_raster_dimensions_enforce_dimension_and_pixel_limits() {
+        assert_eq!(
+            affine_text_raster_dimensions(Vec2::new(100.2, 50.1), 2.0, 1_000, 50_000),
+            Some((201, 101))
+        );
+        assert_eq!(
+            affine_text_raster_dimensions(Vec2::new(600.0, 10.0), 2.0, 1_000, 50_000),
+            None
+        );
+        assert_eq!(
+            affine_text_raster_dimensions(Vec2::new(300.0, 300.0), 2.0, 1_000, 50_000),
+            None
+        );
+        assert_eq!(
+            affine_text_raster_dimensions(Vec2::new(f32::INFINITY, 10.0), 1.0, 1_000, 50_000),
+            None
+        );
     }
 }

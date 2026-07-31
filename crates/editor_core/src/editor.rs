@@ -27,6 +27,10 @@ use crate::transaction::Transaction;
 use crate::transform::View;
 use crate::Document;
 
+const MIN_TEXT_DIMENSION: f32 = 1.0;
+const MAX_TEXT_FONT_SIZE: f32 = 512.0;
+const MAX_TEXT_BOX_WIDTH: f32 = 16_384.0;
+
 /// The active tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -4660,16 +4664,19 @@ impl Editor {
                 NodeKind::Text(mut text) => {
                     if handle.is_corner() {
                         let factor = scale.x.abs().max(scale.y.abs()).max(0.01);
-                        text.font_size = (text.font_size * factor).max(1.0);
+                        text.font_size =
+                            (text.font_size * factor).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE);
                         if let TextSizing::FixedWidth { width } = &mut text.sizing {
-                            *width = (*width * factor).max(1.0);
+                            *width =
+                                (*width * factor).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH);
                         }
                     } else if handle.affects_x() {
                         let width = text
                             .fixed_width()
                             .unwrap_or_else(|| crate::text::estimate_text_metrics(&text).width);
                         text.sizing = TextSizing::FixedWidth {
-                            width: (width * scale.x.abs()).max(1.0),
+                            width: (width * scale.x.abs())
+                                .clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH),
                         };
                     }
                     let desired_origin = delta.transform_point2(snapshot.world.translation);
@@ -6522,7 +6529,12 @@ impl Editor {
 
     fn preview_numeric_text(&mut self, id: NodeId, before: &TextData, delta: f32) -> Option<bool> {
         let mut after = before.clone();
-        after.font_size = bounded_numeric_sum(before.font_size, delta, 1.0, 512.0)?;
+        after.font_size = bounded_numeric_sum(
+            before.font_size,
+            delta,
+            MIN_TEXT_DIMENSION,
+            MAX_TEXT_FONT_SIZE,
+        )?;
         let node = self.document.get_mut(id)?;
         let NodeKind::Text(current) = &mut node.kind else {
             return None;
@@ -7001,7 +7013,7 @@ impl Editor {
     /// Adjust the selected text size as one undoable property edit.
     pub fn adjust_selected_text_size(&mut self, delta: f32) -> bool {
         self.update_selected_text("Change Text Size", |text| {
-            text.font_size = (text.font_size + delta).clamp(1.0, 512.0);
+            text.font_size = (text.font_size + delta).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE);
         })
     }
 
@@ -10031,6 +10043,59 @@ mod tests {
         };
         assert!((corner_data.font_size - 32.0).abs() < 0.001);
         assert_eq!(corner_data.sizing, TextSizing::AutoWidth);
+    }
+
+    #[test]
+    fn text_resize_is_bounded_for_extreme_pointer_positions() {
+        let mut side_editor = Editor::new();
+        let side_root = side_editor.document.root;
+        let side_text = side_editor
+            .document
+            .add_child(side_root, Node::text("Label", "Hello"))
+            .unwrap();
+        side_editor.selection.select(side_text);
+        side_editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(48.0, 9.6),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        side_editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(1.0e9, 9.6),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let NodeKind::Text(side_data) = &side_editor.document.get(side_text).unwrap().kind else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            side_data.sizing,
+            TextSizing::FixedWidth {
+                width: MAX_TEXT_BOX_WIDTH
+            }
+        );
+
+        let mut corner_editor = Editor::new();
+        let corner_root = corner_editor.document.root;
+        let corner_text = corner_editor
+            .document
+            .add_child(corner_root, Node::text("Label", "Hello"))
+            .unwrap();
+        corner_editor.selection.select(corner_text);
+        corner_editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(48.0, 19.2),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        corner_editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::splat(1.0e9),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let NodeKind::Text(corner_data) = &corner_editor.document.get(corner_text).unwrap().kind
+        else {
+            panic!("expected text");
+        };
+        assert_eq!(corner_data.font_size, MAX_TEXT_FONT_SIZE);
     }
 
     #[test]
