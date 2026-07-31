@@ -6985,14 +6985,27 @@ impl Editor {
         })
     }
 
-    /// Toggle a default stroke for every independently selected layer.
+    /// Normalize stroke presence across every independently selected layer.
+    ///
+    /// If every selected layer has a stroke, all strokes are removed. A mixed
+    /// or entirely stroke-free selection receives strokes on missing layers.
     pub fn toggle_selected_stroke(&mut self) -> bool {
-        self.update_selected_styles("Toggle Stroke", |style| {
-            style.stroke = if style.stroke.is_some() {
-                None
+        self.settle_interaction();
+        let selected = self
+            .document
+            .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+        let remove_strokes = !selected.is_empty()
+            && selected.iter().all(|id| {
+                self.document
+                    .get(*id)
+                    .is_some_and(|node| node.style.stroke.is_some())
+            });
+        self.update_selected_styles("Toggle Stroke", move |style| {
+            if remove_strokes {
+                style.stroke = None;
             } else {
-                Some(Stroke::black(1.0))
-            };
+                style.stroke.get_or_insert_with(|| Stroke::black(1.0));
+            }
         })
     }
 
@@ -8172,6 +8185,28 @@ mod tests {
         for (&id, &before) in ids.iter().zip(&transform_before_rotation) {
             assert_affine_approx_eq(editor.document.world_transform(id), before);
         }
+    }
+
+    #[test]
+    fn mixed_stroke_toggle_normalizes_presence_instead_of_inverting_each_layer() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Stroked", "Plain"]);
+        editor.document.get_mut(ids[0]).unwrap().style.stroke = Some(Stroke::black(3.0));
+        editor.selection.set(ids.iter().copied());
+
+        assert!(editor.toggle_selected_stroke());
+        assert!(ids
+            .iter()
+            .all(|id| editor.document.get(*id).unwrap().style.stroke.is_some()));
+        assert_eq!(
+            editor.document.get(ids[0]).unwrap().style.stroke,
+            Some(Stroke::black(3.0)),
+            "an existing stroke should be preserved while missing strokes are added"
+        );
+
+        assert!(editor.toggle_selected_stroke());
+        assert!(ids
+            .iter()
+            .all(|id| editor.document.get(*id).unwrap().style.stroke.is_none()));
     }
 
     #[test]
