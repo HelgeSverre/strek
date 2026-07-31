@@ -209,6 +209,49 @@ struct TextEditSnapshot {
     selection_reversed: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ClipboardNode {
+    node: Node,
+    children: Vec<ClipboardNode>,
+}
+
+#[derive(Debug, Clone)]
+struct ClipboardRoot {
+    node: ClipboardNode,
+    world: Affine2,
+}
+
+/// Frontend-neutral snapshot of copied editor objects.
+#[derive(Debug, Clone, Default)]
+pub struct EditorClipboard {
+    roots: Vec<ClipboardRoot>,
+    paste_count: u32,
+}
+
+impl EditorClipboard {
+    /// Whether this clipboard contains any copied objects.
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+}
+
+fn snapshot_clipboard_node(document: &Document, id: NodeId) -> Option<ClipboardNode> {
+    let source = document.get(id)?;
+    if source.deleted {
+        return None;
+    }
+    let child_ids = source.children.clone();
+    let mut node = source.clone();
+    node.parent = None;
+    node.children.clear();
+    node.deleted = false;
+    let children = child_ids
+        .into_iter()
+        .map(|child| snapshot_clipboard_node(document, child))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClipboardNode { node, children })
+}
+
 /// Explicit state machine for all pointer and editing interactions.
 #[derive(Default)]
 enum InteractionState {
@@ -4487,6 +4530,114 @@ impl Editor {
         }
     }
 
+    /// Snapshot the selected object subtrees in paint order.
+    pub fn copy_selection(&mut self) -> Option<EditorClipboard> {
+        let selected = self.selection.iter().collect::<Vec<_>>();
+        let roots = self.document.filter_selection_for_transform(&selected);
+        if roots.is_empty() {
+            return None;
+        }
+
+        let roots = roots.into_iter().collect::<HashSet<_>>();
+        let ordered = self
+            .document
+            .paint_order()
+            .filter(|id| roots.contains(id))
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::with_capacity(ordered.len());
+        for id in ordered {
+            let world = self.document.world_transform(id);
+            let node = snapshot_clipboard_node(&self.document, id)?;
+            snapshots.push(ClipboardRoot { node, world });
+        }
+
+        Some(EditorClipboard {
+            roots: snapshots,
+            paste_count: 0,
+        })
+    }
+
+    /// Paste copied object subtrees at a cascading world-space offset.
+    pub fn paste_clipboard(&mut self, clipboard: &mut EditorClipboard) -> bool {
+        if clipboard.is_empty() {
+            return false;
+        }
+
+        self.settle_interaction();
+        let parent = self.document.root;
+        let first_index = self
+            .document
+            .get(parent)
+            .map_or(0, |node| node.children.len());
+        let paste_count = clipboard.paste_count.saturating_add(1);
+        let offset = Affine2::from_translation(Vec2::splat(paste_count as f32 * 10.0));
+        let mut patches = Vec::new();
+        let mut pasted_roots = Vec::with_capacity(clipboard.roots.len());
+        let mut desired_world = Vec::with_capacity(clipboard.roots.len());
+
+        for (index, root) in clipboard.roots.iter().enumerate() {
+            let id = self.instantiate_clipboard_node(
+                &root.node,
+                parent,
+                first_index + index,
+                &mut patches,
+            );
+            pasted_roots.push(id);
+            desired_world.push((id, offset * root.world));
+        }
+
+        let mut simulated = self.document.clone();
+        for patch in &patches {
+            patch.apply_forward(&mut simulated);
+        }
+        for (id, world) in desired_world {
+            let Some(before) = simulated.get(id).map(|node| node.transform) else {
+                continue;
+            };
+            let after = simulated.author_transform_from_world(id, world);
+            if before != after {
+                let patch = Patch::SetTransform { id, before, after };
+                patch.apply_forward(&mut simulated);
+                patches.push(patch);
+            }
+        }
+
+        let command = Command {
+            description: "Paste".into(),
+            patches,
+        };
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.selection.set(pasted_roots);
+        clipboard.paste_count = paste_count;
+        self.needs_redraw = true;
+        true
+    }
+
+    fn instantiate_clipboard_node(
+        &mut self,
+        snapshot: &ClipboardNode,
+        parent: NodeId,
+        index: usize,
+        patches: &mut Vec<Patch>,
+    ) -> NodeId {
+        let mut node = snapshot.node.clone();
+        node.parent = Some(parent);
+        node.children.clear();
+        node.deleted = false;
+        let id = self.document.nodes.insert(node.clone());
+        patches.push(Patch::CreateNode {
+            id,
+            node: Box::new(node),
+            parent,
+            index,
+        });
+        for (child_index, child) in snapshot.children.iter().enumerate() {
+            self.instantiate_clipboard_node(child, id, child_index, patches);
+        }
+        id
+    }
+
     /// Helper to collect patches for deep cloning children.
     fn collect_deep_clone_patches(
         &mut self,
@@ -5537,6 +5688,74 @@ mod tests {
         assert_eq!(
             child_names(&editor, root),
             ["A", "A copy", "B", "B copy", "C"]
+        );
+    }
+
+    #[test]
+    fn object_clipboard_preserves_subtrees_world_space_and_history() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let parent = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Parent").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(1.5, 0.75),
+                    0.3,
+                    Vec2::new(40.0, 25.0),
+                )),
+            )
+            .unwrap();
+        let group = editor
+            .document
+            .add_child(
+                parent,
+                Node::group("Copied group")
+                    .with_transform(Affine2::from_translation(Vec2::new(8.0, 6.0))),
+            )
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 12.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(3.0, 4.0))),
+            )
+            .unwrap();
+        let group_world = editor.document.world_transform(group);
+        let child_world = editor.document.world_transform(child);
+        editor.selection.set([child, group]);
+        let mut clipboard = editor.copy_selection().expect("object clipboard");
+
+        assert!(editor.paste_clipboard(&mut clipboard));
+
+        let pasted_group = editor.selection.primary().expect("pasted root");
+        let pasted_child = editor.document.get(pasted_group).unwrap().children[0];
+        assert_eq!(
+            editor.document.get(pasted_group).unwrap().parent,
+            Some(root)
+        );
+        assert_affine_approx_eq(
+            editor.document.world_transform(pasted_group),
+            Affine2::from_translation(Vec2::splat(10.0)) * group_world,
+        );
+        assert_affine_approx_eq(
+            editor.document.world_transform(pasted_child),
+            Affine2::from_translation(Vec2::splat(10.0)) * child_world,
+        );
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert!(editor.document.get(pasted_group).unwrap().deleted);
+        assert!(editor.document.get(pasted_child).unwrap().deleted);
+        assert!(editor.execute_action(EditorAction::Redo));
+        assert!(!editor.document.get(pasted_group).unwrap().deleted);
+        assert!(!editor.document.get(pasted_child).unwrap().deleted);
+
+        assert!(editor.paste_clipboard(&mut clipboard));
+        let second_group = editor.selection.primary().expect("second pasted root");
+        assert_affine_approx_eq(
+            editor.document.world_transform(second_group),
+            Affine2::from_translation(Vec2::splat(20.0)) * group_world,
         );
     }
 

@@ -82,6 +82,7 @@ actions!(
 /// Main application state as a GPUI Entity.
 struct VectorEditor {
     editor: Editor,
+    object_clipboard: Option<editor_core::EditorClipboard>,
     focus_handle: FocusHandle,
     show_layer_panel: bool,
     open_menu: Option<toolbar::MenuKind>,
@@ -95,6 +96,7 @@ impl VectorEditor {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             editor: Editor::with_demo_content(),
+            object_clipboard: None,
             focus_handle: cx.focus_handle(),
             show_layer_panel: true,
             open_menu: None,
@@ -455,34 +457,51 @@ impl VectorEditor {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.editor.text_input_snapshot() else {
-            return;
-        };
-        if let Some(selected) = snapshot.text.get(snapshot.selection) {
-            if !selected.is_empty() {
-                cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
+        if let Some(snapshot) = self.editor.text_input_snapshot() {
+            if let Some(selected) = snapshot.text.get(snapshot.selection) {
+                if !selected.is_empty() {
+                    self.object_clipboard = None;
+                    cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
+                }
+            }
+        } else {
+            self.object_clipboard = self.editor.copy_selection();
+            if self.object_clipboard.is_some() {
+                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
             }
         }
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.editor.text_input_snapshot() else {
-            return;
-        };
-        if let Some(selected) = snapshot.text.get(snapshot.selection.clone()) {
-            if !selected.is_empty() {
-                cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
-                self.editor.replace_text(Some(snapshot.selection), "");
-                cx.notify();
+        if let Some(snapshot) = self.editor.text_input_snapshot() {
+            if let Some(selected) = snapshot.text.get(snapshot.selection.clone()) {
+                if !selected.is_empty() {
+                    self.object_clipboard = None;
+                    cx.write_to_clipboard(ClipboardItem::new_string(selected.to_owned()));
+                    self.editor.replace_text(Some(snapshot.selection), "");
+                    cx.notify();
+                }
             }
+        } else if let Some(clipboard) = self.editor.copy_selection() {
+            self.object_clipboard = Some(clipboard);
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            self.editor.delete_selection();
+            cx.notify();
         }
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            if self.editor.replace_text(None, &text) {
+        if self.editor.text_input_snapshot().is_some() {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                if self.editor.replace_text(None, &text) {
+                    cx.notify();
+                }
+            }
+        } else if let Some(mut clipboard) = self.object_clipboard.take() {
+            if self.editor.paste_clipboard(&mut clipboard) {
                 cx.notify();
             }
+            self.object_clipboard = Some(clipboard);
         }
     }
 
