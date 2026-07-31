@@ -1484,7 +1484,7 @@ intentional product backlog.
 - [x] Auto-layout configuration
 - [x] Layout computation engine
 - [x] Author transforms plus derived layout offsets
-- [ ] GPUI auto-layout controls
+- [x] GPUI mode, direction, spacing, and padding controls
 
 ### Milestone 8: Snapping & Alignment
 - [x] Snap-point generation
@@ -1514,17 +1514,17 @@ intentional product backlog.
 - [x] Drag-to-reorder within a parent
 - [x] Drag-to-reparent into containers
 - [x] Expand/collapse containers
-- [ ] Context menu (duplicate, delete, group, ungroup)
+- [x] Context menu (duplicate, delete, group, ungroup)
 
 ### Milestone 12: Properties Panel
 - [x] Transform position, bounds, and rotation controls
-- [ ] Transform decomposition helpers (Affine2 → translate/rotate/scale)
+- [x] Transform decomposition helpers and translate/rotate/scale/skew readouts
 - [x] Validated hexadecimal fill editing and opacity
 - [x] Validated stroke color and width editing
 - [x] Text size and alignment controls
 - [x] Node name and type
 - [x] Mixed-value handling for multi-selection
-- [ ] Font family and weight controls
+- [x] Font family, weight, and italic controls
 - [ ] Live preview during value scrubbing (uses Transaction)
 - [ ] Numeric input with drag-to-adjust
 
@@ -1534,7 +1534,7 @@ intentional product backlog.
 - [x] Line tool with 45-degree and centered drawing
 - [x] Pen tool with anchor and handle editing
 - [x] Text tool with point and fixed-width creation
-- [ ] Tool options bar (stroke/fill presets for new shapes)
+- [x] Context bar with per-tool fill and stroke creation defaults
 - [x] Direct vector editing for existing paths
 
 ### Milestone 14: Toolbar & Status Bar
@@ -1549,11 +1549,12 @@ intentional product backlog.
 - [x] Native open/save dialogs
 - [x] Validated JSON documents with version migration
 - [x] Artwork-bounded SVG export
+- [x] Outlined-text SVG export
 - [x] Transparent PNG export
+- [x] Opaque JPEG and lossless WebP export
 - [x] Recent files
 - [x] Dirty-state tracking and unsaved-change prompts
-- [ ] SVG font embedding and text outlining
-- [ ] JPEG and WebP export
+- [ ] Automatic SVG font embedding (outlined text is the portable alternative)
 
 ---
 

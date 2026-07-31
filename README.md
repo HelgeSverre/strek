@@ -14,9 +14,14 @@ the file format and UI should not yet be treated as stable.
 - Direct vector editing for anchors and handles, including join, split, reverse,
   and open/close operations
 - Move, resize, rotate, snapping, pan, zoom, undo, and redo
-- Layers and design panels, command palette, menus, and configurable shortcuts
+- Native Layers and Design panels, including layer context actions, transform
+  decomposition readouts, and auto-layout mode, direction, spacing, and padding
+  controls
+- Text family, weight, italic, size, and alignment controls
+- Per-tool fill and stroke defaults for new shapes and paths in the context bar
+- Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files
-- SVG and PNG export
+- SVG, outlined-text SVG, PNG, JPEG, and WebP export
 
 ## Run the GPUI app
 
@@ -85,8 +90,14 @@ Documents are stored as versioned JSON. Saving an extensionless filename adds
 the native `.strek.json` extension. The loader validates the scene graph before
 opening it, and writes use a same-directory temporary file before replacement.
 
-Use the File menu to export visible artwork as SVG or PNG. Export bounds are
-derived from the artwork rather than the current viewport.
+Use the File menu to export visible artwork as standard SVG, outlined-text SVG,
+transparent PNG, JPEG, or lossless WebP. Export bounds are derived from the
+artwork rather than the current viewport. JPEG output composites transparent
+pixels over white; PNG and WebP preserve transparency.
+
+Standard SVG keeps text as editable text and relies on compatible fonts being
+available when the file is opened. Outlined-text SVG converts glyphs to paths
+for portable appearance. Strek does not automatically embed fonts in SVG files.
 
 ## Development
 
