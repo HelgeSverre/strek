@@ -302,19 +302,19 @@ impl Strek {
                         format!("unknown command `{id}`"),
                     );
                 };
-                let commands::CommandTarget::Editor(action) = spec.target else {
+                let commands::CommandTarget::Editor(_) = spec.target else {
                     return automation::AutomationResponse::error(
                         self.automation_state(window),
                         format!("`{id}` is not an editor action; use the dedicated UI tools"),
                     );
                 };
-                if !self.editor.can_execute(action) {
+                if !self.command_is_enabled(spec.target) {
                     Err(format!("command `{id}` is disabled in the current state"))
                 } else {
                     if self.command_palette.take().is_some() {
                         self.focus_handle.focus(window);
                     }
-                    self.execute_editor_action(action, cx);
+                    window.dispatch_action(commands::action_for(spec.target), cx);
                     Ok(format!("performed `{id}`"))
                 }
             }
@@ -325,7 +325,12 @@ impl Strek {
                 button,
                 modifiers,
             } => {
-                if self.command_palette.is_some()
+                if self.numeric_property_scrub.is_some() {
+                    Err(
+                        "finish or cancel the numeric property scrub before sending canvas input"
+                            .to_owned(),
+                    )
+                } else if self.command_palette.is_some()
                     || self.open_menu.is_some()
                     || self.layer_context_menu.is_some()
                 {
@@ -435,13 +440,13 @@ impl Strek {
         let actions = commands::COMMANDS
             .iter()
             .filter_map(|spec| {
-                let commands::CommandTarget::Editor(action) = spec.target else {
+                let commands::CommandTarget::Editor(_) = spec.target else {
                     return None;
                 };
                 Some(automation::AutomationAction {
                     id: spec.id.to_owned(),
                     label: spec.label.to_owned(),
-                    enabled: self.editor.can_execute(action),
+                    enabled: self.command_is_enabled(spec.target),
                 })
             })
             .collect();
@@ -464,6 +469,7 @@ impl Strek {
             design_panel_visible: self.show_design_panel,
             main_menu_open: self.open_menu == Some(toolbar::MenuKind::Main),
             command_palette_open: self.command_palette.is_some(),
+            numeric_property_scrub_active: self.numeric_property_scrub.is_some(),
             actions,
         }
     }

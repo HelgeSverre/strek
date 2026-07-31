@@ -2,16 +2,16 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +19,12 @@ use serde::{Deserialize, Serialize};
 
 const SOCKET_ENV: &str = "STREK_AUTOMATION_SOCKET";
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const CONNECTION_WORKERS: usize = 4;
+#[cfg(unix)]
+const MAX_QUEUED_CONNECTIONS: usize = 16;
+#[cfg(unix)]
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -179,6 +185,7 @@ pub(crate) struct AutomationState {
     pub design_panel_visible: bool,
     pub main_menu_open: bool,
     pub command_palette_open: bool,
+    pub numeric_property_scrub_active: bool,
     pub actions: Vec<AutomationAction>,
 }
 
@@ -206,15 +213,19 @@ pub(crate) struct AutomationAction {
 pub(crate) struct PendingRequest {
     request: AutomationRequest,
     responder: SyncSender<AutomationResponse>,
+    deadline: Instant,
 }
 
 impl PendingRequest {
     pub(crate) fn respond_with(
         self,
         make_response: impl FnOnce(AutomationRequest) -> AutomationResponse,
-    ) {
+    ) -> bool {
+        if Instant::now() >= self.deadline {
+            return false;
+        }
         let response = make_response(self.request);
-        let _ = self.responder.send(response);
+        self.responder.send(response).is_ok()
     }
 }
 
@@ -244,16 +255,46 @@ pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (connection_sender, connection_receiver) = mpsc::sync_channel(MAX_QUEUED_CONNECTIONS);
+        let connection_receiver = Arc::new(Mutex::new(connection_receiver));
+
+        for index in 0..CONNECTION_WORKERS {
+            let connection_receiver = Arc::clone(&connection_receiver);
+            let sender = sender.clone();
+            std::thread::Builder::new()
+                .name(format!("strek-automation-{index}"))
+                .spawn(move || loop {
+                    let stream = {
+                        let Ok(receiver) = connection_receiver.lock() else {
+                            return;
+                        };
+                        receiver.recv()
+                    };
+                    let Ok(stream) = stream else {
+                        return;
+                    };
+                    if let Err(error) = serve_connection(stream, &sender) {
+                        log::warn!("automation request failed: {error}");
+                    }
+                })?;
+        }
+
         std::thread::Builder::new()
-            .name("strek-automation".to_owned())
+            .name("strek-automation-accept".to_owned())
             .spawn(move || {
                 for stream in listener.incoming() {
                     match stream {
-                        Ok(stream) => {
-                            if let Err(error) = serve_connection(stream, &sender) {
-                                log::warn!("automation request failed: {error}");
+                        Ok(stream) => match connection_sender.try_send(stream) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(mut stream)) => {
+                                let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
+                                let _ = write_protocol_error(
+                                    &mut stream,
+                                    "Strek automation is busy; retry shortly",
+                                );
                             }
-                        }
+                            Err(mpsc::TrySendError::Disconnected(_)) => return,
+                        },
                         Err(error) => log::warn!("automation socket failed: {error}"),
                     }
                 }
@@ -275,18 +316,19 @@ fn serve_connection(
     mut stream: std::os::unix::net::UnixStream,
     sender: &tokio::sync::mpsc::UnboundedSender<PendingRequest>,
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(RESPONSE_TIMEOUT))?;
-    let mut request_json = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut request_json)?;
+    let deadline = Instant::now() + RESPONSE_TIMEOUT;
+    stream.set_write_timeout(Some(RESPONSE_TIMEOUT))?;
+    let request_json = match read_request_line(&mut stream, deadline) {
+        Ok(request_json) => request_json,
+        Err(error) => {
+            write_protocol_error(&mut stream, format!("invalid automation request: {error}"))?;
+            return Ok(());
+        }
+    };
     let request = match serde_json::from_str(&request_json) {
         Ok(request) => request,
         Err(error) => {
-            let response = AutomationResponse {
-                ok: false,
-                message: Some(format!("invalid automation request: {error}")),
-                state: None,
-            };
-            write_json_line(&mut stream, &response)?;
+            write_protocol_error(&mut stream, format!("invalid automation request: {error}"))?;
             return Ok(());
         }
     };
@@ -295,17 +337,91 @@ fn serve_connection(
         .send(PendingRequest {
             request,
             responder: response_sender,
+            deadline,
         })
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Strek window closed"))?;
-    let response = response_receiver
-        .recv_timeout(RESPONSE_TIMEOUT)
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        write_protocol_error(
+            &mut stream,
+            "Strek did not process the automation request in time",
+        )?;
+        return Ok(());
+    };
+    let response = match response_receiver.recv_timeout(remaining) {
+        Ok(response) => response,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            write_protocol_error(
+                &mut stream,
                 "Strek did not process the automation request in time",
-            )
-        })?;
+            )?;
+            return Ok(());
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Strek closed before processing the automation request",
+            ));
+        }
+    };
     write_json_line(&mut stream, &response)
+}
+
+#[cfg(unix)]
+fn read_request_line(
+    stream: &mut std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "request deadline exceeded"))?;
+        stream.set_read_timeout(Some(remaining))?;
+
+        let available = MAX_REQUEST_BYTES + 1 - bytes.len();
+        if available == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
+        let chunk_len = chunk.len().min(available);
+        let count = stream.read(&mut chunk[..chunk_len])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "request ended before a newline",
+            ));
+        }
+
+        if let Some(newline) = chunk[..count].iter().position(|byte| *byte == b'\n') {
+            bytes.extend_from_slice(&chunk[..=newline]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > MAX_REQUEST_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
+            ));
+        }
+    }
+
+    String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
+}
+
+fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> io::Result<()> {
+    write_json_line(
+        writer,
+        &AutomationResponse {
+            ok: false,
+            message: Some(message.into()),
+            state: None,
+        },
+    )
 }
 
 fn write_json_line(mut writer: impl Write, value: &impl Serialize) -> io::Result<()> {
@@ -509,6 +625,8 @@ pub(crate) fn socket_path_display() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -527,6 +645,29 @@ mod tests {
                 target: UiTarget::CommandPalette,
                 visible: true
             })
+        ));
+    }
+
+    #[test]
+    fn expired_pending_request_never_executes() {
+        let (responder, response) = std::sync::mpsc::sync_channel(1);
+        let executed = Cell::new(false);
+        let pending = PendingRequest {
+            request: AutomationRequest::State,
+            responder,
+            deadline: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("one second before now should be representable"),
+        };
+
+        assert!(!pending.respond_with(|_| {
+            executed.set(true);
+            panic!("an expired request must not execute")
+        }));
+        assert!(!executed.get());
+        assert!(matches!(
+            response.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
         ));
     }
 }
