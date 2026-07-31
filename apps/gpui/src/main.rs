@@ -302,7 +302,7 @@ impl Strek {
                         format!("unknown command `{id}`"),
                     );
                 };
-                let commands::CommandTarget::Editor(_) = spec.target else {
+                let commands::CommandTarget::Editor(action) = spec.target else {
                     return automation::AutomationResponse::error(
                         self.automation_state(window),
                         format!("`{id}` is not an editor action; use the dedicated UI tools"),
@@ -314,7 +314,7 @@ impl Strek {
                     if self.command_palette.take().is_some() {
                         self.focus_handle.focus(window);
                     }
-                    window.dispatch_action(commands::action_for(spec.target), cx);
+                    self.execute_automation_editor_action(action, window, cx);
                     Ok(format!("performed `{id}`"))
                 }
             }
@@ -425,6 +425,21 @@ impl Strek {
         match result {
             Ok(message) => automation::AutomationResponse::success(state, message),
             Err(message) => automation::AutomationResponse::error(state, message),
+        }
+    }
+
+    fn execute_automation_editor_action(
+        &mut self,
+        action: EditorAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            EditorAction::Undo => self.undo(&Undo, window, cx),
+            EditorAction::Redo => self.redo(&Redo, window, cx),
+            EditorAction::SelectAll => self.select_all(&SelectAll, window, cx),
+            EditorAction::Delete => self.delete(&Delete, window, cx),
+            action => self.execute_editor_action(action, cx),
         }
     }
 
