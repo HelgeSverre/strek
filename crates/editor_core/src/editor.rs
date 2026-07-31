@@ -454,6 +454,10 @@ fn creation_snap_points(position: Vec2) -> [SnapPoint; 2] {
     ]
 }
 
+fn canonical_font_weight(weight: u16) -> u16 {
+    ((weight.clamp(100, 900) + 50) / 100) * 100
+}
+
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
@@ -6293,6 +6297,39 @@ impl Editor {
         self.update_selected_text("Align Text", |text| text.align = alignment)
     }
 
+    /// Set the selected text's font family as one undoable property edit.
+    ///
+    /// Family names are trimmed, but otherwise preserved so imported documents
+    /// can continue to use fonts beyond the portable families offered by the UI.
+    pub fn set_selected_text_font_family(&mut self, family: &str) -> bool {
+        let family = family.trim();
+        if family.is_empty() {
+            return false;
+        }
+        let family = family.to_owned();
+        self.update_selected_text("Change Font Family", move |text| {
+            text.font.family = family;
+        })
+    }
+
+    /// Set the selected text's font weight as one undoable property edit.
+    ///
+    /// The weight is clamped to the supported CSS range and canonicalized to
+    /// the nearest hundred so font lookup and the UI share stable presets.
+    pub fn set_selected_text_font_weight(&mut self, weight: u16) -> bool {
+        let weight = canonical_font_weight(weight);
+        self.update_selected_text("Change Font Weight", |text| {
+            text.font.weight = weight;
+        })
+    }
+
+    /// Set the selected text's italic style as one undoable property edit.
+    pub fn set_selected_text_italic(&mut self, italic: bool) -> bool {
+        self.update_selected_text("Change Font Style", |text| {
+            text.font.italic = italic;
+        })
+    }
+
     fn update_selected_text(
         &mut self,
         description: &'static str,
@@ -8536,6 +8573,53 @@ mod tests {
         assert_eq!(editor.tool, Tool::Text);
         assert_eq!(editor.selection.primary(), Some(id));
         assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn typography_properties_are_canonical_and_undoable() {
+        let mut editor = Editor::new();
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Label", "Hello"))
+            .unwrap();
+        editor.selection.select(text);
+
+        assert!(!editor.set_selected_text_font_family("   "));
+        assert!(editor.set_selected_text_font_family("  serif  "));
+        assert!(!editor.set_selected_text_font_family("serif"));
+        assert_eq!(
+            editor.history.undo_description(),
+            Some("Change Font Family")
+        );
+        assert!(editor.set_selected_text_font_weight(749));
+        assert_eq!(
+            editor.history.undo_description(),
+            Some("Change Font Weight")
+        );
+        assert!(editor.set_selected_text_italic(true));
+        assert!(!editor.set_selected_text_italic(true));
+        assert_eq!(editor.history.undo_description(), Some("Change Font Style"));
+
+        let typography = editor.selected_text_data().unwrap().font;
+        assert_eq!(typography.family, "serif");
+        assert_eq!(typography.weight, 700);
+        assert!(typography.italic);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert!(!editor.selected_text_data().unwrap().font.italic);
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.selected_text_data().unwrap().font.weight, 400);
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(
+            editor.selected_text_data().unwrap().font.family,
+            "sans-serif"
+        );
+
+        assert_eq!(canonical_font_weight(0), 100);
+        assert_eq!(canonical_font_weight(149), 100);
+        assert_eq!(canonical_font_weight(150), 200);
+        assert_eq!(canonical_font_weight(750), 800);
+        assert_eq!(canonical_font_weight(999), 900);
     }
 
     #[test]
