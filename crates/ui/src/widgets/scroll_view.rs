@@ -142,7 +142,9 @@ impl Widget for ScrollView {
                 theme: ctx.theme,
                 draw_list: ctx.draw_list,
             };
-            content.widget.draw(content_rect, &content.state, &mut child_ctx);
+            content
+                .widget
+                .draw(content_rect, &content.state, &mut child_ctx);
         }
 
         ctx.draw_list.pop_clip();

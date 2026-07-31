@@ -99,7 +99,7 @@ impl Flex {
         // First pass: measure non-flex children and collect flex factors
         let mut total_flex = 0.0;
         let mut fixed_main = 0.0;
-        let spacing_total = self.spacing * (self.children.len() - 1).max(0) as f32;
+        let spacing_total = self.spacing * self.children.len().saturating_sub(1) as f32;
 
         for child in &mut self.children {
             if child.flex > 0.0 {
@@ -216,7 +216,7 @@ impl Widget for Flex {
         }
 
         // Add spacing
-        let spacing_total = self.spacing * (self.children.len() - 1).max(0) as f32;
+        let spacing_total = self.spacing * self.children.len().saturating_sub(1) as f32;
         total_main += spacing_total;
 
         // If we have flex children, we want to take all available main space
@@ -234,7 +234,10 @@ impl Widget for Flex {
                 theme: ctx.theme,
                 draw_list: ctx.draw_list,
             };
-            child.node.widget.draw(child.node.rect, &child.node.state, &mut child_ctx);
+            child
+                .node
+                .widget
+                .draw(child.node.rect, &child.node.state, &mut child_ctx);
         }
     }
 }

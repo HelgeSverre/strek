@@ -180,7 +180,9 @@ impl Widget for Panel {
                 theme: ctx.theme,
                 draw_list: ctx.draw_list,
             };
-            content.widget.draw(content_rect, &content.state, &mut child_ctx);
+            content
+                .widget
+                .draw(content_rect, &content.state, &mut child_ctx);
         }
     }
 }

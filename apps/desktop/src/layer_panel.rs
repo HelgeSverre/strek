@@ -152,7 +152,12 @@ pub fn build_layer_panel(
 
         // Expand/collapse chevron for containers
         if entry.is_container && entry.has_children {
-            let chevron_rect = Rect::new(x, y + (config.row_height - config.icon_size) / 2.0, config.icon_size, config.icon_size);
+            let chevron_rect = Rect::new(
+                x,
+                y + (config.row_height - config.icon_size) / 2.0,
+                config.icon_size,
+                config.icon_size,
+            );
             let chevron_icon = if entry.expanded {
                 IconKind::ChevronDown
             } else {
@@ -166,7 +171,12 @@ pub fn build_layer_panel(
         }
 
         // Layer type icon
-        let icon_rect = Rect::new(x, y + (config.row_height - config.icon_size) / 2.0, config.icon_size, config.icon_size);
+        let icon_rect = Rect::new(
+            x,
+            y + (config.row_height - config.icon_size) / 2.0,
+            config.icon_size,
+            config.icon_size,
+        );
         let layer_icon = match entry.icon {
             LayerIcon::Group => IconKind::Group,
             LayerIcon::Frame => IconKind::Frame,
@@ -204,7 +214,12 @@ pub fn build_layer_panel(
         let icons_x = panel_x + config.width - config.spacing - config.icon_size * 2.0 - 4.0;
 
         // Visibility icon
-        let eye_rect = Rect::new(icons_x, y + (config.row_height - config.icon_size) / 2.0, config.icon_size, config.icon_size);
+        let eye_rect = Rect::new(
+            icons_x,
+            y + (config.row_height - config.icon_size) / 2.0,
+            config.icon_size,
+            config.icon_size,
+        );
         let eye_icon = if entry.visible {
             IconKind::Eye
         } else {
@@ -293,12 +308,15 @@ pub fn hit_test_layer_panel(
     }
 
     // Check chevron (only for containers with children)
-    if entry.is_container && entry.has_children {
-        if in_icon_y_range && local_x >= chevron_x && local_x <= chevron_end {
-            return HitTestResult {
-                action: Some(LayerPanelAction::ToggleExpand(entry.id)),
-            };
-        }
+    if entry.is_container
+        && entry.has_children
+        && in_icon_y_range
+        && local_x >= chevron_x
+        && local_x <= chevron_end
+    {
+        return HitTestResult {
+            action: Some(LayerPanelAction::ToggleExpand(entry.id)),
+        };
     }
 
     // Otherwise, clicking anywhere on the row selects the layer

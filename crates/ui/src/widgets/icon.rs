@@ -1,9 +1,9 @@
 //! Icon widget.
 
+use crate::draw::IconKind;
 use crate::layout::{BoxConstraints, Size};
 use crate::rect::Rect;
 use crate::widget::{DrawContext, LayoutContext, Widget, WidgetState};
-use crate::draw::IconKind;
 use crate::Color;
 
 /// A widget that displays an icon.

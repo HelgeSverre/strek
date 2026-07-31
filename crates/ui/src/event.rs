@@ -53,10 +53,7 @@ pub enum Event {
     /// Click (pointer down + up on same widget).
     Click(PointerEvent),
     /// Scroll/wheel event.
-    Scroll {
-        position: Vec2,
-        delta: Vec2,
-    },
+    Scroll { position: Vec2, delta: Vec2 },
 }
 
 /// Response from event handling.

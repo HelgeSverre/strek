@@ -133,7 +133,8 @@ impl Widget for Container {
         // Draw background
         if let Some(bg) = self.background {
             if self.corner_radius > 0.0 {
-                ctx.draw_list.fill_rounded_rect(rect, bg, self.corner_radius);
+                ctx.draw_list
+                    .fill_rounded_rect(rect, bg, self.corner_radius);
             } else {
                 ctx.draw_list.fill_rect(rect, bg);
             }

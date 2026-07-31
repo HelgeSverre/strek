@@ -3,6 +3,8 @@
 //! Uses winit for windowing and wgpu for rendering.
 
 mod layer_panel;
+mod status_bar;
+mod toolbar;
 
 use std::sync::Arc;
 
@@ -31,6 +33,10 @@ struct App {
     layer_panel_config: layer_panel::LayerPanelConfig,
     /// Whether to show the layer panel
     show_layer_panel: bool,
+    /// Toolbar configuration
+    toolbar_config: toolbar::ToolbarConfig,
+    /// Status bar configuration
+    status_bar_config: status_bar::StatusBarConfig,
 }
 
 impl App {
@@ -44,22 +50,50 @@ impl App {
             modifiers: Modifiers::default(),
             layer_panel_config: layer_panel::LayerPanelConfig::default(),
             show_layer_panel: true,
+            toolbar_config: toolbar::ToolbarConfig::default(),
+            status_bar_config: status_bar::StatusBarConfig::default(),
         }
     }
 
     fn render(&mut self) {
         if let Some(renderer) = &mut self.renderer {
+            if let Some(window) = &self.window {
+                let size = window.inner_size();
+                self.editor
+                    .set_viewport_size(Vec2::new(size.width as f32, size.height as f32));
+            }
             let display_list = self.editor.build_display_list();
 
             // Build UI draw list
             let mut ui_draw_list = DrawList::new();
 
-            if self.show_layer_panel {
-                if let Some(window) = &self.window {
-                    let size = window.inner_size();
-                    let viewport_height = size.height as f32;
+            if let Some(window) = &self.window {
+                let size = window.inner_size();
+                let viewport_width = size.width as f32;
+                let viewport_height = size.height as f32;
 
-                    // Build layer panel
+                // Build toolbar at top
+                let toolbar_draw_list =
+                    toolbar::build_toolbar(viewport_width, self.editor.tool, &self.toolbar_config);
+                ui_draw_list.append(&toolbar_draw_list);
+
+                // Build status bar at bottom
+                let status_state = status_bar::StatusBarState {
+                    tool: self.editor.tool,
+                    selection_count: self.editor.selection().len(),
+                    mouse_position: Some(self.editor.view().to_world(self.mouse_position)),
+                    zoom: self.editor.view().zoom,
+                };
+                let status_draw_list = status_bar::build_status_bar(
+                    viewport_width,
+                    viewport_height,
+                    &status_state,
+                    &self.status_bar_config,
+                );
+                ui_draw_list.append(&status_draw_list);
+
+                // Build layer panel on the right
+                if self.show_layer_panel {
                     let layer_entries = self.editor.build_layer_tree();
                     let panel_draw_list = layer_panel::build_layer_panel(
                         &layer_entries,
@@ -68,7 +102,7 @@ impl App {
                     );
 
                     // Offset the panel to the right side of the window
-                    let panel_x = size.width as f32 - self.layer_panel_config.width;
+                    let panel_x = viewport_width - self.layer_panel_config.width;
                     for cmd in panel_draw_list.commands {
                         ui_draw_list.push(offset_command(cmd, panel_x, 0.0));
                     }
@@ -119,6 +153,27 @@ impl App {
             }
             LayerPanelAction::ToggleLock(id) => {
                 self.editor.toggle_locked(id);
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Handle a toolbar action.
+    fn handle_toolbar_action(&mut self, action: toolbar::ToolbarAction) {
+        use toolbar::{ToolButton, ToolbarAction};
+
+        match action {
+            ToolbarAction::SelectTool(tool_button) => {
+                let editor_action = match tool_button {
+                    ToolButton::Select => Some(editor_core::EditorAction::ToolSelect),
+                    ToolButton::Rectangle => Some(editor_core::EditorAction::ToolRectangle),
+                    ToolButton::Ellipse => Some(editor_core::EditorAction::ToolEllipse),
+                    ToolButton::Pen | ToolButton::Text => None,
+                };
+                if let Some(editor_action) = editor_action {
+                    self.editor.execute_action(editor_action);
+                    self.set_cursor(self.editor.cursor());
+                }
                 self.needs_redraw = true;
             }
         }
@@ -187,42 +242,55 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                // Check if click is in the layer panel region
-                let mut handled_by_panel = false;
+                // Check if click is in UI regions (toolbar, layer panel, etc.)
+                let mut handled_by_ui = false;
 
-                if state == ElementState::Pressed
-                    && button == winit::event::MouseButton::Left
-                    && self.show_layer_panel
-                {
+                if state == ElementState::Pressed && button == winit::event::MouseButton::Left {
                     if let Some(window) = &self.window {
                         let size = window.inner_size();
-                        let panel_x = size.width as f32 - self.layer_panel_config.width;
+                        let viewport_width = size.width as f32;
 
-                        // Check if mouse is in the layer panel region
-                        if self.mouse_position.x >= panel_x {
-                            // Convert to local panel coordinates
-                            let local_x = self.mouse_position.x - panel_x;
-                            let local_y = self.mouse_position.y;
+                        // Check toolbar (top of window)
+                        if self.mouse_position.y < self.toolbar_config.height {
+                            if let Some(action) = toolbar::hit_test_toolbar(
+                                self.mouse_position.x,
+                                self.mouse_position.y,
+                                &self.toolbar_config,
+                            ) {
+                                self.handle_toolbar_action(action);
+                                handled_by_ui = true;
+                            }
+                        }
 
-                            // Get layer entries and hit test
-                            let entries = self.editor.build_layer_tree();
-                            let result = layer_panel::hit_test_layer_panel(
-                                local_x,
-                                local_y,
-                                &entries,
-                                &self.layer_panel_config,
-                            );
+                        // Check layer panel (right side of window)
+                        if !handled_by_ui && self.show_layer_panel {
+                            let panel_x = viewport_width - self.layer_panel_config.width;
 
-                            if let Some(action) = result.action {
-                                self.handle_layer_panel_action(action);
-                                handled_by_panel = true;
+                            if self.mouse_position.x >= panel_x {
+                                // Convert to local panel coordinates
+                                let local_x = self.mouse_position.x - panel_x;
+                                let local_y = self.mouse_position.y;
+
+                                // Get layer entries and hit test
+                                let entries = self.editor.build_layer_tree();
+                                let result = layer_panel::hit_test_layer_panel(
+                                    local_x,
+                                    local_y,
+                                    &entries,
+                                    &self.layer_panel_config,
+                                );
+
+                                if let Some(action) = result.action {
+                                    self.handle_layer_panel_action(action);
+                                    handled_by_ui = true;
+                                }
                             }
                         }
                     }
                 }
 
-                // If not handled by layer panel, pass to editor
-                if !handled_by_panel {
+                // If not handled by UI, pass to editor
+                if !handled_by_ui {
                     let mouse_button = match button {
                         winit::event::MouseButton::Left => MouseButton::Left,
                         winit::event::MouseButton::Middle => MouseButton::Middle,
@@ -303,6 +371,12 @@ impl ApplicationHandler for App {
                     alt: state.alt_key(),
                     meta: state.super_key(),
                 };
+                let effects = self.editor.handle_event(InputEvent::ModifiersChanged {
+                    modifiers: self.modifiers,
+                });
+                if effects.redraw {
+                    self.needs_redraw = true;
+                }
             }
 
             _ => {}
@@ -408,6 +482,8 @@ fn keycode_to_key(key: &PhysicalKey) -> Option<Key> {
             KeyCode::F10 => Some(Key::F10),
             KeyCode::F11 => Some(Key::F11),
             KeyCode::F12 => Some(Key::F12),
+            KeyCode::BracketLeft => Some(Key::BracketLeft),
+            KeyCode::BracketRight => Some(Key::BracketRight),
             _ => None,
         },
         PhysicalKey::Unidentified(_) => None,
@@ -419,18 +495,32 @@ fn offset_command(cmd: ui::DrawCommand, dx: f32, dy: f32) -> ui::DrawCommand {
     use ui::DrawCommand;
 
     match cmd {
-        DrawCommand::FillRect { rect, color, corner_radius } => DrawCommand::FillRect {
+        DrawCommand::FillRect {
+            rect,
+            color,
+            corner_radius,
+        } => DrawCommand::FillRect {
             rect: ui::Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height),
             color,
             corner_radius,
         },
-        DrawCommand::StrokeRect { rect, color, width, corner_radius } => DrawCommand::StrokeRect {
+        DrawCommand::StrokeRect {
+            rect,
+            color,
+            width,
+            corner_radius,
+        } => DrawCommand::StrokeRect {
             rect: ui::Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height),
             color,
             width,
             corner_radius,
         },
-        DrawCommand::Text { text, rect, style, clip } => DrawCommand::Text {
+        DrawCommand::Text {
+            text,
+            rect,
+            style,
+            clip,
+        } => DrawCommand::Text {
             text,
             rect: ui::Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height),
             style,
@@ -441,9 +531,12 @@ fn offset_command(cmd: ui::DrawCommand, dx: f32, dy: f32) -> ui::DrawCommand {
             rect: ui::Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height),
             color,
         },
-        DrawCommand::PushClip(rect) => {
-            DrawCommand::PushClip(ui::Rect::new(rect.x + dx, rect.y + dy, rect.width, rect.height))
-        }
+        DrawCommand::PushClip(rect) => DrawCommand::PushClip(ui::Rect::new(
+            rect.x + dx,
+            rect.y + dy,
+            rect.width,
+            rect.height,
+        )),
         DrawCommand::PopClip => DrawCommand::PopClip,
     }
 }
