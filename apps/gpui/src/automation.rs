@@ -1,18 +1,18 @@
 //! Local automation protocol shared by the CLI, AppleScript, and MCP server.
 
+#[cfg(target_os = "macos")]
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{mpsc::SyncSender, Arc};
+use std::sync::{mpsc, mpsc::SyncSender, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(unix)]
-use std::sync::{mpsc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,19 +36,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const SOCKET_ENV: &str = "STREK_AUTOMATION_SOCKET";
-#[cfg(unix)]
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
-#[cfg(unix)]
 const CONNECTION_WORKERS: usize = 4;
-#[cfg(unix)]
 const MAX_QUEUED_CONNECTIONS: usize = 16;
-#[cfg(unix)]
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-#[cfg(unix)]
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-#[cfg(unix)]
 const EXECUTION_HEARTBEAT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,9 +283,311 @@ impl RequestLifecycle {
     }
 }
 
+// Platform-specific IPC adapters. The automation protocol below uses only the
+// shared stream/listener surface exposed by these modules.
 #[cfg(unix)]
+mod transport {
+    use std::env;
+    use std::fs;
+    use std::io;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+
+    use super::SOCKET_ENV;
+
+    pub(super) type Stream = UnixStream;
+
+    pub(super) struct Listener(UnixListener);
+
+    pub(super) fn listen() -> io::Result<Listener> {
+        let path = socket_path();
+        if env::var_os(SOCKET_ENV).is_none() {
+            prepare_default_socket_directory(&path)?;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if !metadata.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} exists and is not a socket", path.display()),
+                ));
+            }
+            if UnixStream::connect(&path).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "another Strek automation server is running",
+                ));
+            }
+            fs::remove_file(&path)?;
+        }
+
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(Listener(listener))
+    }
+
+    pub(super) fn connect() -> io::Result<Stream> {
+        UnixStream::connect(socket_path())
+    }
+
+    pub(super) fn endpoint_display() -> String {
+        socket_path().display().to_string()
+    }
+
+    impl Listener {
+        pub(super) fn accept(&self) -> io::Result<Stream> {
+            self.0.accept().map(|(stream, _)| stream)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pair_for_tests() -> io::Result<(Stream, Stream)> {
+        UnixStream::pair()
+    }
+
+    fn socket_path() -> PathBuf {
+        env::var_os(SOCKET_ENV)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(default_socket_path)
+    }
+
+    fn default_socket_path() -> PathBuf {
+        let user_id = unsafe { libc::geteuid() };
+        let base = env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(env::temp_dir);
+        base.join(format!("strek-{user_id}"))
+            .join("automation.sock")
+    }
+
+    fn prepare_default_socket_directory(path: &Path) -> io::Result<()> {
+        let directory = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "automation socket has no parent directory",
+            )
+        })?;
+        match fs::create_dir(directory) {
+            Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a directory", directory.display()),
+            ));
+        }
+        let user_id = unsafe { libc::geteuid() };
+        if metadata.uid() != user_id {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is owned by another user", directory.display()),
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn default_socket_path_is_scoped_to_the_effective_user() {
+            let path = default_socket_path();
+            let expected_directory = format!("strek-{}", unsafe { libc::geteuid() });
+            assert_eq!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("automation.sock")
+            );
+            assert_eq!(
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str()),
+                Some(expected_directory.as_str())
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+mod transport {
+    use std::env;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    use super::SOCKET_ENV;
+
+    pub(super) type Stream = TcpStream;
+
+    pub(super) struct Listener(TcpListener);
+
+    pub(super) fn listen() -> io::Result<Listener> {
+        Ok(Listener(TcpListener::bind(tcp_address()?)?))
+    }
+
+    pub(super) fn connect() -> io::Result<Stream> {
+        TcpStream::connect(tcp_address()?)
+    }
+
+    pub(super) fn endpoint_display() -> String {
+        tcp_address()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|error| format!("invalid endpoint: {error}"))
+    }
+
+    impl Listener {
+        pub(super) fn accept(&self) -> io::Result<Stream> {
+            self.0.accept().map(|(stream, _)| stream)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pair_for_tests() -> io::Result<(Stream, Stream)> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let client = TcpStream::connect(address)?;
+        let (server, _) = listener.accept()?;
+        Ok((client, server))
+    }
+
+    fn tcp_address() -> io::Result<SocketAddr> {
+        let endpoint = env::var(SOCKET_ENV)
+            .ok()
+            .filter(|endpoint| !endpoint.is_empty())
+            .unwrap_or_else(|| default_tcp_address().to_string());
+        parse_tcp_address(&endpoint)
+    }
+
+    fn parse_tcp_address(endpoint: &str) -> io::Result<SocketAddr> {
+        endpoint
+            .parse::<SocketAddr>()
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid {SOCKET_ENV} endpoint `{endpoint}`: {error}"),
+                )
+            })
+            .and_then(|address| {
+                if address.ip().is_loopback() {
+                    Ok(address)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{SOCKET_ENV} must use a loopback address, got `{address}`"),
+                    ))
+                }
+            })
+    }
+
+    fn default_tcp_address() -> SocketAddr {
+        let identity = env::var_os("USERNAME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .unwrap_or_else(|| "strek".into());
+        let hash = identity
+            .to_string_lossy()
+            .bytes()
+            .fold(2_166_136_261_u32, |hash, byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+            });
+        let port = 49_152 + (hash % 16_384) as u16;
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn default_tcp_endpoint_is_loopback_and_uses_a_user_scoped_port() {
+            let address = default_tcp_address();
+
+            assert!(address.ip().is_loopback());
+            assert!((49_152..65_536).contains(&u32::from(address.port())));
+        }
+
+        #[test]
+        fn tcp_endpoint_rejects_non_loopback_addresses() {
+            assert!(parse_tcp_address("192.0.2.1:49153").is_err());
+            assert_eq!(parse_tcp_address("127.0.0.1:49153").unwrap().port(), 49_153);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod transport {
+    use std::io::{self, Read, Write};
+    use std::time::Duration;
+
+    pub(super) struct Stream;
+    pub(super) struct Listener;
+
+    pub(super) fn listen() -> io::Result<Listener> {
+        Err(unsupported())
+    }
+
+    pub(super) fn connect() -> io::Result<Stream> {
+        Err(unsupported())
+    }
+
+    pub(super) fn endpoint_display() -> String {
+        "unsupported".to_owned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pair_for_tests() -> io::Result<(Stream, Stream)> {
+        Err(unsupported())
+    }
+
+    impl Listener {
+        pub(super) fn accept(&self) -> io::Result<Stream> {
+            Err(unsupported())
+        }
+    }
+
+    impl Read for Stream {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(unsupported())
+        }
+    }
+
+    impl Write for Stream {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(unsupported())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(unsupported())
+        }
+    }
+
+    impl Stream {
+        pub(super) fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(unsupported())
+        }
+
+        pub(super) fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(unsupported())
+        }
+    }
+
+    fn unsupported() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Strek automation is unavailable on this platform",
+        )
+    }
+}
+
 struct QueuedConnection {
-    stream: std::os::unix::net::UnixStream,
+    stream: transport::Stream,
     deadline: Instant,
 }
 
@@ -316,101 +611,61 @@ impl PendingRequest {
 }
 
 pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-        use std::os::unix::net::{UnixListener, UnixStream};
+    let listener = transport::listen()?;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (connection_sender, connection_receiver) =
+        mpsc::sync_channel::<QueuedConnection>(MAX_QUEUED_CONNECTIONS);
+    let connection_receiver = Arc::new(Mutex::new(connection_receiver));
 
-        let path = socket_path();
-        if env::var_os(SOCKET_ENV).is_none() {
-            prepare_default_socket_directory(&path)?;
-        }
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if !metadata.file_type().is_socket() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("{} exists and is not a socket", path.display()),
-                ));
-            }
-            if UnixStream::connect(&path).is_ok() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "another Strek automation server is running",
-                ));
-            }
-            fs::remove_file(&path)?;
-        }
-
-        let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (connection_sender, connection_receiver) =
-            mpsc::sync_channel::<QueuedConnection>(MAX_QUEUED_CONNECTIONS);
-        let connection_receiver = Arc::new(Mutex::new(connection_receiver));
-
-        for index in 0..CONNECTION_WORKERS {
-            let connection_receiver = Arc::clone(&connection_receiver);
-            let sender = sender.clone();
-            std::thread::Builder::new()
-                .name(format!("strek-automation-{index}"))
-                .spawn(move || loop {
-                    let stream = {
-                        let Ok(receiver) = connection_receiver.lock() else {
-                            return;
-                        };
-                        receiver.recv()
-                    };
-                    let Ok(connection) = stream else {
+    for index in 0..CONNECTION_WORKERS {
+        let connection_receiver = Arc::clone(&connection_receiver);
+        let sender = sender.clone();
+        std::thread::Builder::new()
+            .name(format!("strek-automation-{index}"))
+            .spawn(move || loop {
+                let stream = {
+                    let Ok(receiver) = connection_receiver.lock() else {
                         return;
                     };
-                    if let Err(error) =
-                        serve_connection(connection.stream, &sender, connection.deadline)
-                    {
-                        log::warn!("automation request failed: {error}");
-                    }
-                })?;
-        }
-
-        std::thread::Builder::new()
-            .name("strek-automation-accept".to_owned())
-            .spawn(move || {
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(stream) => match connection_sender.try_send(QueuedConnection {
-                            stream,
-                            deadline: Instant::now() + RESPONSE_TIMEOUT,
-                        }) {
-                            Ok(()) => {}
-                            Err(mpsc::TrySendError::Full(QueuedConnection {
-                                mut stream, ..
-                            })) => {
-                                let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
-                                let _ = write_protocol_error(
-                                    &mut stream,
-                                    "Strek automation is busy; retry shortly",
-                                );
-                            }
-                            Err(mpsc::TrySendError::Disconnected(_)) => return,
-                        },
-                        Err(error) => log::warn!("automation socket failed: {error}"),
-                    }
+                    receiver.recv()
+                };
+                let Ok(connection) = stream else {
+                    return;
+                };
+                if let Err(error) =
+                    serve_connection(connection.stream, &sender, connection.deadline)
+                {
+                    log::warn!("automation request failed: {error}");
                 }
             })?;
-        Ok(receiver)
     }
 
-    #[cfg(not(unix))]
-    {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Strek automation currently requires a Unix-domain socket",
-        ))
-    }
+    std::thread::Builder::new()
+        .name("strek-automation-accept".to_owned())
+        .spawn(move || loop {
+            match listener.accept() {
+                Ok(stream) => match connection_sender.try_send(QueuedConnection {
+                    stream,
+                    deadline: Instant::now() + RESPONSE_TIMEOUT,
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(QueuedConnection { mut stream, .. })) => {
+                        let _ = stream.set_write_timeout(Some(RESPONSE_TIMEOUT));
+                        let _ = write_protocol_error(
+                            &mut stream,
+                            "Strek automation is busy; retry shortly",
+                        );
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => return,
+                },
+                Err(error) => log::warn!("automation endpoint failed: {error}"),
+            }
+        })?;
+    Ok(receiver)
 }
 
-#[cfg(unix)]
 fn serve_connection(
-    mut stream: std::os::unix::net::UnixStream,
+    mut stream: transport::Stream,
     sender: &tokio::sync::mpsc::UnboundedSender<PendingRequest>,
     deadline: Instant,
 ) -> io::Result<()> {
@@ -459,9 +714,8 @@ fn serve_connection(
     write_json_line(&mut stream, &response)
 }
 
-#[cfg(unix)]
 fn wait_for_response(
-    stream: &mut std::os::unix::net::UnixStream,
+    stream: &mut transport::Stream,
     response_receiver: mpsc::Receiver<AutomationResponse>,
     lifecycle: &RequestLifecycle,
     deadline: Instant,
@@ -501,7 +755,6 @@ fn wait_for_response(
     }
 }
 
-#[cfg(unix)]
 fn closed_before_response() -> io::Error {
     io::Error::new(
         io::ErrorKind::BrokenPipe,
@@ -509,11 +762,7 @@ fn closed_before_response() -> io::Error {
     )
 }
 
-#[cfg(unix)]
-fn read_request_line(
-    stream: &mut std::os::unix::net::UnixStream,
-    deadline: Instant,
-) -> io::Result<String> {
+fn read_request_line(stream: &mut transport::Stream, deadline: Instant) -> io::Result<String> {
     let mut bytes = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 4096];
 
@@ -562,7 +811,6 @@ fn read_request_line(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
-#[cfg(unix)]
 fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> io::Result<()> {
     write_json_line(
         writer,
@@ -574,12 +822,10 @@ fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> 
     )
 }
 
-#[cfg(unix)]
 fn write_json_line(mut writer: impl Write, response: &AutomationResponse) -> io::Result<()> {
     writer.write_all(&serialize_response_line(response)?)
 }
 
-#[cfg(unix)]
 fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(response).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -603,35 +849,23 @@ fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>>
 }
 
 pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::net::UnixStream;
-
-        let request_line = serialize_request_line(&request)?;
-        let mut stream = UnixStream::connect(socket_path())
-            .map_err(|error| format!("could not connect to Strek: {error}"))?;
-        stream
-            .set_read_timeout(Some(CLIENT_TIMEOUT))
-            .map_err(|error| error.to_string())?;
-        stream
-            .set_write_timeout(Some(CLIENT_TIMEOUT))
-            .map_err(|error| error.to_string())?;
-        stream
-            .write_all(&request_line)
-            .map_err(|error| error.to_string())?;
-        let response_json = read_response_line(stream).map_err(|error| error.to_string())?;
-        serde_json::from_str(&response_json)
-            .map_err(|error| format!("invalid response from Strek: {error}"))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = request;
-        Err("Strek automation currently requires a Unix-domain socket".to_owned())
-    }
+    let request_line = serialize_request_line(&request)?;
+    let mut stream =
+        transport::connect().map_err(|error| format!("could not connect to Strek: {error}"))?;
+    stream
+        .set_read_timeout(Some(CLIENT_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(CLIENT_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(&request_line)
+        .map_err(|error| error.to_string())?;
+    let response_json = read_response_line(stream).map_err(|error| error.to_string())?;
+    serde_json::from_str(&response_json)
+        .map_err(|error| format!("invalid response from Strek: {error}"))
 }
 
-#[cfg(unix)]
 fn read_response_line(reader: impl Read) -> io::Result<String> {
     let mut reader = BufReader::new(reader);
     let mut bytes = Vec::with_capacity(4096);
@@ -655,7 +889,6 @@ fn read_response_line(reader: impl Read) -> io::Result<String> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
-#[cfg(unix)]
 fn serialize_request_line(request: &AutomationRequest) -> Result<Vec<u8>, String> {
     let mut bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -916,67 +1149,8 @@ impl Drop for TemporaryScreenshot {
     }
 }
 
-fn socket_path() -> PathBuf {
-    env::var_os(SOCKET_ENV)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(default_socket_path)
-}
-
-#[cfg(unix)]
-fn default_socket_path() -> PathBuf {
-    let user_id = unsafe { libc::geteuid() };
-    let base = env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(env::temp_dir);
-    base.join(format!("strek-{user_id}"))
-        .join("automation.sock")
-}
-
-#[cfg(not(unix))]
-fn default_socket_path() -> PathBuf {
-    env::temp_dir().join("strek-automation.sock")
-}
-
-#[cfg(unix)]
-fn prepare_default_socket_directory(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    let directory = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "automation socket has no parent directory",
-        )
-    })?;
-    match fs::create_dir(directory) {
-        Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-
-    let metadata = fs::symlink_metadata(directory)?;
-    if !metadata.file_type().is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} is not a directory", directory.display()),
-        ));
-    }
-    let user_id = unsafe { libc::geteuid() };
-    if metadata.uid() != user_id {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} is owned by another user", directory.display()),
-        ));
-    }
-    if metadata.mode() & 0o077 != 0 {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-pub(crate) fn socket_path_display() -> String {
-    socket_path().display().to_string()
+pub(crate) fn endpoint_display() -> String {
+    transport::endpoint_display()
 }
 
 #[cfg(test)]
@@ -1062,12 +1236,9 @@ mod tests {
         assert_eq!(lifecycle.state(), REQUEST_COMPLETED);
     }
 
-    #[cfg(unix)]
     #[test]
     fn executing_wait_keeps_the_client_alive_until_response() {
-        use std::os::unix::net::UnixStream;
-
-        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let (mut client, mut server) = transport::pair_for_tests().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -1098,12 +1269,9 @@ mod tests {
         assert!(worker.join().unwrap().unwrap().unwrap().ok);
     }
 
-    #[cfg(unix)]
     #[test]
     fn expired_queued_connection_is_rejected_before_enqueue() {
-        use std::os::unix::net::UnixStream;
-
-        let (client, server) = UnixStream::pair().expect("socket pair should open");
+        let (client, server) = transport::pair_for_tests().unwrap();
         let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let deadline = Instant::now()
             .checked_sub(Duration::from_secs(1))
@@ -1127,7 +1295,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn oversized_request_is_rejected_before_connecting() {
         let request = AutomationRequest::Text {
@@ -1138,7 +1305,6 @@ mod tests {
             .contains("exceeds"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn response_reader_requires_a_bounded_newline_terminated_message() {
         let valid = read_response_line(io::Cursor::new(b" {\"ok\":true}\n")).unwrap();
@@ -1159,7 +1325,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn response_writer_preserves_outcome_when_state_is_too_large() {
         let response = AutomationResponse {
@@ -1178,22 +1343,5 @@ mod tests {
             .message
             .unwrap()
             .contains("exceeded the automation response limit"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn default_socket_path_is_scoped_to_the_effective_user() {
-        let path = default_socket_path();
-        let expected_directory = format!("strek-{}", unsafe { libc::geteuid() });
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("automation.sock")
-        );
-        assert_eq!(
-            path.parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str()),
-            Some(expected_directory.as_str())
-        );
     }
 }

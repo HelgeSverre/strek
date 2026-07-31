@@ -1,4 +1,4 @@
-//! Stdio MCP server backed by the running Strek automation socket.
+//! Stdio MCP server backed by the running Strek automation endpoint.
 
 use base64::Engine;
 use rmcp::{

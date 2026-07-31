@@ -3622,7 +3622,7 @@ fn main() {
         Err(error) => {
             log::warn!(
                 "automation unavailable at {}: {error}",
-                automation::socket_path_display()
+                automation::endpoint_display()
             );
             None
         }

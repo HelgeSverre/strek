@@ -7,9 +7,10 @@ through three cursor-free interfaces:
 - the bundled `Strek Automation.applescript` helper
 - `strek mcp` for Model Context Protocol clients
 
-All three talk to the running desktop application through a local Unix-domain
-socket. They do not move the system cursor. The socket protocol itself is an
-implementation detail; scripts should use one of the supported interfaces
+All three talk to the running desktop application through a local IPC endpoint.
+On Linux and macOS this is a Unix-domain socket. On Windows it is a loopback
+TCP endpoint. They do not move the system cursor. The transport protocol itself
+is an implementation detail; scripts should use one of the supported interfaces
 above.
 
 ## Requirements
@@ -18,21 +19,31 @@ Start the Strek desktop application before issuing automation commands. The CLI
 and MCP server are clients of that running process; `strek mcp` does not launch
 the GUI.
 
-By default, Strek creates a per-user socket below `XDG_RUNTIME_DIR`, when it is
-an absolute path, or the system temporary directory:
+By default, Strek creates a per-user local endpoint. On Linux and macOS it is a
+socket below `XDG_RUNTIME_DIR`, when it is an absolute path, or the system
+temporary directory:
 
 ```text
 <runtime-directory>/strek-<user-id>/automation.sock
 ```
 
-The directory is restricted to its owner with mode `0700` and the socket with
-mode `0600`. Set `STREK_AUTOMATION_SOCKET` in both the app and client
-environments to use another path, for example when running isolated development
+On Linux and macOS, the directory is restricted to its owner with mode `0700`
+and the socket with mode `0600`. On Windows, the default endpoint is a loopback
+address in the dynamic port range, derived from the current user. Set
+`STREK_AUTOMATION_SOCKET` in both the app and client environments to use another
+endpoint. The value is a filesystem path on Linux/macOS and a loopback
+`IP:port` address on Windows. For example, when running isolated development
 instances:
 
 ```sh
 STREK_AUTOMATION_SOCKET=/tmp/strek-dev.sock cargo run -p strek
 STREK_AUTOMATION_SOCKET=/tmp/strek-dev.sock target/debug/strek automate state
+```
+
+```powershell
+$env:STREK_AUTOMATION_SOCKET = "127.0.0.1:49153"
+cargo run -p strek
+target\debug\strek.exe automate state
 ```
 
 ## Recommended workflow
@@ -144,7 +155,7 @@ Text insertion is accepted only while `interaction` is `text_editing` and no
 menu, command palette, context menu, or inline numeric editor is intercepting
 input.
 
-## AppleScript
+## AppleScript (macOS)
 
 The packaged application installs its helper here:
 
@@ -233,7 +244,7 @@ server subprocess and negotiates the MCP lifecycle. The server writes protocol
 messages on standard input/output and does not open a network port.
 
 The Strek desktop application must still be running. MCP tool calls are bridged
-from the stdio server to that application's local automation socket.
+from the stdio server to that application's local automation endpoint.
 
 ### Tools
 
@@ -261,7 +272,7 @@ pointer {"phase":"up","x":360,"y":260}
 screenshot {}
 ```
 
-Socket-backed tools return structured errors when Strek rejects a request.
+Endpoint-backed tools return structured errors when Strek rejects a request.
 Transport failures and screenshot failures are MCP tool errors.
 
 ## Behavior and troubleshooting
@@ -278,6 +289,7 @@ Transport failures and screenshot failures are MCP tool errors.
 - Screenshots activate the Strek window first. On macOS, the first capture may
   request Screen Recording permission; denial is returned as an error.
 - Window screenshots are currently supported only on macOS.
-- The default socket permits one running Strek automation server per user. Use
-  distinct `STREK_AUTOMATION_SOCKET` paths for concurrent development
-  instances.
+- The default endpoint permits one running Strek automation server per user. Use
+  distinct `STREK_AUTOMATION_SOCKET` values for concurrent development
+  instances; use paths on Linux/macOS and loopback `host:port` addresses on
+  Windows.
