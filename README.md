@@ -14,7 +14,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0C8CE9?style=flat-square" alt="License: MIT"></a>
 </p>
 
-Strek pairs a GPUI desktop application with reusable editor, rendering, and
+Strek is a GPUI desktop application backed by reusable editor, rendering, and
 export crates. Its native interface is designed around focused logo and icon
 workflows rather than general-purpose illustration.
 
@@ -63,12 +63,10 @@ first release, install Strek from Homebrew:
 brew install helgesverre/tap/strek
 ```
 
-## Cursor-free automation
+## Automation
 
-A running Strek window exposes its existing command and pointer systems over a
-per-user Unix socket. The installed `strek` binary is also the client, so shell
-scripts and AppleScript can inspect and drive the editor without moving the
-system cursor:
+Strek can be inspected and controlled without moving the system cursor through
+its CLI, bundled AppleScript helper, or MCP server:
 
 ```sh
 strek automate state
@@ -76,48 +74,17 @@ strek automate action tool.rectangle
 strek automate pointer down 120 100
 strek automate pointer move 360 260
 strek automate pointer up 360 260
-strek automate screenshot /tmp/strek.png
 ```
 
-Pointer coordinates are canvas-local pixels. `state` reports the current
-window and canvas bounds, selected layers, zoom, open panels, and the complete
-list of editor command IDs with their enabled state.
-
-The packaged app includes `Strek Automation.applescript` in its Resources
-directory. It exposes `strekState`, `strekAction`, `strekPointer`, `strekText`,
-`strekUi`, and `strekScreenshot` handlers. The same commands can be called
-directly from any AppleScript:
-
-```applescript
-do shell script "/opt/homebrew/bin/strek automate action tool.rectangle"
-do shell script "/opt/homebrew/bin/strek automate screenshot /tmp/strek.png"
-```
-
-The bundled helper can also be run directly with `osascript`:
+The packaged app includes an AppleScript helper:
 
 ```sh
 osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" state
 ```
 
-Strek also embeds an MCP server using the official Rust MCP SDK. Configure an
-MCP client to launch the same binary in stdio mode:
-
-```json
-{
-  "mcpServers": {
-    "strek": {
-      "command": "/opt/homebrew/bin/strek",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-The server exposes state, editor actions, canvas pointer events, text input,
-panel/overlay visibility, and PNG window screenshots. Strek must already be
-running before those tools are called. On macOS, the first screenshot may
-prompt for Screen Recording permission; a denied permission is returned as a
-tool error.
+See [AUTOMATION.md](AUTOMATION.md) for the complete CLI, AppleScript, and MCP
+surface, client configuration, state schema, coordinates, permissions, and
+troubleshooting.
 
 ## Keyboard and pointer controls
 
@@ -204,7 +171,7 @@ second architecture must be added and tested before distributing it publicly.
 
 The workspace is split by responsibility:
 
-- `apps/gpui` — primary native application and GPUI interface
+- `apps/gpui` — native application and GPUI interface
 - `crates/editor_core` — document model, commands, history, tools, and state
   machines
 - `crates/editor_render` — backend-neutral display-list types
