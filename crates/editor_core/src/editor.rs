@@ -5953,6 +5953,16 @@ impl Editor {
         self.update_selected_styles("Change Fill", move |style| style.fill = fill.clone())
     }
 
+    /// Set the stroke paint for every independently selected layer.
+    ///
+    /// Layers without a stroke receive a one-unit stroke.
+    pub fn set_selected_stroke_paint(&mut self, paint: Paint) -> bool {
+        self.update_selected_styles("Change Stroke Color", move |style| {
+            let stroke = style.stroke.get_or_insert_with(|| Stroke::black(1.0));
+            stroke.paint = paint.clone();
+        })
+    }
+
     /// Toggle a default stroke for every independently selected layer.
     pub fn toggle_selected_stroke(&mut self) -> bool {
         self.update_selected_styles("Toggle Stroke", |style| {
@@ -7010,14 +7020,14 @@ mod tests {
             .all(|id| editor.document.get(*id).unwrap().style.opacity == 0.4));
         assert!(editor.set_selected_fill(Some(Paint::rgb(0.2, 0.4, 0.8))));
         assert!(editor.toggle_selected_stroke());
+        assert!(editor.set_selected_stroke_paint(Paint::rgb(0.9, 0.1, 0.3)));
         assert!(editor.adjust_selected_stroke_width(2.0));
         assert!(ids.iter().all(|id| {
             let style = &editor.document.get(*id).unwrap().style;
             style.fill == Some(Paint::rgb(0.2, 0.4, 0.8))
-                && style
-                    .stroke
-                    .as_ref()
-                    .is_some_and(|stroke| stroke.width == 3.0)
+                && style.stroke.as_ref().is_some_and(|stroke| {
+                    stroke.width == 3.0 && stroke.paint == Paint::rgb(0.9, 0.1, 0.3)
+                })
         }));
 
         let transform_before_rotation = ids
