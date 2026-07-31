@@ -29,6 +29,7 @@ const TRANSFORMED_TEXT_CACHE_LIMIT: usize = 256;
 const MAX_AFFINE_TEXT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AFFINE_TEXT_RASTER_DIMENSION: u32 = 16_384;
 const MAX_AFFINE_TEXT_RASTER_PIXELS: u64 = 16_000_000;
+const MAX_AFFINE_TEXT_FRAME_PIXELS: u64 = MAX_AFFINE_TEXT_CACHE_BYTES / 4;
 
 static SVG_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
     let mut database = resvg::usvg::fontdb::Database::new();
@@ -53,6 +54,42 @@ struct TextImageCacheState {
 /// Bounded cache for text that must be rasterized with a full affine transform.
 #[derive(Clone, Default)]
 pub struct TextImageCache(Rc<RefCell<TextImageCacheState>>);
+
+struct AffineTextFrameBudget {
+    remaining_items: usize,
+    remaining_pixels: u64,
+}
+
+impl AffineTextFrameBudget {
+    fn new(display_list: &DisplayList) -> Self {
+        let remaining_items = display_list
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    DisplayItem::Text { transform, .. }
+                        if !supports_native_text_transform(transform)
+                )
+            })
+            .count();
+        Self {
+            remaining_items,
+            remaining_pixels: MAX_AFFINE_TEXT_FRAME_PIXELS,
+        }
+    }
+
+    fn take_raster_limit(&mut self) -> u64 {
+        if self.remaining_items == 0 {
+            return 1;
+        }
+        let limit = (self.remaining_pixels / self.remaining_items as u64)
+            .clamp(1, MAX_AFFINE_TEXT_RASTER_PIXELS);
+        self.remaining_items -= 1;
+        self.remaining_pixels = self.remaining_pixels.saturating_sub(limit);
+        limit
+    }
+}
 
 impl TextImageCache {
     fn begin_frame(&self, window: &mut Window) {
@@ -141,6 +178,7 @@ fn paint_display_list(
     cx: &mut App,
 ) {
     text_cache.begin_frame(window);
+    let mut affine_text_budget = AffineTextFrameBudget::new(display_list);
     for item in &display_list.items {
         match item {
             DisplayItem::FillPath {
@@ -167,7 +205,21 @@ fn paint_display_list(
                 text,
                 transform,
                 opacity,
-            } => paint_text(window, cx, bounds, text_cache, text, transform, *opacity),
+            } => {
+                if supports_native_text_transform(transform) {
+                    paint_native_text(window, cx, bounds, text, transform, *opacity);
+                } else {
+                    paint_affine_text(
+                        window,
+                        bounds,
+                        text_cache,
+                        &mut affine_text_budget,
+                        text,
+                        transform,
+                        *opacity,
+                    );
+                }
+            }
             DisplayItem::ToolPreview {
                 path,
                 fill,
@@ -376,20 +428,14 @@ fn paint_color(paint: &Paint, opacity: f32) -> gpui::Rgba {
     }
 }
 
-fn paint_text(
+fn paint_native_text(
     window: &mut Window,
     cx: &mut App,
     bounds: Bounds<Pixels>,
-    text_cache: &TextImageCache,
     text: &TextItem,
     transform: &Affine2,
     opacity: f32,
 ) {
-    if !supports_native_text_transform(transform) {
-        paint_affine_text(window, bounds, text_cache, text, transform, opacity);
-        return;
-    }
-
     let scale = transform_scale(transform);
     let font_size = px(text.font_size * scale);
     let line_height = px(text.font_size * text.line_height.max(0.1) * scale);
@@ -617,10 +663,12 @@ fn paint_affine_text(
     window: &mut Window,
     canvas_bounds: Bounds<Pixels>,
     text_cache: &TextImageCache,
+    frame_budget: &mut AffineTextFrameBudget,
     text: &TextItem,
     transform: &Affine2,
     opacity: f32,
 ) {
+    let raster_pixel_limit = frame_budget.take_raster_limit();
     let Some(layout) = shape_text_layout(text, window) else {
         return;
     };
@@ -636,7 +684,7 @@ fn paint_affine_text(
         rendered.size,
         raster_scale,
         MAX_AFFINE_TEXT_RASTER_DIMENSION,
-        MAX_AFFINE_TEXT_RASTER_PIXELS,
+        raster_pixel_limit,
     ) else {
         return;
     };
@@ -645,16 +693,15 @@ fn paint_affine_text(
     let image = text_cache.get(&key).or_else(|| {
         let image_byte_len = u64::from(raster_width) * u64::from(raster_height) * 4;
         let cache_byte_len = image_byte_len.saturating_add(key.len() as u64);
-        if !text_cache.prepare_insert(cache_byte_len, window) {
-            log::warn!("transformed text cache budget exhausted; skipping an uncached raster");
-            return None;
-        }
+        let should_cache = text_cache.prepare_insert(cache_byte_len, window);
         let pixmap = render_svg_pixmap(rendered.svg.as_bytes(), raster_width, raster_height)?;
         let mut pixels = pixmap.data().to_vec();
         premultiplied_rgba_to_unpremultiplied_bgra(&mut pixels);
         let buffer = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
         let image = Arc::new(RenderImage::new(smallvec![Frame::new(buffer)]));
-        text_cache.insert(key, image.clone(), cache_byte_len);
+        if should_cache {
+            text_cache.insert(key, image.clone(), cache_byte_len);
+        }
         Some(image)
     });
     let Some(image) = image else {
@@ -1359,5 +1406,19 @@ mod tests {
             Vec2::new(20.0, 20.0),
             canvas
         ));
+    }
+
+    #[test]
+    fn affine_text_frame_budget_is_shared_without_starving_later_items() {
+        let mut budget = AffineTextFrameBudget {
+            remaining_items: 3,
+            remaining_pixels: 10,
+        };
+
+        assert_eq!(budget.take_raster_limit(), 3);
+        assert_eq!(budget.take_raster_limit(), 3);
+        assert_eq!(budget.take_raster_limit(), 4);
+        assert_eq!(budget.remaining_pixels, 0);
+        assert_eq!(budget.take_raster_limit(), 1);
     }
 }
