@@ -8,12 +8,12 @@ use gpui::{
 
 use crate::{
     assets::{icon, Icon},
-    AlignTextCenter, AlignTextLeft, AlignTextRight, BringToFront, Delete, DeselectAll, Duplicate,
-    EditVector, EllipseTool, FinishEditing, FrameTool, Group, JoinPaths, PenTool, RectangleTool,
-    Redo, ReversePath, SelectAll, SelectTool, SendToBack, SplitPath, TextLarger, TextSmaller,
-    TextTool, ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed,
-    ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomToFit,
-    ZoomToSelection,
+    AlignTextCenter, AlignTextLeft, AlignTextRight, BringForward, BringToFront, Delete,
+    DeselectAll, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
+    InvertSelection, JoinPaths, PenTool, RectangleTool, Redo, ReversePath, SelectAll, SelectTool,
+    SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground,
+    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup,
+    VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -455,6 +455,12 @@ fn render_main_menu(editor: &Editor, show_layer_panel: bool) -> impl IntoElement
             editor.can_execute(EditorAction::DeselectAll),
             DeselectAll,
         ))
+        .child(menu_item(
+            "Invert selection",
+            "⇧⌘I",
+            editor.can_execute(EditorAction::InvertSelection),
+            InvertSelection,
+        ))
         .child(menu_separator())
         .child(menu_section("Object"))
         .child(menu_item(
@@ -482,14 +488,26 @@ fn render_main_menu(editor: &Editor, show_layer_panel: bool) -> impl IntoElement
             Ungroup,
         ))
         .child(menu_item(
-            "Bring to front",
+            "Bring forward",
             "⌘]",
+            editor.can_execute(EditorAction::BringForward),
+            BringForward,
+        ))
+        .child(menu_item(
+            "Send backward",
+            "⌘[",
+            editor.can_execute(EditorAction::SendBackward),
+            SendBackward,
+        ))
+        .child(menu_item(
+            "Bring to front",
+            "⇧⌘]",
             editor.can_execute(EditorAction::BringToFront),
             BringToFront,
         ))
         .child(menu_item(
             "Send to back",
-            "⌘[",
+            "⇧⌘[",
             editor.can_execute(EditorAction::SendToBack),
             SendToBack,
         ))
@@ -555,14 +573,20 @@ fn render_zoom_menu(editor: &Editor) -> impl IntoElement {
         ))
         .child(menu_item(
             "Actual size",
-            "⌘0",
+            "⌘1",
             editor.can_execute(EditorAction::ZoomReset),
             ZoomReset,
+        ))
+        .child(menu_item(
+            "Reset view",
+            "⌘0",
+            editor.can_execute(EditorAction::ZoomResetAll),
+            ZoomResetAll,
         ))
         .child(menu_separator())
         .child(menu_item(
             "Fit canvas",
-            "⌘1",
+            "⇧⌘1",
             editor.can_execute(EditorAction::ZoomToFit),
             ZoomToFit,
         ))

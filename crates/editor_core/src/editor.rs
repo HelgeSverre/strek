@@ -744,7 +744,6 @@ impl Editor {
             // Require selection
             EditorAction::Delete
             | EditorAction::Duplicate
-            | EditorAction::Group
             | EditorAction::BringToFront
             | EditorAction::SendToBack
             | EditorAction::BringForward
@@ -758,6 +757,22 @@ impl Editor {
             | EditorAction::NudgeLeftLarge
             | EditorAction::NudgeRightLarge
             | EditorAction::ZoomToSelection => !self.selection.is_empty(),
+
+            // Group requires at least two top-level sibling selections.
+            EditorAction::Group => {
+                let selected: Vec<_> = self.selection.iter().collect();
+                let nodes = self.document.filter_selection_for_transform(&selected);
+                nodes.len() >= 2
+                    && self
+                        .document
+                        .get(nodes[0])
+                        .and_then(|node| node.parent)
+                        .is_some_and(|parent| {
+                            nodes[1..].iter().all(|id| {
+                                self.document.get(*id).and_then(|node| node.parent) == Some(parent)
+                            })
+                        })
+            }
 
             // Ungroup requires grouped selection
             EditorAction::Ungroup => self
@@ -5757,6 +5772,31 @@ mod tests {
             editor.document.world_transform(second_group),
             Affine2::from_translation(Vec2::splat(20.0)) * group_world,
         );
+    }
+
+    #[test]
+    fn group_is_enabled_only_for_two_or_more_siblings() {
+        let (mut editor, ids) = editor_with_named_shapes(&["A", "B"]);
+
+        editor.selection.select(ids[0]);
+        assert!(!editor.can_execute(EditorAction::Group));
+
+        editor.selection.set([ids[0], ids[1]]);
+        assert!(editor.can_execute(EditorAction::Group));
+
+        let group = editor
+            .document
+            .add_child(editor.document.root, Node::group("Other parent"))
+            .unwrap();
+        let nested = editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Nested", PathData::rect(0.0, 0.0, 1.0, 1.0)),
+            )
+            .unwrap();
+        editor.selection.set([ids[0], nested]);
+        assert!(!editor.can_execute(EditorAction::Group));
     }
 
     #[test]

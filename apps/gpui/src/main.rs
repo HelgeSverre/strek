@@ -24,6 +24,7 @@ actions!(
         Redo,
         SelectAll,
         DeselectAll,
+        InvertSelection,
         Backspace,
         Delete,
         Duplicate,
@@ -31,6 +32,8 @@ actions!(
         Ungroup,
         BringToFront,
         SendToBack,
+        BringForward,
+        SendBackward,
         NudgeUp,
         NudgeDown,
         NudgeLeft,
@@ -42,6 +45,7 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        ZoomResetAll,
         ZoomToFit,
         ZoomToSelection,
         ToggleLayerPanel,
@@ -145,6 +149,15 @@ impl VectorEditor {
         self.execute_editor_action(EditorAction::DeselectAll, cx);
     }
 
+    fn invert_selection(
+        &mut self,
+        _: &InvertSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::InvertSelection, cx);
+    }
+
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.delete_text_backward() {
             cx.notify();
@@ -194,6 +207,14 @@ impl VectorEditor {
 
     fn send_to_back(&mut self, _: &SendToBack, _window: &mut Window, cx: &mut Context<Self>) {
         self.execute_editor_action(EditorAction::SendToBack, cx);
+    }
+
+    fn bring_forward(&mut self, _: &BringForward, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::BringForward, cx);
+    }
+
+    fn send_backward(&mut self, _: &SendBackward, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::SendBackward, cx);
     }
 
     fn nudge_up(&mut self, _: &NudgeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -253,6 +274,10 @@ impl VectorEditor {
 
     fn zoom_reset(&mut self, _: &ZoomReset, _window: &mut Window, cx: &mut Context<Self>) {
         self.execute_editor_action(EditorAction::ZoomReset, cx);
+    }
+
+    fn zoom_reset_all(&mut self, _: &ZoomResetAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::ZoomResetAll, cx);
     }
 
     fn zoom_to_fit(&mut self, _: &ZoomToFit, _window: &mut Window, cx: &mut Context<Self>) {
@@ -762,6 +787,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::deselect_all))
+            .on_action(cx.listener(Self::invert_selection))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::duplicate))
@@ -769,6 +795,8 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::ungroup))
             .on_action(cx.listener(Self::bring_to_front))
             .on_action(cx.listener(Self::send_to_back))
+            .on_action(cx.listener(Self::bring_forward))
+            .on_action(cx.listener(Self::send_backward))
             .on_action(cx.listener(Self::nudge_up))
             .on_action(cx.listener(Self::nudge_down))
             .on_action(cx.listener(Self::nudge_left))
@@ -780,6 +808,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
+            .on_action(cx.listener(Self::zoom_reset_all))
             .on_action(cx.listener(Self::zoom_to_fit))
             .on_action(cx.listener(Self::zoom_to_selection))
             .on_action(cx.listener(Self::toggle_layer_panel))
@@ -934,18 +963,22 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-z", Redo, Some("VectorEditor")),
         KeyBinding::new("cmd-a", SelectAll, Some("VectorEditor")),
         KeyBinding::new("cmd-shift-a", DeselectAll, Some("VectorEditor")),
+        KeyBinding::new("cmd-shift-i", InvertSelection, Some("VectorEditor")),
         KeyBinding::new("backspace", Backspace, Some("VectorEditor")),
         KeyBinding::new("delete", Delete, Some("VectorEditor")),
         KeyBinding::new("cmd-d", Duplicate, Some("VectorEditor")),
         KeyBinding::new("cmd-g", Group, Some("VectorEditor")),
         KeyBinding::new("cmd-shift-g", Ungroup, Some("VectorEditor")),
-        KeyBinding::new("cmd-]", BringToFront, Some("VectorEditor")),
-        KeyBinding::new("cmd-[", SendToBack, Some("VectorEditor")),
+        KeyBinding::new("cmd-]", BringForward, Some("VectorEditor")),
+        KeyBinding::new("cmd-[", SendBackward, Some("VectorEditor")),
+        KeyBinding::new("cmd-shift-]", BringToFront, Some("VectorEditor")),
+        KeyBinding::new("cmd-shift-[", SendToBack, Some("VectorEditor")),
         KeyBinding::new("cmd-=", ZoomIn, Some("VectorEditor")),
         KeyBinding::new("cmd-+", ZoomIn, Some("VectorEditor")),
         KeyBinding::new("cmd--", ZoomOut, Some("VectorEditor")),
-        KeyBinding::new("cmd-0", ZoomReset, Some("VectorEditor")),
-        KeyBinding::new("cmd-1", ZoomToFit, Some("VectorEditor")),
+        KeyBinding::new("cmd-0", ZoomResetAll, Some("VectorEditor")),
+        KeyBinding::new("cmd-1", ZoomReset, Some("VectorEditor")),
+        KeyBinding::new("cmd-shift-1", ZoomToFit, Some("VectorEditor")),
         KeyBinding::new("cmd-2", ZoomToSelection, Some("VectorEditor")),
         KeyBinding::new("cmd-\\", ToggleLayerPanel, Some("VectorEditor")),
         KeyBinding::new("v", SelectTool, Some("VectorEditor")),

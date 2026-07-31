@@ -343,13 +343,13 @@ impl EditorAction {
                 name: "Zoom to Fit",
                 description: "Zoom to fit all content",
                 category: ActionCategory::View,
-                default_shortcut: Some(Shortcut::ctrl(Key::Digit9)),
+                default_shortcut: Some(Shortcut::ctrl_shift(Key::Digit1)),
             },
             EditorAction::ZoomToSelection => ActionMeta {
                 name: "Zoom to Selection",
                 description: "Zoom to fit the current selection",
                 category: ActionCategory::View,
-                default_shortcut: Some(Shortcut::ctrl_shift(Key::Digit9)),
+                default_shortcut: Some(Shortcut::ctrl(Key::Digit2)),
             },
 
             // Tools
@@ -504,5 +504,22 @@ mod tests {
         let s2 = Shortcut::ctrl_shift(Key::Z);
         assert!(s2.ctrl);
         assert!(s2.shift);
+    }
+
+    #[test]
+    fn default_shortcuts_are_unique() {
+        let actions = EditorAction::all();
+        for (index, action) in actions.iter().enumerate() {
+            let Some(shortcut) = action.meta().default_shortcut else {
+                continue;
+            };
+            for other in &actions[index + 1..] {
+                assert_ne!(
+                    Some(shortcut),
+                    other.meta().default_shortcut,
+                    "{action:?} and {other:?} share a default shortcut"
+                );
+            }
+        }
     }
 }
