@@ -18,6 +18,8 @@ the file format and UI should not yet be treated as stable.
   decomposition readouts, and auto-layout mode, direction, spacing, and padding
   controls
 - Text family, weight, italic, size, and alignment controls
+- Live horizontal scrubbing for position, opacity, stroke width, text size, and
+  auto-layout spacing/padding, committed as one undo step
 - Per-tool fill and stroke defaults for new shapes and paths in the context bar
 - Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files

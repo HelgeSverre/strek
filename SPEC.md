@@ -1525,8 +1525,8 @@ intentional product backlog.
 - [x] Node name and type
 - [x] Mixed-value handling for multi-selection
 - [x] Font family, weight, and italic controls
-- [ ] Live preview during value scrubbing (uses Transaction)
-- [ ] Numeric input with drag-to-adjust
+- [x] Live preview during value scrubbing with one undo entry on commit
+- [x] Numeric values with horizontal drag-to-adjust and Escape cancellation
 
 ### Milestone 13: Drawing Tools
 - [x] Rectangle tool with constrained and centered drawing
