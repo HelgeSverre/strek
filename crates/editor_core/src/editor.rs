@@ -1290,6 +1290,120 @@ impl Editor {
         self.needs_redraw = true;
     }
 
+    /// Rename a layer with undo support.
+    pub fn rename_layer(&mut self, id: NodeId, name: &str) -> bool {
+        let name = name.trim();
+        let Some(before) = self
+            .document
+            .get(id)
+            .filter(|node| !node.deleted)
+            .map(|node| node.name.clone())
+        else {
+            return false;
+        };
+        if id == self.document.root || name.is_empty() || before == name {
+            return false;
+        }
+
+        self.settle_interaction();
+        let command = Command::new("Rename Layer").with_patch(Patch::SetName {
+            id,
+            before,
+            after: name.to_owned(),
+        });
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Move a layer to a parent and final child index with undo support.
+    ///
+    /// The index is interpreted after removing the layer from its current
+    /// parent. Cross-parent moves preserve the layer's world transform.
+    pub fn reparent_layer(&mut self, id: NodeId, after_parent: NodeId, after_index: usize) -> bool {
+        if id == self.document.root
+            || id == after_parent
+            || self.document.is_ancestor_of(id, after_parent)
+            || !self.document.is_effectively_editable(id)
+        {
+            return false;
+        }
+
+        let Some(after_parent_node) = self.document.get(after_parent) else {
+            return false;
+        };
+        if after_parent_node.deleted
+            || (after_parent != self.document.root
+                && !matches!(after_parent_node.kind, NodeKind::Group | NodeKind::Frame(_)))
+        {
+            return false;
+        }
+
+        let Some((before_parent, before_transform)) = self
+            .document
+            .get(id)
+            .and_then(|node| node.parent.map(|parent| (parent, node.transform)))
+        else {
+            return false;
+        };
+        let Some(before_index) = self
+            .document
+            .get(before_parent)
+            .and_then(|parent| parent.children.iter().position(|child| *child == id))
+        else {
+            return false;
+        };
+
+        let available_slots = self
+            .document
+            .get(after_parent)
+            .map(|parent| {
+                parent
+                    .children
+                    .len()
+                    .saturating_sub(usize::from(before_parent == after_parent))
+            })
+            .unwrap_or_default();
+        let after_index = after_index.min(available_slots);
+        if before_parent == after_parent && before_index == after_index {
+            return false;
+        }
+
+        self.settle_interaction();
+        let before_world = self.document.world_transform(id);
+        let mut patches = vec![Patch::Reparent {
+            id,
+            before_parent,
+            after_parent,
+            before_index,
+            after_index,
+        }];
+
+        if before_parent != after_parent {
+            let mut moved_document = self.document.clone();
+            patches[0].apply_forward(&mut moved_document);
+            moved_document.restore_world_transforms(&[(id, before_world)]);
+            if let Some(after) = moved_document.get(id).map(|node| node.transform) {
+                if before_transform != after {
+                    patches.push(Patch::SetTransform {
+                        id,
+                        before: before_transform,
+                        after,
+                    });
+                }
+            }
+        }
+
+        let command = Command::new("Move Layer").with_patches(patches);
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.layer_panel.expand(after_parent);
+        self.selection.select(id);
+        self.needs_redraw = true;
+        true
+    }
+
     /// Toggle expand/collapse state of a layer in the layer panel.
     pub fn toggle_layer_expand(&mut self, id: NodeId) {
         self.layer_panel.toggle(id);
@@ -6367,6 +6481,34 @@ mod tests {
     }
 
     #[test]
+    fn escape_finishes_pen_session_without_switching_tools() {
+        let mut editor = Editor::new();
+        editor.execute_action(EditorAction::ToolPen);
+        for position in [Vec2::ZERO, Vec2::new(20.0, 0.0)] {
+            editor.handle_event(InputEvent::PointerDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+            });
+            editor.handle_event(InputEvent::PointerUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+            });
+        }
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.tool, Tool::Pen);
+        assert_eq!(editor.history.undo_description(), Some("Create Path"));
+        assert!(editor.selection.primary().is_some());
+    }
+
+    #[test]
     fn space_pan_temporarily_suspends_and_restores_pen_editing() {
         let mut editor = Editor::new();
         editor.execute_action(EditorAction::ToolPen);
@@ -6484,6 +6626,95 @@ mod tests {
         editor.select_layer(ids[2], false);
         assert_eq!(editor.selection.iter().collect::<Vec<_>>(), [ids[2]]);
         assert_eq!(editor.selection.primary(), Some(ids[2]));
+    }
+
+    #[test]
+    fn layer_rename_is_validated_and_undoable() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Original"]);
+
+        assert!(!editor.rename_layer(ids[0], "  "));
+        assert!(!editor.history.can_undo());
+        assert!(editor.rename_layer(ids[0], "  Renamed  "));
+        assert_eq!(editor.document.get(ids[0]).unwrap().name, "Renamed");
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.document.get(ids[0]).unwrap().name, "Original");
+        assert!(editor.execute_action(EditorAction::Redo));
+        assert_eq!(editor.document.get(ids[0]).unwrap().name, "Renamed");
+    }
+
+    #[test]
+    fn layer_reparent_preserves_world_transform_and_history() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let first_parent = editor
+            .document
+            .add_child(
+                root,
+                Node::group("First").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(1.5, 0.75),
+                    0.2,
+                    Vec2::new(40.0, 20.0),
+                )),
+            )
+            .unwrap();
+        let second_parent = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Second").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::new(0.8, 1.25),
+                    -0.3,
+                    Vec2::new(180.0, 60.0),
+                )),
+            )
+            .unwrap();
+        let child = editor
+            .document
+            .add_child(
+                first_parent,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 20.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(12.0, 8.0))),
+            )
+            .unwrap();
+        let before_world = editor.document.world_transform(child);
+
+        assert!(editor.reparent_layer(child, second_parent, 0));
+        assert_eq!(
+            editor.document.get(child).and_then(|node| node.parent),
+            Some(second_parent)
+        );
+        assert_affine_approx_eq(editor.document.world_transform(child), before_world);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(
+            editor.document.get(child).and_then(|node| node.parent),
+            Some(first_parent)
+        );
+        assert_affine_approx_eq(editor.document.world_transform(child), before_world);
+
+        assert!(editor.execute_action(EditorAction::Redo));
+        assert_eq!(
+            editor.document.get(child).and_then(|node| node.parent),
+            Some(second_parent)
+        );
+        assert_affine_approx_eq(editor.document.world_transform(child), before_world);
+    }
+
+    #[test]
+    fn layer_reorder_uses_the_final_sibling_index() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Back", "Middle", "Front"]);
+        let root = editor.document.root;
+
+        assert!(editor.reparent_layer(ids[0], root, 2));
+        assert_eq!(
+            editor.document.get(root).unwrap().children,
+            [ids[1], ids[2], ids[0]]
+        );
+        assert!(!editor.reparent_layer(ids[0], root, 2));
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.document.get(root).unwrap().children, ids);
     }
 
     #[test]
@@ -6613,6 +6844,48 @@ mod tests {
             editor.document.get(ids[0]).unwrap().transform,
             Affine2::IDENTITY
         );
+    }
+
+    #[test]
+    fn escape_finishes_vector_edit_and_returns_to_select() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Path"]);
+        editor.selection.select(ids[0]);
+        assert!(editor.execute_action(EditorAction::EnterVectorEdit));
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.tool, Tool::Select);
+        assert_eq!(editor.selection.primary(), Some(ids[0]));
+    }
+
+    #[test]
+    fn escape_cancels_text_edit_without_advancing_idle_tool_ladder() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let id = editor
+            .document
+            .add_child(root, Node::text("Text", "A"))
+            .unwrap();
+        editor.begin_existing_text_edit(id);
+        assert!(editor.replace_text(None, "!"));
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+
+        let NodeKind::Text(text) = &editor.document.get(id).unwrap().kind else {
+            panic!("expected text");
+        };
+        assert_eq!(text.content, "A");
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.tool, Tool::Text);
+        assert_eq!(editor.selection.primary(), Some(id));
+        assert!(!editor.history.can_undo());
     }
 
     #[test]
