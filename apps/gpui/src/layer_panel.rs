@@ -11,17 +11,16 @@ use crate::{
     layer_name_input::LayerNameInput,
     properties_panel::{self, PropertiesSnapshot},
     toolbar::editor_tooltip,
-    SidebarTab, VectorEditor,
+    VectorEditor,
 };
 
-pub const WIDTH: f32 = 248.0;
+pub const LAYERS_WIDTH: f32 = 248.0;
+pub const DESIGN_WIDTH: f32 = 248.0;
 
-/// Render the layer panel on the right side of the window.
-pub fn render_layer_panel(
+/// Render the persistent layer tree on the left side of the window.
+pub fn render_layers_panel(
     layer_entries: Vec<LayerEntry>,
     layer_name_input: Option<(NodeId, Entity<LayerNameInput>)>,
-    active_tab: SidebarTab,
-    properties: PropertiesSnapshot,
     cx: &mut Context<VectorEditor>,
 ) -> impl IntoElement {
     let rows = layer_entries
@@ -36,24 +35,18 @@ pub fn render_layer_panel(
         .collect::<Vec<_>>();
 
     div()
-        .id("layer-panel")
-        .w(px(WIDTH))
+        .id("layers-panel")
+        .w(px(LAYERS_WIDTH))
         .h_full()
+        .flex_none()
         .flex()
         .flex_col()
+        .overflow_hidden()
         .bg(rgb(0x202124))
-        .border_l_1()
+        .border_r_1()
         .border_color(rgb(0x414349))
         .child(
-            div()
-                .h(px(40.0))
-                .w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .px(px(6.0))
-                .border_b_1()
-                .border_color(rgb(0x414349))
+            sidebar_section_header("Layers", Icon::Layers)
                 .drag_over::<DraggedLayer>(|style, _, _, _| style.bg(rgb(0x164f73)))
                 .on_drop(cx.listener(|editor, dragged: &DraggedLayer, _window, cx| {
                     let root = editor.editor.document().root;
@@ -67,84 +60,51 @@ pub fn render_layer_panel(
                         cx.notify();
                     }
                     cx.stop_propagation();
-                }))
-                .child(sidebar_tab_button(
-                    "Layers",
-                    Icon::Layers,
-                    active_tab == SidebarTab::Layers,
-                    SidebarTab::Layers,
-                    cx,
-                ))
-                .child(sidebar_tab_button(
-                    "Design",
-                    Icon::Properties,
-                    active_tab == SidebarTab::Design,
-                    SidebarTab::Design,
-                    cx,
-                )),
+                })),
         )
-        .when(active_tab == SidebarTab::Layers, |panel| {
-            panel.child(
-                div()
-                    .id("layer-list-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .py(px(5.0))
-                    .children(rows),
-            )
-        })
-        .when(active_tab == SidebarTab::Design, |panel| {
-            panel.child(properties_panel::render(properties))
-        })
+        .child(
+            div()
+                .id("layer-list-scroll")
+                .flex_1()
+                .overflow_y_scroll()
+                .py(px(5.0))
+                .children(rows),
+        )
 }
 
-fn sidebar_tab_button(
-    label: &'static str,
-    icon_kind: Icon,
-    active: bool,
-    tab: SidebarTab,
-    cx: &mut Context<VectorEditor>,
-) -> impl IntoElement {
+/// Render the persistent design inspector on the right side of the window.
+pub fn render_design_panel(properties: PropertiesSnapshot) -> impl IntoElement {
     div()
-        .id(SharedString::from(format!(
-            "sidebar-tab-{}",
-            label.to_lowercase()
-        )))
-        .relative()
-        .h(px(32.0))
-        .flex_1()
+        .id("design-panel")
+        .w(px(DESIGN_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(rgb(0x202124))
+        .border_l_1()
+        .border_color(rgb(0x414349))
+        .child(sidebar_section_header("Design", Icon::Properties))
+        .child(properties_panel::render(properties))
+}
+
+fn sidebar_section_header(label: &'static str, icon_kind: Icon) -> gpui::Div {
+    div()
+        .h(px(36.0))
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
-        .justify_center()
-        .gap(px(6.0))
-        .rounded(px(5.0))
-        .bg(if active {
-            rgb(0x292a2e)
-        } else {
-            rgba(0x00000000)
-        })
-        .text_color(rgb(if active { 0xf1f3f4 } else { 0xa8abb2 }))
+        .gap(px(7.0))
+        .px(px(12.0))
+        .border_b_1()
+        .border_color(rgb(0x414349))
+        .text_color(rgb(0xd8dade))
         .text_size(px(11.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0x35363b)))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(icon(icon_kind, 14.0, rgb(0xa8abb2)))
         .child(label)
-        .when(active, |tab| {
-            tab.child(
-                div()
-                    .absolute()
-                    .bottom(px(0.0))
-                    .left(px(18.0))
-                    .right(px(18.0))
-                    .h(px(2.0))
-                    .rounded(px(1.0))
-                    .bg(rgb(0x0c8ce9)),
-            )
-        })
-        .on_click(cx.listener(move |editor, _, _window, cx| {
-            editor.set_sidebar_tab(tab, cx);
-        }))
 }
 
 #[derive(Clone)]

@@ -135,13 +135,7 @@ enum FileOperation {
     Prompting,
     Opening,
     Saving,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SidebarTab {
-    Layers,
-    #[default]
-    Design,
+    Exporting,
 }
 
 /// Main application state as a GPUI Entity.
@@ -154,7 +148,6 @@ struct VectorEditor {
     object_clipboard: Option<editor_core::EditorClipboard>,
     focus_handle: FocusHandle,
     show_layer_panel: bool,
-    sidebar_tab: SidebarTab,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
@@ -174,7 +167,6 @@ impl VectorEditor {
             object_clipboard: None,
             focus_handle: cx.focus_handle(),
             show_layer_panel: true,
-            sidebar_tab: SidebarTab::Design,
             layer_name_input: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
@@ -1071,11 +1063,6 @@ impl VectorEditor {
         }
     }
 
-    pub(crate) fn set_sidebar_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
-        self.sidebar_tab = tab;
-        cx.notify();
-    }
-
     fn property_move_left(
         &mut self,
         _: &PropertyMoveLeft,
@@ -1479,7 +1466,7 @@ impl VectorEditor {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window);
-        let position = canvas_position(event.position);
+        let position = canvas_position(event.position, self.show_layer_panel);
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
         let effects = self.editor.handle_pointer_down_with_click_count(
@@ -1498,7 +1485,7 @@ impl VectorEditor {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let position = canvas_position(event.position);
+        let position = canvas_position(event.position, self.show_layer_panel);
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
 
@@ -1524,7 +1511,7 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let position = canvas_position(event.position);
+        let position = canvas_position(event.position, self.show_layer_panel);
         let modifiers = convert_modifiers(&event.modifiers);
 
         let input = editor_core::InputEvent::PointerMove {
@@ -1543,7 +1530,7 @@ impl VectorEditor {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let position = canvas_position(event.position);
+        let position = canvas_position(event.position, self.show_layer_panel);
         let pixel_delta = event.delta.pixel_delta(window.line_height());
         let delta = glam::Vec2::new(pixel_delta.x.0, pixel_delta.y.0);
         let modifiers = convert_modifiers(&event.modifiers);
@@ -1637,7 +1624,6 @@ impl Render for VectorEditor {
         let selection_count = self.editor.selection().len();
         let zoom = self.editor.view().zoom;
         let show_layer_panel = self.show_layer_panel;
-        let sidebar_tab = self.sidebar_tab;
         let layer_name_input = self.layer_name_input.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
@@ -1655,13 +1641,8 @@ impl Render for VectorEditor {
         };
 
         let window_size = window.viewport_size();
-        let panel_width = if show_layer_panel {
-            layer_panel::WIDTH
-        } else {
-            0.0
-        };
         self.editor.set_viewport_size(glam::Vec2::new(
-            (window_size.width.0 - panel_width).max(1.0),
+            canvas_viewport_width(window_size.width.0, show_layer_panel),
             (window_size.height.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT).max(1.0),
         ));
 
@@ -1799,6 +1780,14 @@ impl Render for VectorEditor {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    // Layers panel (conditionally shown)
+                    .when(show_layer_panel, |this| {
+                        this.child(layer_panel::render_layers_panel(
+                            layer_entries,
+                            layer_name_input,
+                            cx,
+                        ))
+                    })
                     // Canvas area
                     .child(
                         div()
@@ -1828,15 +1817,9 @@ impl Render for VectorEditor {
                                 canvas.child(bar)
                             }),
                     )
-                    // Layer panel (conditionally shown)
+                    // Design panel (conditionally shown)
                     .when(show_layer_panel, |this| {
-                        this.child(layer_panel::render_layer_panel(
-                            layer_entries,
-                            layer_name_input,
-                            sidebar_tab,
-                            properties_snapshot,
-                            cx,
-                        ))
+                        this.child(layer_panel::render_design_panel(properties_snapshot))
                     }),
             )
             // Status bar at bottom
@@ -1863,8 +1846,25 @@ impl Render for VectorEditor {
     }
 }
 
-fn canvas_position(position: gpui::Point<gpui::Pixels>) -> glam::Vec2 {
-    glam::Vec2::new(position.x.0, position.y.0 - toolbar::HEADER_HEIGHT)
+fn canvas_position(position: gpui::Point<gpui::Pixels>, show_layer_panel: bool) -> glam::Vec2 {
+    let canvas_left = if show_layer_panel {
+        layer_panel::LAYERS_WIDTH
+    } else {
+        0.0
+    };
+    glam::Vec2::new(
+        position.x.0 - canvas_left,
+        position.y.0 - toolbar::HEADER_HEIGHT,
+    )
+}
+
+fn canvas_viewport_width(window_width: f32, show_layer_panel: bool) -> f32 {
+    let panels_width = if show_layer_panel {
+        layer_panel::LAYERS_WIDTH + layer_panel::DESIGN_WIDTH
+    } else {
+        0.0
+    };
+    (window_width - panels_width).max(1.0)
 }
 
 fn convert_modifiers(mods: &gpui::Modifiers) -> editor_core::Modifiers {
@@ -2047,4 +2047,38 @@ fn main() {
             .detach();
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn visible_side_panels_offset_input_by_the_left_panel() {
+        let position = canvas_position(gpui::point(px(340.0), px(140.0)), true);
+
+        assert_eq!(
+            position,
+            glam::Vec2::new(
+                340.0 - layer_panel::LAYERS_WIDTH,
+                140.0 - toolbar::HEADER_HEIGHT,
+            )
+        );
+    }
+
+    #[test]
+    fn hidden_side_panels_leave_horizontal_input_unchanged() {
+        let position = canvas_position(gpui::point(px(340.0), px(140.0)), false);
+
+        assert_eq!(
+            position,
+            glam::Vec2::new(340.0, 140.0 - toolbar::HEADER_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn viewport_width_accounts_for_both_side_panels() {
+        assert_eq!(canvas_viewport_width(1280.0, true), 784.0);
+        assert_eq!(canvas_viewport_width(1280.0, false), 1280.0);
+    }
 }

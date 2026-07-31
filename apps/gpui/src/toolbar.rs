@@ -183,9 +183,9 @@ pub fn render_header(
             show_layer_panel,
             true,
             if show_layer_panel {
-                "Hide sidebar"
+                "Hide panels"
             } else {
-                "Show sidebar"
+                "Show panels"
             },
             Some("⌘\\"),
             ToggleLayerPanel,
@@ -948,9 +948,9 @@ fn render_main_menu(
         .child(menu_section("View"))
         .child(menu_item(
             if show_layer_panel {
-                "Hide sidebar"
+                "Hide panels"
             } else {
-                "Show sidebar"
+                "Show panels"
             },
             "⌘\\",
             true,
@@ -1122,7 +1122,6 @@ fn tool_button<A: Action + Clone>(
 ) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("tool-{id}")))
-        .relative()
         .w(px(36.0))
         .h(px(34.0))
         .flex()
@@ -1141,18 +1140,6 @@ fn tool_button<A: Action + Clone>(
             rgb(if active { 0xffffff } else { TEXT }),
         ))
         .tooltip(editor_tooltip(label, Some(shortcut)))
-        .when(active, |button| {
-            button.child(
-                div()
-                    .absolute()
-                    .bottom(px(2.0))
-                    .left(px(13.0))
-                    .w(px(10.0))
-                    .h(px(2.0))
-                    .rounded(px(1.0))
-                    .bg(rgb(0xffffff)),
-            )
-        })
         .when(enabled, |button| {
             button
                 .cursor_pointer()
