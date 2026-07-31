@@ -648,7 +648,7 @@ impl Render for CommandPalette {
                                     div()
                                         .absolute()
                                         .left(px(42.0))
-                                        .text_color(rgb(0x7f828a))
+                                        .text_color(rgb(0x8f929a))
                                         .child("Search commands…"),
                                 )
                             })

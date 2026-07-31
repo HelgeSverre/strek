@@ -100,10 +100,10 @@ pub fn render_status_bar(
         )
         .child(div().w(px(1.0)).h(px(12.0)).bg(rgb(0x414349)))
         .child(div().child(selection_text))
-        .child(div().flex_1().text_color(rgb(0x777a82)).child(hint))
+        .child(div().flex_1().text_color(rgb(0x8f929a)).child(hint))
         .child(
             div()
-                .text_color(rgb(0x777a82))
+                .text_color(rgb(0x8f929a))
                 .child(format!("{tool_shortcut}  {tool_name}")),
         )
         .child(div().w(px(1.0)).h(px(12.0)).bg(rgb(0x414349)))
