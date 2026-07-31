@@ -2,9 +2,9 @@
 default:
     @just --list
 
-# Run all library tests
+# Run all workspace tests
 test:
-    cargo test --lib
+    cargo nextest run --workspace --all-targets --locked
 
 # Run clippy lints
 lint:

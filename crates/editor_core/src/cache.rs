@@ -123,7 +123,26 @@ mod tests {
     #[test]
     fn test_cache_clear() {
         let mut cache = Cache::new();
-        // Cache starts empty, clear should work without panicking
+        let mut document = crate::Document::new();
+        let id = document
+            .add_child(document.root, crate::Node::group("Cached"))
+            .expect("a new document accepts a child");
+
+        cache.world_transform.insert(id, Affine2::IDENTITY);
+        cache
+            .world_bounds
+            .insert(id, Rect::new(Vec2::ZERO, Vec2::ONE));
+        cache.layout_offset.insert(id, Vec2::new(4.0, 8.0));
+
+        assert!(cache.world_transform.contains_key(id));
+        assert!(cache.world_bounds.contains_key(id));
+        assert_eq!(cache.get_layout_offset(id), Vec2::new(4.0, 8.0));
+
         cache.clear();
+
+        assert!(cache.world_transform.is_empty());
+        assert!(cache.world_bounds.is_empty());
+        assert!(cache.layout_offset.is_empty());
+        assert_eq!(cache.get_layout_offset(id), Vec2::ZERO);
     }
 }

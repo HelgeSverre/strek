@@ -136,14 +136,14 @@ Run the same checks used by CI:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo nextest run --workspace --all-targets --locked
 cargo audit
 ```
 
 Useful `just` recipes:
 
 ```sh
-just test    # library tests
+just test    # workspace tests
 just lint    # Clippy with warnings denied
 just format  # format the workspace
 ```
