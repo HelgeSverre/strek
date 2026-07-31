@@ -1,0 +1,23 @@
+[package]
+name = "vector-editor-gpui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "GPUI-based desktop application for the vector editor"
+
+[dependencies]
+editor_core = { path = "../../crates/editor_core" }
+editor_render = { path = "../../crates/editor_render" }
+glam = { workspace = true }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "v0.179.4" }
+log = "0.4"
+env_logger = "0.11"
+image = "0.25"
+lyon = "1.0"
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+smallvec = "1"
+unicode-segmentation = { workspace = true }
+
+[[bin]]
+name = "vector-editor-gpui"
+path = "src/main.rs"

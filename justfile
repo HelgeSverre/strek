@@ -10,26 +10,13 @@ test:
 lint:
     cargo clippy --all-targets -- -D warnings
 
-# Build the web app WASM module (requires wasm-pack)
-web-build:
-    cd apps/web && wasm-pack build --target web --out-name vector_editor_web
-
-# Serve the web app locally (requires bun)
-web-serve:
-    cd apps/web && bun run serve.ts
-
-# Build and serve the web app
-web port="3333": web-build
-    @echo "Starting server at http://localhost:{{port}}"
-    cd apps/web && bun run serve.ts {{port}}
-
-# Run web app Playwright tests
-web-test: web-build
-    cd apps/web && bunx playwright test
-
-# Run the desktop application
+# Run the GPUI desktop application
 run:
-    cargo run --bin vector-editor
+    cargo run -p vector-editor-gpui
+
+# Run the legacy wgpu desktop application
+run-legacy:
+    cargo run -p vector-editor-desktop
 
 # Format code
 format:
