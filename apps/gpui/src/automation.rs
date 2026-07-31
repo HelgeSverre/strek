@@ -562,6 +562,7 @@ fn read_request_line(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
+#[cfg(unix)]
 fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> io::Result<()> {
     write_json_line(
         writer,
@@ -573,10 +574,12 @@ fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> 
     )
 }
 
+#[cfg(unix)]
 fn write_json_line(mut writer: impl Write, response: &AutomationResponse) -> io::Result<()> {
     writer.write_all(&serialize_response_line(response)?)
 }
 
+#[cfg(unix)]
 fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(response).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -1156,6 +1159,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn response_writer_preserves_outcome_when_state_is_too_large() {
         let response = AutomationResponse {
