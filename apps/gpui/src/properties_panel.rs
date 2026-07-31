@@ -1,6 +1,9 @@
 //! Figma-style design inspector for the current selection.
 
-use editor_core::{Editor, FrameData, NodeKind, Paint, Rect, Style, TextData};
+use editor_core::{
+    AlignCross, AlignMain, Direction, Editor, FrameData, Layout, NodeKind, Paint, Rect, Style,
+    TextData, TransformComponents,
+};
 use gpui::{div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, SharedString, Window};
 
 use crate::{
@@ -8,8 +11,12 @@ use crate::{
     PropertyFillBlue, PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite,
     PropertyMoveDown, PropertyMoveLeft, PropertyMoveRight, PropertyMoveUp, PropertyOpacityDown,
     PropertyOpacityUp, PropertyRotateLeft, PropertyRotateRight, PropertyStrokeDown,
-    PropertyStrokeUp, PropertyToggleStroke, StartFillColorInput, StartStrokeColorInput, TextLarger,
-    TextSmaller, ToggleFrameBackground,
+    PropertyStrokeUp, PropertyToggleStroke, SetLayoutCrossCenter, SetLayoutCrossEnd,
+    SetLayoutCrossStart, SetLayoutCrossStretch, SetLayoutFree, SetLayoutHorizontal,
+    SetLayoutMainCenter, SetLayoutMainEnd, SetLayoutMainSpaceBetween, SetLayoutMainStart,
+    SetLayoutVertical, StartFillColorInput, StartStrokeColorInput, StepLayoutPaddingDown,
+    StepLayoutPaddingUp, StepLayoutSpacingDown, StepLayoutSpacingUp, TextLarger, TextSmaller,
+    ToggleFrameBackground,
 };
 
 const SURFACE: u32 = 0x202124;
@@ -26,6 +33,8 @@ pub(crate) struct PropertiesSnapshot {
     label: String,
     kind: String,
     bounds: Option<Rect>,
+    transform: Option<TransformComponents>,
+    group_layout: Option<Layout>,
     style: Option<Style>,
     text: Option<TextData>,
     frame: Option<FrameData>,
@@ -94,12 +103,20 @@ pub(crate) fn snapshot(
     let frame = (selection_count == 1)
         .then(|| editor.selected_frame_data())
         .flatten();
+    let transform = (selection_count == 1)
+        .then(|| editor.selected_transform_components())
+        .flatten();
+    let group_layout = (selection_count == 1)
+        .then(|| editor.selected_group_layout())
+        .flatten();
 
     PropertiesSnapshot {
         selection_count,
         label,
         kind,
         bounds,
+        transform,
+        group_layout,
         style,
         text,
         frame,
@@ -141,6 +158,8 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
         .and_then(|style| style.stroke.as_ref())
         .map(|stroke| stroke.width);
     let opacity = style.as_ref().map(|style| style.opacity);
+    let transform = snapshot.transform;
+    let group_layout = snapshot.group_layout.clone();
 
     div()
         .id("properties-panel")
@@ -169,11 +188,14 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                 ),
         )
         .when_some(snapshot.bounds, |panel, bounds| {
+            let position = transform
+                .map(|components| components.translation)
+                .unwrap_or(bounds.min);
             panel.child(
                 section("Transform")
                     .child(value_stepper(
                         "X",
-                        format_number(bounds.min.x),
+                        format_number(position.x),
                         "Move left",
                         "Move right",
                         PropertyMoveLeft,
@@ -181,7 +203,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                     ))
                     .child(value_stepper(
                         "Y",
-                        format_number(bounds.min.y),
+                        format_number(position.y),
                         "Move up",
                         "Move down",
                         PropertyMoveUp,
@@ -195,13 +217,31 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                     ))
                     .child(value_stepper(
                         "Rotate",
-                        "15° step".to_owned(),
+                        transform
+                            .map(|components| format_degrees(components.rotation_radians))
+                            .unwrap_or_else(|| "Mixed".to_owned()),
                         "Rotate counter-clockwise",
                         "Rotate clockwise",
                         PropertyRotateLeft,
                         PropertyRotateRight,
-                    )),
+                    ))
+                    .when_some(transform, |transform_section, components| {
+                        transform_section
+                            .child(readonly_pair(
+                                "SX",
+                                format_percent(components.scale.x),
+                                "SY",
+                                format_percent(components.scale.y),
+                            ))
+                            .child(div().px(px(10.0)).pb(px(8.0)).child(readonly_value(
+                                "Skew",
+                                format_degrees(components.skew_radians),
+                            )))
+                    }),
             )
+        })
+        .when_some(group_layout, |panel, layout| {
+            panel.child(layout_section(layout))
         })
         .child(
             section("Appearance")
@@ -396,6 +436,153 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
         .into_any_element()
 }
 
+fn layout_section(layout: Layout) -> gpui::Div {
+    let (mode, auto_layout) = match layout {
+        Layout::Free => (None, None),
+        Layout::Auto(layout) => (Some(layout.direction), Some(layout)),
+    };
+
+    section("Auto layout")
+        .child(
+            div()
+                .h(px(36.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(10.0))
+                .child(div().w(px(62.0)).text_size(px(10.0)).child("Mode"))
+                .child(property_choice_button(
+                    "layout-free",
+                    "Free",
+                    "Disable auto layout",
+                    mode.is_none(),
+                    SetLayoutFree,
+                ))
+                .child(property_choice_button(
+                    "layout-horizontal",
+                    "H",
+                    "Horizontal auto layout",
+                    mode == Some(Direction::Horizontal),
+                    SetLayoutHorizontal,
+                ))
+                .child(property_choice_button(
+                    "layout-vertical",
+                    "V",
+                    "Vertical auto layout",
+                    mode == Some(Direction::Vertical),
+                    SetLayoutVertical,
+                )),
+        )
+        .when_some(auto_layout, |layout_panel, layout| {
+            let padding = uniform_padding(&layout);
+            layout_panel
+                .child(value_stepper(
+                    "Spacing",
+                    format_number(layout.spacing),
+                    "Decrease layout spacing",
+                    "Increase layout spacing",
+                    StepLayoutSpacingDown,
+                    StepLayoutSpacingUp,
+                ))
+                .child(value_stepper(
+                    "Padding",
+                    padding
+                        .map(format_number)
+                        .unwrap_or_else(|| "Mixed".to_owned()),
+                    "Decrease uniform padding",
+                    "Increase uniform padding",
+                    StepLayoutPaddingDown,
+                    StepLayoutPaddingUp,
+                ))
+                .child(
+                    div()
+                        .h(px(36.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(3.0))
+                        .px(px(10.0))
+                        .child(div().w(px(62.0)).text_size(px(10.0)).child("Main"))
+                        .child(property_choice_button(
+                            "layout-main-start",
+                            "Start",
+                            "Align to main-axis start",
+                            layout.align_main == AlignMain::Start,
+                            SetLayoutMainStart,
+                        ))
+                        .child(property_choice_button(
+                            "layout-main-center",
+                            "Mid",
+                            "Center on main axis",
+                            layout.align_main == AlignMain::Center,
+                            SetLayoutMainCenter,
+                        ))
+                        .child(property_choice_button(
+                            "layout-main-end",
+                            "End",
+                            "Align to main-axis end",
+                            layout.align_main == AlignMain::End,
+                            SetLayoutMainEnd,
+                        ))
+                        .child(property_choice_button(
+                            "layout-main-space-between",
+                            "Space",
+                            "Distribute space between children",
+                            layout.align_main == AlignMain::SpaceBetween,
+                            SetLayoutMainSpaceBetween,
+                        )),
+                )
+                .child(
+                    div()
+                        .h(px(36.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(3.0))
+                        .px(px(10.0))
+                        .pb(px(8.0))
+                        .child(div().w(px(62.0)).text_size(px(10.0)).child("Cross"))
+                        .child(property_choice_button(
+                            "layout-cross-start",
+                            "Start",
+                            "Align to cross-axis start",
+                            layout.align_cross == AlignCross::Start,
+                            SetLayoutCrossStart,
+                        ))
+                        .child(property_choice_button(
+                            "layout-cross-center",
+                            "Mid",
+                            "Center on cross axis",
+                            layout.align_cross == AlignCross::Center,
+                            SetLayoutCrossCenter,
+                        ))
+                        .child(property_choice_button(
+                            "layout-cross-end",
+                            "End",
+                            "Align to cross-axis end",
+                            layout.align_cross == AlignCross::End,
+                            SetLayoutCrossEnd,
+                        ))
+                        .child(property_choice_button(
+                            "layout-cross-stretch",
+                            "Fill",
+                            "Stretch on cross axis",
+                            layout.align_cross == AlignCross::Stretch,
+                            SetLayoutCrossStretch,
+                        )),
+                )
+        })
+}
+
+fn uniform_padding(layout: &editor_core::AutoLayout) -> Option<f32> {
+    let padding = layout.padding;
+    [padding.top, padding.right, padding.bottom]
+        .into_iter()
+        .all(|edge| (edge - padding.left).abs() <= f32::EPSILON)
+        .then_some(padding.left)
+}
+
 fn section(title: &'static str) -> gpui::Div {
     div()
         .flex()
@@ -511,6 +698,40 @@ fn property_button<A: Action + Clone>(
         .bg(rgb(SURFACE_RAISED))
         .text_size(px(10.0))
         .text_color(rgb(TEXT))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .child(label)
+        .tooltip(editor_tooltip(tooltip, None))
+        .on_click(move |_, window: &mut Window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
+        })
+}
+
+fn property_choice_button<A: Action + Clone>(
+    id: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    active: bool,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(26.0))
+        .min_w(px(26.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(if active { ACCENT } else { BORDER }))
+        .bg(if active {
+            rgba(0x0c8ce92e)
+        } else {
+            rgba(0x00000000)
+        })
+        .text_size(px(9.0))
+        .text_color(rgb(if active { 0xd8efff } else { TEXT }))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
         .child(label)
@@ -698,10 +919,23 @@ fn format_number(value: f32) -> String {
     }
 }
 
+fn format_degrees(radians: f32) -> String {
+    format!("{}°", format_number(radians.to_degrees()))
+}
+
+fn format_percent(scale: f32) -> String {
+    format!("{}%", format_number(scale * 100.0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_paint, parse_hex_paint};
-    use editor_core::Paint;
+    use super::{
+        format_degrees, format_paint, format_percent, parse_hex_paint, snapshot, uniform_padding,
+    };
+    use editor_core::{
+        AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, Paint, PathData,
+    };
+    use glam::{Affine2, Vec2};
 
     #[test]
     fn hex_colors_support_short_rgb_and_alpha_forms() {
@@ -726,5 +960,65 @@ mod tests {
     fn paint_format_omits_opaque_alpha_and_preserves_transparency() {
         assert_eq!(format_paint(&Paint::rgb(1.0, 0.5, 0.0)), "#FF8000");
         assert_eq!(format_paint(&Paint::rgba(0.2, 0.4, 0.6, 0.5)), "#33669980");
+    }
+
+    #[test]
+    fn snapshot_exposes_single_group_layout_and_real_world_transform() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let layout = AutoLayout::vertical()
+            .with_spacing(12.0)
+            .with_uniform_padding(8.0)
+            .with_align_main(AlignMain::Center)
+            .with_align_cross(AlignCross::End);
+        let group = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Stack")
+                    .with_layout(Layout::Auto(layout.clone()))
+                    .with_transform(Affine2::from_scale_angle_translation(
+                        Vec2::new(2.0, 3.0),
+                        0.25,
+                        Vec2::new(40.0, 20.0),
+                    )),
+            )
+            .unwrap();
+        editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        editor.selection.select(group);
+
+        let snapshot = snapshot(&mut editor, None);
+
+        let Some(Layout::Auto(snapshot_layout)) = snapshot.group_layout else {
+            panic!("single group should expose auto-layout properties");
+        };
+        assert_eq!(snapshot_layout.direction, Direction::Vertical);
+        assert_eq!(snapshot_layout.spacing, 12.0);
+        assert_eq!(snapshot_layout.padding, layout.padding);
+        assert_eq!(snapshot_layout.align_main, AlignMain::Center);
+        assert_eq!(snapshot_layout.align_cross, AlignCross::End);
+        let transform = snapshot.transform.unwrap();
+        assert!((transform.rotation_radians - 0.25).abs() < 0.0001);
+        assert!((transform.scale.x - 2.0).abs() < 0.0001);
+        assert!((transform.scale.y - 3.0).abs() < 0.0001);
+        assert_eq!(transform.translation, Vec2::new(40.0, 20.0));
+    }
+
+    #[test]
+    fn inspector_formatting_distinguishes_uniform_padding_and_real_components() {
+        let uniform = AutoLayout::horizontal().with_uniform_padding(6.0);
+        assert_eq!(uniform_padding(&uniform), Some(6.0));
+
+        let mut mixed = uniform;
+        mixed.padding.right = 7.0;
+        assert_eq!(uniform_padding(&mixed), None);
+        assert_eq!(format_degrees(0.5), "28.6°");
+        assert_eq!(format_percent(-1.25), "-125%");
     }
 }

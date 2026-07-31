@@ -98,6 +98,21 @@ actions!(
         AlignTextCenter,
         AlignTextRight,
         ToggleFrameBackground,
+        SetLayoutFree,
+        SetLayoutHorizontal,
+        SetLayoutVertical,
+        StepLayoutSpacingDown,
+        StepLayoutSpacingUp,
+        StepLayoutPaddingDown,
+        StepLayoutPaddingUp,
+        SetLayoutMainStart,
+        SetLayoutMainCenter,
+        SetLayoutMainEnd,
+        SetLayoutMainSpaceBetween,
+        SetLayoutCrossStart,
+        SetLayoutCrossCenter,
+        SetLayoutCrossEnd,
+        SetLayoutCrossStretch,
         PropertyMoveLeft,
         PropertyMoveRight,
         PropertyMoveUp,
@@ -1428,6 +1443,222 @@ impl VectorEditor {
         }
     }
 
+    fn set_layout_free(&mut self, _: &SetLayoutFree, _window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .editor
+            .set_selected_group_layout_mode(editor_core::GroupLayoutMode::Free)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_horizontal(
+        &mut self,
+        _: &SetLayoutHorizontal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_layout_mode(editor_core::GroupLayoutMode::Horizontal)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_vertical(
+        &mut self,
+        _: &SetLayoutVertical,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_layout_mode(editor_core::GroupLayoutMode::Vertical)
+        {
+            cx.notify();
+        }
+    }
+
+    fn selected_auto_layout(&self) -> Option<editor_core::AutoLayout> {
+        match self.editor.selected_group_layout()? {
+            editor_core::Layout::Auto(layout) => Some(layout),
+            editor_core::Layout::Free => None,
+        }
+    }
+
+    fn step_layout_spacing(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let Some(layout) = self.selected_auto_layout() else {
+            return;
+        };
+        let spacing = (layout.spacing + delta).max(0.0);
+        if self.editor.set_selected_group_spacing(spacing) {
+            cx.notify();
+        }
+    }
+
+    fn step_layout_spacing_down(
+        &mut self,
+        _: &StepLayoutSpacingDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_layout_spacing(-1.0, cx);
+    }
+
+    fn step_layout_spacing_up(
+        &mut self,
+        _: &StepLayoutSpacingUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_layout_spacing(1.0, cx);
+    }
+
+    fn step_layout_padding(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let Some(layout) = self.selected_auto_layout() else {
+            return;
+        };
+        let padding = layout.padding;
+        let current = (padding.left + padding.top + padding.right + padding.bottom) / 4.0;
+        if self
+            .editor
+            .set_selected_group_uniform_padding((current + delta).max(0.0))
+        {
+            cx.notify();
+        }
+    }
+
+    fn step_layout_padding_down(
+        &mut self,
+        _: &StepLayoutPaddingDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_layout_padding(-1.0, cx);
+    }
+
+    fn step_layout_padding_up(
+        &mut self,
+        _: &StepLayoutPaddingUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_layout_padding(1.0, cx);
+    }
+
+    fn set_layout_main_start(
+        &mut self,
+        _: &SetLayoutMainStart,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_main_alignment(editor_core::AlignMain::Start)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_main_center(
+        &mut self,
+        _: &SetLayoutMainCenter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_main_alignment(editor_core::AlignMain::Center)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_main_end(
+        &mut self,
+        _: &SetLayoutMainEnd,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_main_alignment(editor_core::AlignMain::End)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_main_space_between(
+        &mut self,
+        _: &SetLayoutMainSpaceBetween,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_main_alignment(editor_core::AlignMain::SpaceBetween)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_cross_start(
+        &mut self,
+        _: &SetLayoutCrossStart,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_cross_alignment(editor_core::AlignCross::Start)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_cross_center(
+        &mut self,
+        _: &SetLayoutCrossCenter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_cross_alignment(editor_core::AlignCross::Center)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_cross_end(
+        &mut self,
+        _: &SetLayoutCrossEnd,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_cross_alignment(editor_core::AlignCross::End)
+        {
+            cx.notify();
+        }
+    }
+
+    fn set_layout_cross_stretch(
+        &mut self,
+        _: &SetLayoutCrossStretch,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .editor
+            .set_selected_group_cross_alignment(editor_core::AlignCross::Stretch)
+        {
+            cx.notify();
+        }
+    }
+
     fn property_move_left(
         &mut self,
         _: &PropertyMoveLeft,
@@ -2388,6 +2619,21 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::align_text_center))
             .on_action(cx.listener(Self::align_text_right))
             .on_action(cx.listener(Self::toggle_frame_background))
+            .on_action(cx.listener(Self::set_layout_free))
+            .on_action(cx.listener(Self::set_layout_horizontal))
+            .on_action(cx.listener(Self::set_layout_vertical))
+            .on_action(cx.listener(Self::step_layout_spacing_down))
+            .on_action(cx.listener(Self::step_layout_spacing_up))
+            .on_action(cx.listener(Self::step_layout_padding_down))
+            .on_action(cx.listener(Self::step_layout_padding_up))
+            .on_action(cx.listener(Self::set_layout_main_start))
+            .on_action(cx.listener(Self::set_layout_main_center))
+            .on_action(cx.listener(Self::set_layout_main_end))
+            .on_action(cx.listener(Self::set_layout_main_space_between))
+            .on_action(cx.listener(Self::set_layout_cross_start))
+            .on_action(cx.listener(Self::set_layout_cross_center))
+            .on_action(cx.listener(Self::set_layout_cross_end))
+            .on_action(cx.listener(Self::set_layout_cross_stretch))
             .on_action(cx.listener(Self::property_move_left))
             .on_action(cx.listener(Self::property_move_right))
             .on_action(cx.listener(Self::property_move_up))
