@@ -464,34 +464,37 @@ fn wait_for_response(
     lifecycle: &RequestLifecycle,
     deadline: Instant,
 ) -> io::Result<Option<AutomationResponse>> {
-    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        match response_receiver.recv_timeout(remaining) {
-            Ok(response) => return Ok(Some(response)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(closed_before_response());
-            }
-        }
-    }
-
-    if lifecycle.cancel_pending() || lifecycle.state() == REQUEST_CANCELLED {
-        return Ok(None);
-    }
-
-    if !matches!(lifecycle.state(), REQUEST_EXECUTING | REQUEST_COMPLETED) {
-        return Err(io::Error::other("invalid automation request lifecycle"));
-    }
-
-    // A space is valid leading JSON whitespace and also keeps the client read
-    // deadline alive while an already-started UI mutation finishes.
     loop {
-        stream.write_all(b" ")?;
-        match response_receiver.recv_timeout(EXECUTION_HEARTBEAT) {
-            Ok(response) => return Ok(Some(response)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(closed_before_response());
+        match lifecycle.state() {
+            REQUEST_PENDING => {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    if lifecycle.cancel_pending() {
+                        return Ok(None);
+                    }
+                    continue;
+                };
+                match response_receiver.recv_timeout(remaining.min(EXECUTION_HEARTBEAT)) {
+                    Ok(response) => return Ok(Some(response)),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(closed_before_response());
+                    }
+                }
             }
+            REQUEST_EXECUTING | REQUEST_COMPLETED => {
+                // A space is valid leading JSON whitespace and also keeps the
+                // client read deadline alive while a UI mutation finishes.
+                stream.write_all(b" ")?;
+                match response_receiver.recv_timeout(EXECUTION_HEARTBEAT) {
+                    Ok(response) => return Ok(Some(response)),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(closed_before_response());
+                    }
+                }
+            }
+            REQUEST_CANCELLED => return Ok(None),
+            _ => return Err(io::Error::other("invalid automation request lifecycle")),
         }
     }
 }
@@ -1031,6 +1034,42 @@ mod tests {
         assert!(worker.join().unwrap());
         assert!(response.recv().unwrap().ok);
         assert_eq!(lifecycle.state(), REQUEST_COMPLETED);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executing_wait_keeps_the_client_alive_until_response() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (response_sender, response_receiver) = std::sync::mpsc::sync_channel(1);
+        let lifecycle = Arc::new(RequestLifecycle::pending());
+        assert!(lifecycle.begin_execution());
+        let worker_lifecycle = Arc::clone(&lifecycle);
+        let worker = std::thread::spawn(move || {
+            wait_for_response(
+                &mut server,
+                response_receiver,
+                &worker_lifecycle,
+                Instant::now(),
+            )
+        });
+
+        let mut heartbeat = [0_u8; 1];
+        client.read_exact(&mut heartbeat).unwrap();
+        assert_eq!(heartbeat, *b" ");
+        response_sender
+            .send(AutomationResponse {
+                ok: true,
+                message: None,
+                state: None,
+            })
+            .unwrap();
+
+        assert!(worker.join().unwrap().unwrap().unwrap().ok);
     }
 
     #[cfg(unix)]
