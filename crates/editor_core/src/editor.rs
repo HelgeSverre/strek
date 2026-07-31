@@ -711,6 +711,18 @@ impl Editor {
             self.cancel_active_numeric_property_scrub();
         }
 
+        if matches!(
+            action,
+            EditorAction::ZoomIn
+                | EditorAction::ZoomOut
+                | EditorAction::ZoomReset
+                | EditorAction::ZoomResetAll
+                | EditorAction::ZoomToFit
+                | EditorAction::ZoomToSelection
+        ) {
+            self.cancel_pointer_interaction();
+        }
+
         let action_manages_interaction = matches!(
             action,
             EditorAction::ToolSelect
@@ -2475,6 +2487,11 @@ impl Editor {
     }
 
     fn handle_scroll(&mut self, screen_pos: Vec2, delta: Vec2, modifiers: Modifiers) -> Effects {
+        if (modifiers.ctrl || modifiers.meta) && delta.y.abs() <= f32::EPSILON {
+            return Effects::default();
+        }
+
+        let interaction_cancelled = self.cancel_pointer_interaction();
         if modifiers.ctrl || modifiers.meta {
             // Zoom
             let zoom_factor = if delta.y > 0.0 { 0.9 } else { 1.1 };
@@ -2487,7 +2504,7 @@ impl Editor {
 
         Effects {
             redraw: true,
-            cursor: None,
+            cursor: interaction_cancelled.then(|| self.cursor_for_state()),
         }
     }
 
@@ -8602,6 +8619,82 @@ mod tests {
             editor.execute_action(EditorAction::ZoomIn);
         }
         assert_eq!(editor.view.zoom, crate::transform::MAX_ZOOM);
+    }
+
+    #[test]
+    fn view_changes_cancel_active_move_previews() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Shape"]);
+        editor.selection.select(ids[0]);
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(5.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::splat(25.0),
+            modifiers: Modifiers::default(),
+        });
+
+        assert!(editor.execute_action(EditorAction::ZoomIn));
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(
+            editor.document.get(ids[0]).unwrap().transform,
+            Affine2::IDENTITY
+        );
+        assert!(!editor.history.can_undo());
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(5.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::splat(25.0),
+            modifiers: Modifiers::default(),
+        });
+        let effects = editor.handle_event(InputEvent::Scroll {
+            position: Vec2::splat(50.0),
+            delta: Vec2::new(0.0, 10.0),
+            modifiers: Modifiers::default(),
+        });
+
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(
+            editor.document.get(ids[0]).unwrap().transform,
+            Affine2::IDENTITY
+        );
+        assert!(!editor.history.can_undo());
+        assert!(effects.cursor.is_some());
+    }
+
+    #[test]
+    fn horizontal_primary_scroll_does_not_zoom() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Shape"]);
+        editor.selection.select(ids[0]);
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(5.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::splat(25.0),
+            modifiers: Modifiers::default(),
+        });
+        let zoom = editor.view.zoom;
+        let interaction = editor.interaction_kind();
+
+        let effects = editor.handle_event(InputEvent::Scroll {
+            position: Vec2::splat(50.0),
+            delta: Vec2::new(10.0, 0.0),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        });
+
+        assert_eq!(editor.view.zoom, zoom);
+        assert_eq!(editor.interaction_kind(), interaction);
+        assert!(!effects.redraw);
     }
 
     #[test]

@@ -311,10 +311,15 @@ impl Strek {
                 if !self.command_is_enabled(spec.target) {
                     Err(format!("command `{id}` is disabled in the current state"))
                 } else {
-                    if self.command_palette.take().is_some() {
+                    let palette_closed = self.command_palette.take().is_some();
+                    let menu_closed = self.dismiss_menus();
+                    if palette_closed || menu_closed {
                         self.focus_handle.focus(window);
                     }
                     self.execute_automation_editor_action(action, window, cx);
+                    if palette_closed || menu_closed {
+                        cx.notify();
+                    }
                     Ok(format!("performed `{id}`"))
                 }
             }
@@ -376,7 +381,17 @@ impl Strek {
                 }
             }
             AutomationRequest::Text { text } => {
-                if self.editor.text_input_snapshot().is_none() {
+                if self.command_palette.is_some()
+                    || self.open_menu.is_some()
+                    || self.layer_context_menu.is_some()
+                    || self.property_color_input.is_some()
+                    || self.zoom_input.is_some()
+                {
+                    Err(
+                        "dismiss open menus, overlays, and inline inputs before sending text"
+                            .to_owned(),
+                    )
+                } else if self.editor.text_input_snapshot().is_none() {
                     Err("Strek is not editing text".to_owned())
                 } else if self.editor.replace_text(None, &text) {
                     cx.notify();
@@ -391,8 +406,15 @@ impl Strek {
                     UiTarget::MainMenu => {
                         self.dismiss_menus();
                         if visible {
+                            if self.editor.cancel_pointer_interaction() {
+                                self.current_cursor = convert_cursor(self.editor.cursor());
+                            }
+                            self.property_color_input = None;
+                            self.zoom_input = None;
+                            self.finish_layer_rename(true, cx);
                             self.command_palette = None;
                             self.open_menu = Some(toolbar::MenuKind::Main);
+                            self.focus_handle.focus(window);
                         }
                         cx.notify();
                     }
@@ -651,6 +673,10 @@ impl Strek {
         self.editor = editor_preserving_creation_styles(&self.editor, Editor::new());
         self.document_path = None;
         self.object_clipboard = None;
+        self.command_palette = None;
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
         self.dismiss_menus();
@@ -663,6 +689,10 @@ impl Strek {
         self.document_path = Some(path.clone());
         self.recent_files.record(&path);
         self.object_clipboard = None;
+        self.command_palette = None;
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
         self.dismiss_menus();
@@ -837,10 +867,10 @@ impl Strek {
                 | AppCommand::QuitApplication,
             ) => self.file_operation == FileOperation::Idle,
             CommandTarget::App(AppCommand::Copy | AppCommand::Cut) => {
-                self.editor
-                    .text_input_snapshot()
-                    .is_some_and(|snapshot| !snapshot.selection.is_empty())
-                    || !self.editor.selection().is_empty()
+                self.editor.text_input_snapshot().map_or_else(
+                    || !self.editor.selection().is_empty(),
+                    |snapshot| !snapshot.selection.is_empty(),
+                )
             }
             CommandTarget::App(AppCommand::DeleteBackward) => {
                 self.editor.text_input_snapshot().is_some() || !self.editor.selection().is_empty()
@@ -1317,8 +1347,10 @@ impl Strek {
     }
 
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.delete_text_backward() {
-            cx.notify();
+        if self.editor.text_input_snapshot().is_some() {
+            if self.editor.delete_text_backward() {
+                cx.notify();
+            }
         } else if self.editor.interaction_kind() == editor_core::InteractionKind::Pen {
             if self.editor.undo_pen_edit() {
                 cx.notify();
@@ -1333,8 +1365,10 @@ impl Strek {
     }
 
     fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.delete_text_forward() {
-            cx.notify();
+        if self.editor.text_input_snapshot().is_some() {
+            if self.editor.delete_text_forward() {
+                cx.notify();
+            }
         } else if self.editor.interaction_kind() == editor_core::InteractionKind::Pen {
             // Delete has no destructive document-level meaning while a Pen
             // session owns the keyboard; Backspace removes the last anchor.
@@ -1566,6 +1600,9 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.cancel_numeric_property_scrub();
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.finish_layer_rename(true, cx);
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
@@ -1582,6 +1619,9 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.cancel_numeric_property_scrub();
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.finish_layer_rename(true, cx);
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
@@ -2669,6 +2709,10 @@ impl Strek {
 
         let effects = self.editor.handle_event(input);
         if effects.redraw {
+            cx.notify();
+        }
+        if let Some(cursor) = effects.cursor {
+            self.current_cursor = convert_cursor(cursor);
             cx.notify();
         }
     }
