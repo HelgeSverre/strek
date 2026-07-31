@@ -77,6 +77,7 @@ actions!(
         FrameTool,
         RectangleTool,
         EllipseTool,
+        LineTool,
         PenTool,
         TextTool,
         EditVector,
@@ -1083,6 +1084,10 @@ impl VectorEditor {
         self.execute_editor_action(EditorAction::ToolEllipse, cx);
     }
 
+    fn line_tool(&mut self, _: &LineTool, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_editor_action(EditorAction::ToolLine, cx);
+    }
+
     fn pen_tool(&mut self, _: &PenTool, _window: &mut Window, cx: &mut Context<Self>) {
         self.execute_editor_action(EditorAction::ToolPen, cx);
     }
@@ -1828,6 +1833,7 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::frame_tool))
             .on_action(cx.listener(Self::rectangle_tool))
             .on_action(cx.listener(Self::ellipse_tool))
+            .on_action(cx.listener(Self::line_tool))
             .on_action(cx.listener(Self::pen_tool))
             .on_action(cx.listener(Self::text_tool))
             .on_action(cx.listener(Self::edit_vector))
@@ -2054,6 +2060,7 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("f", FrameTool, Some("VectorEditor")),
         KeyBinding::new("r", RectangleTool, Some("VectorEditor")),
         KeyBinding::new("o", EllipseTool, Some("VectorEditor")),
+        KeyBinding::new("l", LineTool, Some("VectorEditor")),
         KeyBinding::new("p", PenTool, Some("VectorEditor")),
         KeyBinding::new("t", TextTool, Some("VectorEditor")),
         KeyBinding::new("secondary-enter", FinishEditing, Some("VectorEditor")),

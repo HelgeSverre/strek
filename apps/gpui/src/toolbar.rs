@@ -14,11 +14,12 @@ use crate::{
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
     BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
     DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportPng, ExportSvg,
-    FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, NewDocument, OpenDocument, Paste,
-    PenTool, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool,
-    SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground,
-    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup,
-    VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument,
+    OpenDocument, Paste, PenTool, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs,
+    SelectAll, SelectTool, SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool,
+    ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu,
+    Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
+    ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -646,6 +647,15 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
             true,
             EllipseTool,
         ))
+        .child(tool_button(
+            "line",
+            Icon::Line,
+            "Line",
+            "L",
+            current_tool == Tool::Line,
+            true,
+            LineTool,
+        ))
         .child(separator())
         .child(tool_button(
             "pen",
@@ -774,6 +784,12 @@ fn render_main_menu(
             "O",
             editor.can_execute(EditorAction::ToolEllipse),
             EllipseTool,
+        ))
+        .child(menu_item(
+            "Line",
+            "L",
+            editor.can_execute(EditorAction::ToolLine),
+            LineTool,
         ))
         .child(menu_item(
             "Pen",

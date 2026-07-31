@@ -97,6 +97,8 @@ pub enum EditorAction {
     ToolRectangle,
     /// Switch to Ellipse tool
     ToolEllipse,
+    /// Switch to Line tool
+    ToolLine,
     /// Switch to Pen tool
     ToolPen,
     /// Switch to Text tool
@@ -441,6 +443,12 @@ impl EditorAction {
                 category: ActionCategory::Tools,
                 default_shortcut: Some(Shortcut::key(Key::O)),
             },
+            EditorAction::ToolLine => ActionMeta {
+                name: "Line Tool",
+                description: "Draw a straight line",
+                category: ActionCategory::Tools,
+                default_shortcut: Some(Shortcut::key(Key::L)),
+            },
             EditorAction::ToolPen => ActionMeta {
                 name: "Pen Tool",
                 description: "Switch to the pen drawing tool",
@@ -540,6 +548,7 @@ impl EditorAction {
             EditorAction::ToolFrame,
             EditorAction::ToolRectangle,
             EditorAction::ToolEllipse,
+            EditorAction::ToolLine,
             EditorAction::ToolPen,
             EditorAction::ToolText,
             // Path

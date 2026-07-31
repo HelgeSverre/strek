@@ -17,6 +17,7 @@ pub fn render_status_bar(
         Tool::Frame => "Frame",
         Tool::Rectangle => "Rectangle",
         Tool::Ellipse => "Ellipse",
+        Tool::Line => "Line",
         Tool::Pen => "Pen",
         Tool::Text => "Text",
         Tool::VectorEdit => "Edit vector",
@@ -26,6 +27,7 @@ pub fn render_status_bar(
         Tool::Frame => "F",
         Tool::Rectangle => "R",
         Tool::Ellipse => "O",
+        Tool::Line => "L",
         Tool::Pen => "P",
         Tool::Text => "T",
         Tool::VectorEdit => "Enter",
@@ -48,6 +50,9 @@ pub fn render_status_bar(
             Tool::Frame => "Drag an artboard · enclosed objects become children · Esc exits tool",
             Tool::Rectangle | Tool::Ellipse => {
                 "Drag to draw · Shift constrains · Alt centers · Esc exits tool"
+            }
+            Tool::Line => {
+                "Drag a line · Shift snaps to 45° · Alt draws from center · Esc exits tool"
             }
             Tool::Pen => "Click for corners · drag for curves · Enter finishes · Esc exits tool",
             Tool::Text => "Click for point text · drag for a text box · Esc exits tool",

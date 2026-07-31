@@ -29,6 +29,7 @@ pub enum Tool {
     Frame,
     Rectangle,
     Ellipse,
+    Line,
     Pen,
     Text,
     VectorEdit,
@@ -38,6 +39,7 @@ pub enum Tool {
 enum ShapeKind {
     Rectangle,
     Ellipse,
+    Line,
 }
 
 impl ShapeKind {
@@ -46,6 +48,7 @@ impl ShapeKind {
             Tool::Select | Tool::Frame | Tool::Pen | Tool::Text | Tool::VectorEdit => None,
             Tool::Rectangle => Some(Self::Rectangle),
             Tool::Ellipse => Some(Self::Ellipse),
+            Tool::Line => Some(Self::Line),
         }
     }
 
@@ -53,6 +56,7 @@ impl ShapeKind {
         match self {
             Self::Rectangle => "Rectangle",
             Self::Ellipse => "Ellipse",
+            Self::Line => "Line",
         }
     }
 
@@ -60,6 +64,7 @@ impl ShapeKind {
         match self {
             Self::Rectangle => PathData::rect(0.0, 0.0, size.x, size.y),
             Self::Ellipse => PathData::ellipse(0.0, 0.0, size.x, size.y),
+            Self::Line => unreachable!("line geometry depends on drag direction"),
         }
     }
 }
@@ -340,6 +345,45 @@ fn creation_bounds(start: Vec2, current: Vec2, modifiers: Modifiers) -> Rect {
     }
 }
 
+fn constrained_line_endpoint(start: Vec2, current: Vec2, constrain_angle: bool) -> Vec2 {
+    let delta = current - start;
+    if !constrain_angle || delta.length_squared() <= f32::EPSILON {
+        return current;
+    }
+
+    let increment = std::f32::consts::FRAC_PI_4;
+    let angle = (delta.y.atan2(delta.x) / increment).round() * increment;
+    start + Vec2::new(angle.cos(), angle.sin()) * delta.length()
+}
+
+fn creation_geometry(
+    shape: ShapeKind,
+    start: Vec2,
+    current: Vec2,
+    modifiers: Modifiers,
+) -> (Rect, PathData) {
+    if shape != ShapeKind::Line {
+        let bounds = creation_bounds(start, current, modifiers);
+        return (bounds, shape.path(bounds.size()));
+    }
+
+    let end = constrained_line_endpoint(start, current, modifiers.shift);
+    let delta = end - start;
+    let (line_start, line_end) = if modifiers.alt {
+        (start - delta, start + delta)
+    } else {
+        (start, end)
+    };
+    let bounds = Rect::new(line_start.min(line_end), line_start.max(line_end));
+    let path = PathData {
+        contours: vec![PathContour::open([
+            PathAnchor::corner(line_start - bounds.min),
+            PathAnchor::corner(line_end - bounds.min),
+        ])],
+    };
+    (bounds, path)
+}
+
 fn creation_snap_points(position: Vec2) -> [SnapPoint; 2] {
     [
         SnapPoint::new(position, SnapKind::Left, None),
@@ -556,6 +600,7 @@ impl Editor {
                 | EditorAction::ToolFrame
                 | EditorAction::ToolRectangle
                 | EditorAction::ToolEllipse
+                | EditorAction::ToolLine
                 | EditorAction::ToolPen
                 | EditorAction::ToolText
                 | EditorAction::EnterVectorEdit
@@ -746,6 +791,9 @@ impl Editor {
             EditorAction::ToolEllipse => {
                 self.set_tool(Tool::Ellipse);
             }
+            EditorAction::ToolLine => {
+                self.set_tool(Tool::Line);
+            }
             EditorAction::ToolPen => {
                 self.set_tool(Tool::Pen);
             }
@@ -791,6 +839,7 @@ impl Editor {
             | EditorAction::ToolFrame
             | EditorAction::ToolRectangle
             | EditorAction::ToolEllipse
+            | EditorAction::ToolLine
             | EditorAction::ToolPen
             | EditorAction::ToolText => true,
 
@@ -1812,7 +1861,7 @@ impl Editor {
                             }
                         }
                     }
-                    Tool::Rectangle | Tool::Ellipse => {
+                    Tool::Rectangle | Tool::Ellipse | Tool::Line => {
                         let Some(shape) = ShapeKind::from_tool(self.tool) else {
                             unreachable!("shape tools map to a shape kind")
                         };
@@ -2149,12 +2198,28 @@ impl Editor {
                 ..
             } => {
                 self.snap_engine.clear_targets();
-                let bounds = creation_bounds(start_pos, current_pos, modifiers);
-                let screen_size = bounds.size() * self.view.zoom.abs();
+                let (bounds, path) = creation_geometry(shape, start_pos, current_pos, modifiers);
                 const MIN_SHAPE_SIZE: f32 = 2.0;
 
-                if screen_size.x >= MIN_SHAPE_SIZE && screen_size.y >= MIN_SHAPE_SIZE {
-                    self.create_shape(shape, bounds);
+                let large_enough = if shape == ShapeKind::Line {
+                    path.contours
+                        .first()
+                        .and_then(|contour| {
+                            let [start, end] = contour.anchors.as_slice() else {
+                                return None;
+                            };
+                            Some(
+                                start.position.distance(end.position) * self.view.zoom.abs()
+                                    >= MIN_SHAPE_SIZE,
+                            )
+                        })
+                        .unwrap_or(false)
+                } else {
+                    let screen_size = bounds.size() * self.view.zoom.abs();
+                    screen_size.x >= MIN_SHAPE_SIZE && screen_size.y >= MIN_SHAPE_SIZE
+                };
+                if large_enough {
+                    self.create_shape(shape, bounds, path, start_pos);
                 }
             }
             DragState::CreatingFrame {
@@ -2424,12 +2489,22 @@ impl Editor {
         }
     }
 
-    fn create_shape(&mut self, shape: ShapeKind, bounds: Rect) {
-        let path = shape.path(bounds.size());
-        let parent = self.deepest_frame_at(bounds.min);
+    fn create_shape(
+        &mut self,
+        shape: ShapeKind,
+        bounds: Rect,
+        path: PathData,
+        creation_point: Vec2,
+    ) {
+        let parent = self.deepest_frame_at(creation_point);
         let parent_world = self.document.world_transform(parent);
+        let style = if shape == ShapeKind::Line {
+            Style::stroke(Stroke::new(1.5, Paint::rgb(0.85, 0.86, 0.88)))
+        } else {
+            Style::fill(Paint::rgb(0.85, 0.86, 0.88))
+        };
         let node = Node::shape(shape.name(), path)
-            .with_style(Style::fill(Paint::rgb(0.85, 0.86, 0.88)))
+            .with_style(style)
             .with_transform(parent_world.inverse() * Affine2::from_translation(bounds.min));
         let index = self
             .document
@@ -4598,7 +4673,9 @@ impl Editor {
         match &self.drag {
             DragState::None => match self.tool {
                 Tool::Select => Cursor::Default,
-                Tool::Frame | Tool::Rectangle | Tool::Ellipse | Tool::Pen => Cursor::Crosshair,
+                Tool::Frame | Tool::Rectangle | Tool::Ellipse | Tool::Line | Tool::Pen => {
+                    Cursor::Crosshair
+                }
                 Tool::Text => Cursor::Text,
                 Tool::VectorEdit => Cursor::Default,
             },
@@ -5462,10 +5539,17 @@ impl Editor {
             ..
         } = &self.drag
         {
-            let bounds = creation_bounds(*start_pos, *current_pos, *modifiers);
-            let size = bounds.size();
-            if size.x > 0.0 && size.y > 0.0 {
-                let path = crate::render::convert_path(&shape.path(size));
+            let (bounds, path) = creation_geometry(*shape, *start_pos, *current_pos, *modifiers);
+            let has_extent = if *shape == ShapeKind::Line {
+                path.contours
+                    .first()
+                    .is_some_and(|contour| contour.anchors.len() == 2)
+                    && (current_pos - start_pos).length_squared() > f32::EPSILON
+            } else {
+                bounds.width() > 0.0 && bounds.height() > 0.0
+            };
+            if has_extent {
+                let path = crate::render::convert_path(&path);
                 let transform =
                     self.view.screen_from_world() * Affine2::from_translation(bounds.min);
                 let accent = editor_render::Paint::rgb(0.047, 0.55, 0.91);
@@ -8470,6 +8554,71 @@ mod tests {
         assert!(editor.execute_action(EditorAction::Redo));
         assert_eq!(editor.document.descendants(editor.document.root).count(), 1);
         assert_eq!(editor.tool, Tool::Rectangle);
+    }
+
+    #[test]
+    fn line_drag_preserves_direction_and_creates_a_stroked_open_path() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolLine));
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(30.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(10.0, 30.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        let id = editor.selection.primary().unwrap();
+        let node = editor.document.get(id).unwrap();
+        let NodeKind::Shape(path) = &node.kind else {
+            panic!("line tool should create a shape");
+        };
+        assert_eq!(node.name, "Line");
+        assert_eq!(node.transform.translation, Vec2::splat(10.0));
+        assert!(node.style.fill.is_none());
+        assert_eq!(node.style.stroke.as_ref().unwrap().width, 1.5);
+        assert!(!path.contours[0].closed);
+        assert_eq!(path.contours[0].anchors[0].position, Vec2::new(20.0, 0.0));
+        assert_eq!(path.contours[0].anchors[1].position, Vec2::new(0.0, 20.0));
+        assert_eq!(editor.history.undo_description(), Some("Create Line"));
+        assert_eq!(editor.tool, Tool::Line);
+    }
+
+    #[test]
+    fn line_modifiers_snap_to_45_degrees_and_draw_from_center() {
+        let mut editor = Editor::new();
+        editor.execute_action(EditorAction::ToolLine);
+        let modifiers = Modifiers {
+            shift: true,
+            alt: true,
+            ..Default::default()
+        };
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(50.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(80.0, 60.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+
+        let id = editor.selection.primary().unwrap();
+        let node = editor.document.get(id).unwrap();
+        let NodeKind::Shape(path) = &node.kind else {
+            panic!("line tool should create a shape");
+        };
+        let world = node.transform;
+        let start = world.transform_point2(path.contours[0].anchors[0].position);
+        let end = world.transform_point2(path.contours[0].anchors[1].position);
+        assert!((start.y - end.y).abs() < 0.001);
+        assert!(((start + end) * 0.5 - Vec2::splat(50.0)).length() < 0.001);
     }
 
     #[test]
