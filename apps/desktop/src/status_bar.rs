@@ -97,6 +97,7 @@ pub fn build_status_bar(
         Tool::Frame => "Frame",
         Tool::Rectangle => "Rectangle",
         Tool::Ellipse => "Ellipse",
+        Tool::Line => "Line",
         Tool::Pen => "Pen",
         Tool::Text => "Text",
         Tool::VectorEdit => "Edit vector",
