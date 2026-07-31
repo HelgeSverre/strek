@@ -405,7 +405,7 @@ fn paint_text(
 }
 
 fn text_font(text: &TextItem) -> gpui::Font {
-    let mut font = gpui::font(text.font_family.clone());
+    let mut font = gpui::font(resolve_gpui_font_family(&text.font_family));
     font.weight = gpui::FontWeight(text.font_weight as f32);
     font.style = if text.font_italic {
         gpui::FontStyle::Italic
@@ -413,6 +413,40 @@ fn text_font(text: &TextItem) -> gpui::Font {
         gpui::FontStyle::Normal
     };
     font
+}
+
+fn resolve_gpui_font_family(family: &str) -> String {
+    let trimmed = family.trim();
+    let resolved = if trimmed.eq_ignore_ascii_case("sans-serif")
+        || trimmed.eq_ignore_ascii_case("system-ui")
+    {
+        ".SystemUIFont"
+    } else if trimmed.eq_ignore_ascii_case("serif") {
+        platform_serif_family()
+    } else if trimmed.eq_ignore_ascii_case("monospace") {
+        platform_monospace_family()
+    } else {
+        trimmed
+    };
+    resolved.to_owned()
+}
+
+fn platform_serif_family() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        "Times New Roman"
+    } else {
+        "DejaVu Serif"
+    }
+}
+
+fn platform_monospace_family() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "DejaVu Sans Mono"
+    }
 }
 
 fn text_run(len: usize, font: gpui::Font, color: gpui::Hsla) -> TextRun {
@@ -1010,6 +1044,18 @@ mod tests {
         let transform = Affine2::from_scale(Vec2::splat(2.5));
 
         assert_eq!(transform_scale(&transform), 2.5);
+    }
+
+    #[test]
+    fn css_generic_families_resolve_to_gpui_platform_fonts() {
+        assert_eq!(resolve_gpui_font_family("sans-serif"), ".SystemUIFont");
+        assert_eq!(resolve_gpui_font_family("system-ui"), ".SystemUIFont");
+        assert_eq!(resolve_gpui_font_family("serif"), platform_serif_family());
+        assert_eq!(
+            resolve_gpui_font_family("monospace"),
+            platform_monospace_family()
+        );
+        assert_eq!(resolve_gpui_font_family("Custom Family"), "Custom Family");
     }
 
     #[test]
