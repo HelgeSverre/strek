@@ -1,7 +1,5 @@
 //! Stdio MCP server backed by the running Strek automation socket.
 
-use std::str::FromStr;
-
 use base64::Engine;
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -23,15 +21,13 @@ struct ActionParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PointerParams {
-    #[schemars(description = "Pointer phase: down, move, or up")]
-    phase: String,
+    phase: PointerPhase,
     #[schemars(description = "Canvas-local horizontal position in pixels")]
     x: f32,
     #[schemars(description = "Canvas-local vertical position in pixels")]
     y: f32,
     #[serde(default)]
-    #[schemars(description = "Pointer button: left, middle, or right; defaults to left")]
-    button: Option<String>,
+    button: Option<PointerButton>,
     #[serde(default)]
     shift: bool,
     #[serde(default)]
@@ -50,10 +46,7 @@ struct TextParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct UiParams {
-    #[schemars(
-        description = "UI target: main-menu, command-palette, layers-panel, or design-panel"
-    )]
-    target: String,
+    target: UiTarget,
     #[schemars(description = "Whether the target should be visible")]
     visible: bool,
 }
@@ -66,34 +59,27 @@ impl StrekMcp {
     #[tool(
         description = "Inspect the running Strek editor, window, canvas, selection, and actions"
     )]
-    fn get_state(&self) -> Result<String, String> {
-        response_json(AutomationRequest::State)
+    async fn get_state(&self) -> CallToolResult {
+        response_result(AutomationRequest::State).await
     }
 
     #[tool(description = "Run an enabled Strek editor command by ID without using the keyboard")]
-    fn perform_action(
+    async fn perform_action(
         &self,
         Parameters(ActionParams { id }): Parameters<ActionParams>,
-    ) -> Result<String, String> {
-        response_json(AutomationRequest::Action { id })
+    ) -> CallToolResult {
+        response_result(AutomationRequest::Action { id }).await
     }
 
     #[tool(
         description = "Send a canvas-local pointer event without moving the system cursor. Use down, move, then up to draw or drag."
     )]
-    fn pointer(&self, Parameters(params): Parameters<PointerParams>) -> Result<String, String> {
-        let phase = PointerPhase::from_str(&params.phase)?;
-        let button = params
-            .button
-            .as_deref()
-            .map(PointerButton::from_str)
-            .transpose()?
-            .unwrap_or_default();
-        response_json(AutomationRequest::Pointer {
-            phase,
+    async fn pointer(&self, Parameters(params): Parameters<PointerParams>) -> CallToolResult {
+        response_result(AutomationRequest::Pointer {
+            phase: params.phase,
             x: params.x,
             y: params.y,
-            button,
+            button: params.button.unwrap_or_default(),
             modifiers: AutomationModifiers {
                 shift: params.shift,
                 control: params.control,
@@ -101,37 +87,37 @@ impl StrekMcp {
                 command: params.command,
             },
         })
+        .await
     }
 
     #[tool(description = "Insert text into the active Strek text editing session")]
-    fn insert_text(
+    async fn insert_text(
         &self,
         Parameters(TextParams { text }): Parameters<TextParams>,
-    ) -> Result<String, String> {
-        response_json(AutomationRequest::Text { text })
+    ) -> CallToolResult {
+        response_result(AutomationRequest::Text { text }).await
     }
 
     #[tool(description = "Show or hide Strek panels and overlays without clicking the UI")]
-    fn set_ui(
+    async fn set_ui(
         &self,
         Parameters(UiParams { target, visible }): Parameters<UiParams>,
-    ) -> Result<String, String> {
-        response_json(AutomationRequest::SetUi {
-            target: UiTarget::from_str(&target)?,
-            visible,
-        })
+    ) -> CallToolResult {
+        response_result(AutomationRequest::SetUi { target, visible }).await
     }
 
     #[tool(
         description = "Activate Strek and capture its complete window as a PNG image without moving the system cursor"
     )]
-    fn screenshot(&self) -> Result<CallToolResult, String> {
-        let png = automation::capture_screenshot()?;
-        let data = base64::engine::general_purpose::STANDARD.encode(png);
-        Ok(CallToolResult::success(vec![ContentBlock::image(
-            data,
-            "image/png",
-        )]))
+    async fn screenshot(&self) -> CallToolResult {
+        match tokio::task::spawn_blocking(automation::capture_screenshot).await {
+            Ok(Ok(png)) => {
+                let data = base64::engine::general_purpose::STANDARD.encode(png);
+                CallToolResult::success(vec![ContentBlock::image(data, "image/png")])
+            }
+            Ok(Err(error)) => tool_error(error),
+            Err(error) => tool_error(format!("screenshot task failed: {error}")),
+        }
     }
 }
 
@@ -149,9 +135,20 @@ impl ServerHandler for StrekMcp {
     }
 }
 
-fn response_json(request: AutomationRequest) -> Result<String, String> {
-    let response = automation::request(request)?.into_result()?;
-    serde_json::to_string_pretty(&response).map_err(|error| error.to_string())
+async fn response_result(request: AutomationRequest) -> CallToolResult {
+    match tokio::task::spawn_blocking(move || automation::request(request)).await {
+        Ok(Ok(response)) => match serde_json::to_value(&response) {
+            Ok(value) if response.ok => CallToolResult::structured(value),
+            Ok(value) => CallToolResult::structured_error(value),
+            Err(error) => tool_error(format!("could not serialize Strek response: {error}")),
+        },
+        Ok(Err(error)) => tool_error(error),
+        Err(error) => tool_error(format!("automation task failed: {error}")),
+    }
+}
+
+fn tool_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message.into())])
 }
 
 pub(crate) fn run() -> Result<(), String> {

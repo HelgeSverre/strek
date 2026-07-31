@@ -15,6 +15,7 @@ use std::sync::{mpsc, Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const SOCKET_ENV: &str = "STREK_AUTOMATION_SOCKET";
@@ -52,7 +53,7 @@ pub(crate) enum AutomationRequest {
     Activate,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PointerPhase {
     Down,
@@ -75,7 +76,7 @@ impl FromStr for PointerPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PointerButton {
     #[default]
@@ -107,7 +108,7 @@ pub(crate) struct AutomationModifiers {
     pub command: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UiTarget {
     MainMenu,
@@ -185,6 +186,7 @@ pub(crate) struct AutomationState {
     pub design_panel_visible: bool,
     pub main_menu_open: bool,
     pub command_palette_open: bool,
+    #[serde(default)]
     pub numeric_property_scrub_active: bool,
     pub actions: Vec<AutomationAction>,
 }
