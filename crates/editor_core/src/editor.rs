@@ -4663,24 +4663,51 @@ impl Editor {
                     self.document.mark_bounds_dirty(id);
                 }
                 NodeKind::Text(mut text) => {
-                    if handle.is_corner() {
-                        let factor = scale.x.abs().max(scale.y.abs()).max(0.01);
+                    text.font_size = if text.font_size.is_finite() {
+                        text.font_size.clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE)
+                    } else {
+                        MIN_TEXT_DIMENSION
+                    };
+                    if let TextSizing::FixedWidth { width } = &mut text.sizing {
+                        *width = if width.is_finite() {
+                            width.clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH)
+                        } else {
+                            MIN_TEXT_DIMENSION
+                        };
+                    }
+                    let effective_scale = if handle.is_corner() {
+                        let requested_factor = scale.x.abs().max(scale.y.abs()).max(0.01);
+                        let mut minimum_factor = MIN_TEXT_DIMENSION / text.font_size;
+                        let mut maximum_factor = MAX_TEXT_FONT_SIZE / text.font_size;
+                        if let TextSizing::FixedWidth { width } = text.sizing {
+                            minimum_factor = minimum_factor.max(MIN_TEXT_DIMENSION / width);
+                            maximum_factor = maximum_factor.min(MAX_TEXT_BOX_WIDTH / width);
+                        }
+                        let factor = requested_factor.clamp(minimum_factor, maximum_factor);
                         text.font_size =
                             (text.font_size * factor).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE);
                         if let TextSizing::FixedWidth { width } = &mut text.sizing {
                             *width =
                                 (*width * factor).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH);
                         }
+                        Vec2::splat(factor)
                     } else if handle.affects_x() {
                         let width = text
                             .fixed_width()
                             .unwrap_or_else(|| crate::text::estimate_text_metrics(&text).width);
+                        let resized_width =
+                            (width * scale.x.abs()).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH);
                         text.sizing = TextSizing::FixedWidth {
-                            width: (width * scale.x.abs())
-                                .clamp(MIN_TEXT_DIMENSION, MAX_TEXT_BOX_WIDTH),
+                            width: resized_width,
                         };
-                    }
-                    let desired_origin = delta.transform_point2(snapshot.world.translation);
+                        Vec2::new(resized_width / width, 1.0)
+                    } else {
+                        Vec2::ONE
+                    };
+                    let text_delta = Affine2::from_translation(fixed)
+                        * Affine2::from_scale(effective_scale)
+                        * Affine2::from_translation(-fixed);
+                    let desired_origin = text_delta.transform_point2(snapshot.world.translation);
                     let desired_world =
                         Affine2::from_mat2_translation(snapshot.world.matrix2, desired_origin);
                     let after = self.document.author_transform_from_world(id, desired_world);
@@ -10128,6 +10155,41 @@ mod tests {
             panic!("expected text");
         };
         assert_eq!(corner_data.font_size, MAX_TEXT_FONT_SIZE);
+    }
+
+    #[test]
+    fn capped_text_resize_keeps_the_opposite_edge_fixed() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let text = editor
+            .document
+            .add_child(root, Node::text("Label", "Hello"))
+            .unwrap();
+        editor.selection.select(text);
+        let original_bounds = editor.selection_world_bounds().unwrap();
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(original_bounds.min.x, original_bounds.center().y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(-1.0e9, original_bounds.center().y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        let resized_bounds = editor.selection_world_bounds().unwrap();
+        let NodeKind::Text(text_data) = &editor.document.get(text).unwrap().kind else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            text_data.sizing,
+            TextSizing::FixedWidth {
+                width: MAX_TEXT_BOX_WIDTH
+            }
+        );
+        assert!((resized_bounds.max.x - original_bounds.max.x).abs() < 0.001);
     }
 
     #[test]
