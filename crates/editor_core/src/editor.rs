@@ -36,6 +36,26 @@ pub enum Tool {
     VectorEdit,
 }
 
+/// Session-scoped styles used when creating new vector objects.
+///
+/// Closed shapes and paths keep separate presets because their useful defaults
+/// differ: closed shapes are normally filled, while open paths need a stroke
+/// to remain visible. These defaults are editor state, not document state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreationStyleDefaults {
+    closed_shapes: Style,
+    paths: Style,
+}
+
+impl Default for CreationStyleDefaults {
+    fn default() -> Self {
+        Self {
+            closed_shapes: Style::fill(Paint::rgb(0.85, 0.86, 0.88)),
+            paths: Style::stroke(Stroke::new(1.5, Paint::rgb(0.85, 0.86, 0.88))),
+        }
+    }
+}
+
 /// Layout mode exposed by the single-group design inspector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupLayoutMode {
@@ -574,6 +594,9 @@ pub struct Editor {
     /// Current tool
     pub tool: Tool,
 
+    /// Non-document style presets for newly created vector objects.
+    creation_styles: CreationStyleDefaults,
+
     /// Drag state
     drag: DragState,
 
@@ -600,6 +623,7 @@ impl Editor {
             view: View::default(),
             viewport_size: Vec2::new(800.0, 600.0),
             tool: Tool::Select,
+            creation_styles: CreationStyleDefaults::default(),
             drag: DragState::None,
             needs_redraw: true,
             snap_engine: SnapEngine::new(),
@@ -1253,7 +1277,7 @@ impl Editor {
         let parent_world = self.document.world_transform(session.parent);
         let transform = parent_world.inverse() * node_world;
         let node = Node::shape("Path", world_path)
-            .with_style(Style::stroke(Stroke::black(1.5)))
+            .with_style(self.creation_styles.paths.clone())
             .with_transform(transform);
         let index = self
             .document
@@ -2600,10 +2624,9 @@ impl Editor {
     ) {
         let parent = self.deepest_frame_at(creation_point);
         let parent_world = self.document.world_transform(parent);
-        let style = if shape == ShapeKind::Line {
-            Style::stroke(Stroke::new(1.5, Paint::rgb(0.85, 0.86, 0.88)))
-        } else {
-            Style::fill(Paint::rgb(0.85, 0.86, 0.88))
+        let style = match shape {
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.creation_styles.closed_shapes.clone(),
+            ShapeKind::Line => self.creation_styles.paths.clone(),
         };
         let node = Node::shape(shape.name(), path)
             .with_style(style)
@@ -5988,6 +6011,93 @@ impl Editor {
         &self.selection
     }
 
+    /// Return the session-scoped styles used for newly created vector objects.
+    pub fn creation_style_defaults(&self) -> &CreationStyleDefaults {
+        &self.creation_styles
+    }
+
+    /// Replace the session-scoped creation styles without affecting history.
+    pub fn set_creation_style_defaults(&mut self, defaults: CreationStyleDefaults) {
+        if self.creation_styles != defaults {
+            self.creation_styles = defaults;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Return the creation style associated with the active drawing tool.
+    pub fn active_creation_style(&self) -> Option<&Style> {
+        match self.tool {
+            Tool::Rectangle | Tool::Ellipse => Some(&self.creation_styles.closed_shapes),
+            Tool::Line | Tool::Pen => Some(&self.creation_styles.paths),
+            Tool::Select | Tool::Frame | Tool::Text | Tool::VectorEdit => None,
+        }
+    }
+
+    /// Set or remove the fill used by the active drawing tool.
+    pub fn set_creation_fill(&mut self, fill: Option<Paint>) -> bool {
+        self.update_active_creation_style(move |style| style.fill = fill)
+    }
+
+    /// Toggle the fill used by the active drawing tool.
+    ///
+    /// Enabling an absent fill starts from opaque black, matching the selected
+    /// object style controls.
+    pub fn toggle_creation_fill(&mut self) -> bool {
+        self.update_active_creation_style(|style| {
+            style.fill = if style.fill.is_some() {
+                None
+            } else {
+                Some(Paint::black())
+            };
+        })
+    }
+
+    /// Set the stroke paint used by the active drawing tool.
+    ///
+    /// A missing stroke is created at the standard creation width.
+    pub fn set_creation_stroke_paint(&mut self, paint: Paint) -> bool {
+        self.update_active_creation_style(move |style| {
+            style.stroke.get_or_insert_with(|| Stroke::black(1.5)).paint = paint;
+        })
+    }
+
+    /// Toggle the stroke used by the active drawing tool.
+    pub fn toggle_creation_stroke(&mut self) -> bool {
+        self.update_active_creation_style(|style| {
+            style.stroke = if style.stroke.is_some() {
+                None
+            } else {
+                Some(Stroke::black(1.5))
+            };
+        })
+    }
+
+    /// Adjust the creation stroke width, creating a stroke when absent.
+    pub fn adjust_creation_stroke_width(&mut self, delta: f32) -> bool {
+        if !delta.is_finite() {
+            return false;
+        }
+        self.update_active_creation_style(|style| {
+            let stroke = style.stroke.get_or_insert_with(|| Stroke::black(1.5));
+            stroke.width = (stroke.width + delta).clamp(0.1, 1000.0);
+        })
+    }
+
+    fn update_active_creation_style(&mut self, update: impl FnOnce(&mut Style)) -> bool {
+        let style = match self.tool {
+            Tool::Rectangle | Tool::Ellipse => &mut self.creation_styles.closed_shapes,
+            Tool::Line | Tool::Pen => &mut self.creation_styles.paths,
+            Tool::Select | Tool::Frame | Tool::Text | Tool::VectorEdit => return false,
+        };
+        let before = style.clone();
+        update(style);
+        if *style == before {
+            return false;
+        }
+        self.needs_redraw = true;
+        true
+    }
+
     /// Return the selected text properties used by contextual desktop controls.
     pub fn selected_text_data(&self) -> Option<TextData> {
         let id = self.selection.primary()?;
@@ -9263,6 +9373,147 @@ mod tests {
         assert!(editor.execute_action(EditorAction::Redo));
         assert_eq!(editor.document.descendants(editor.document.root).count(), 1);
         assert_eq!(editor.tool, Tool::Rectangle);
+    }
+
+    #[test]
+    fn creation_style_defaults_are_non_historical_and_tool_scoped() {
+        let mut editor = Editor::new();
+        let revision = editor.current_revision();
+        let initial = editor.creation_style_defaults().clone();
+
+        assert!(editor.execute_action(EditorAction::ToolRectangle));
+        assert!(editor.set_creation_fill(Some(Paint::rgb(0.9, 0.2, 0.1))));
+        assert!(editor.toggle_creation_stroke());
+        assert!(editor.set_creation_stroke_paint(Paint::rgb(0.1, 0.2, 0.9)));
+        assert!(editor.adjust_creation_stroke_width(0.5));
+        assert!(!editor.adjust_creation_stroke_width(f32::NAN));
+        let shape_style = editor.active_creation_style().cloned().unwrap();
+        assert_eq!(shape_style.fill, Some(Paint::rgb(0.9, 0.2, 0.1)));
+        assert_eq!(
+            shape_style.stroke,
+            Some(Stroke::new(2.0, Paint::rgb(0.1, 0.2, 0.9)))
+        );
+
+        assert!(editor.execute_action(EditorAction::ToolLine));
+        assert_eq!(editor.active_creation_style(), Some(&initial.paths));
+        assert!(editor.toggle_creation_fill());
+        assert!(editor.adjust_creation_stroke_width(1.0));
+        let path_style = editor.active_creation_style().cloned().unwrap();
+        assert_eq!(path_style.fill, Some(Paint::black()));
+        assert_eq!(path_style.stroke.as_ref().unwrap().width, 2.5);
+
+        assert!(editor.execute_action(EditorAction::ToolEllipse));
+        assert_eq!(editor.active_creation_style(), Some(&shape_style));
+        assert!(editor.execute_action(EditorAction::ToolText));
+        assert_eq!(editor.active_creation_style(), None);
+        assert!(!editor.toggle_creation_fill());
+        assert!(!editor.toggle_creation_stroke());
+
+        assert_eq!(editor.current_revision(), revision);
+        assert!(!editor.is_dirty());
+        assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn created_shapes_capture_defaults_across_later_changes_and_history() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolRectangle));
+        assert!(editor.set_creation_fill(Some(Paint::rgb(0.8, 0.1, 0.2))));
+        assert!(editor.toggle_creation_stroke());
+        let expected = editor.active_creation_style().cloned().unwrap();
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(10.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(50.0, 60.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let id = editor.selection.primary().unwrap();
+        assert_eq!(editor.document.get(id).unwrap().style, expected);
+        assert_eq!(editor.history.undo_description(), Some("Create Rectangle"));
+
+        let creation_revision = editor.current_revision();
+        assert!(editor.set_creation_fill(Some(Paint::black())));
+        assert_eq!(editor.current_revision(), creation_revision);
+        assert_eq!(editor.document.get(id).unwrap().style, expected);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert!(editor.execute_action(EditorAction::Redo));
+        assert_eq!(editor.document.get(id).unwrap().style, expected);
+    }
+
+    #[test]
+    fn line_and_pen_share_path_defaults_while_text_keeps_its_own_fill() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolLine));
+        assert!(editor.set_creation_fill(Some(Paint::rgb(0.2, 0.7, 0.3))));
+        assert!(editor.set_creation_stroke_paint(Paint::rgb(0.1, 0.4, 0.9)));
+        assert!(editor.adjust_creation_stroke_width(1.5));
+        let expected_path = editor.active_creation_style().cloned().unwrap();
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(10.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(40.0, 30.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let line = editor.selection.primary().unwrap();
+        assert_eq!(editor.document.get(line).unwrap().style, expected_path);
+
+        assert!(editor.execute_action(EditorAction::ToolPen));
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(60.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(60.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.set_creation_stroke_paint(Paint::rgb(0.9, 0.4, 0.1)));
+        let expected_pen = editor.active_creation_style().cloned().unwrap();
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(90.0, 30.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(90.0, 30.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.finish_editing());
+        let path = editor.selection.primary().unwrap();
+        assert_eq!(editor.document.get(path).unwrap().style, expected_pen);
+        assert_eq!(editor.document.get(line).unwrap().style, expected_path);
+
+        assert!(editor.execute_action(EditorAction::ToolText));
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(120.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(120.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.replace_text(None, "Text"));
+        assert!(editor.finish_editing());
+        let text = editor.selection.primary().unwrap();
+        assert_eq!(
+            editor.document.get(text).unwrap().style,
+            Style::fill(Paint::rgb(0.12, 0.13, 0.15))
+        );
     }
 
     #[test]
