@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{Document, DocumentLoadError, DocumentValidationError};
 
+use crate::svg_import::{self, SvgImportError};
+
 const DOCUMENT_EXTENSION: &str = "strek.json";
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECENT_FILES: usize = 8;
@@ -29,6 +31,10 @@ pub enum DocumentIoError {
     Decode {
         path: PathBuf,
         source: DocumentLoadError,
+    },
+    Import {
+        path: PathBuf,
+        source: SvgImportError,
     },
     Encode {
         source: serde_json::Error,
@@ -56,6 +62,9 @@ impl fmt::Display for DocumentIoError {
             Self::Decode { path, source } => {
                 write!(formatter, "could not open {}: {source}", path.display())
             }
+            Self::Import { path, source } => {
+                write!(formatter, "could not import {}: {source}", path.display())
+            }
             Self::Encode { source } => write!(formatter, "could not serialize document: {source}"),
             Self::InvalidDocument { source } => {
                 write!(formatter, "could not save invalid document: {source}")
@@ -73,14 +82,21 @@ impl Error for DocumentIoError {
             Self::TooLarge { .. } => None,
             Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
+            Self::Import { source, .. } => Some(source),
             Self::Encode { source } => Some(source),
             Self::InvalidDocument { source } => Some(source),
         }
     }
 }
 
-/// Read and validate a document from disk.
-pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
+/// A native document or a foreign document imported into the native model.
+pub(crate) enum OpenedDocument {
+    Native(Document),
+    ImportedSvg(Document),
+}
+
+/// Read and validate a native document, or import a supported SVG.
+pub fn read_document(path: &Path) -> Result<OpenedDocument, DocumentIoError> {
     let file = File::open(path).map_err(|source| DocumentIoError::Read {
         path: path.to_path_buf(),
         source,
@@ -91,18 +107,38 @@ pub fn read_document(path: &Path) -> Result<Document, DocumentIoError> {
     })?;
     ensure_document_size(path, metadata.len(), MAX_DOCUMENT_BYTES)?;
 
-    let mut json = String::new();
+    let mut contents = String::new();
     file.take(MAX_DOCUMENT_BYTES + 1)
-        .read_to_string(&mut json)
+        .read_to_string(&mut contents)
         .map_err(|source| DocumentIoError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-    ensure_document_size(path, json.len() as u64, MAX_DOCUMENT_BYTES)?;
-    Document::from_json(&json).map_err(|source| DocumentIoError::Decode {
-        path: path.to_path_buf(),
-        source,
-    })
+    ensure_document_size(path, contents.len() as u64, MAX_DOCUMENT_BYTES)?;
+
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        let document_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Imported SVG");
+        svg_import::import_svg(&contents, document_name)
+            .map(OpenedDocument::ImportedSvg)
+            .map_err(|source| DocumentIoError::Import {
+                path: path.to_path_buf(),
+                source,
+            })
+    } else {
+        Document::from_json(&contents)
+            .map(OpenedDocument::Native)
+            .map_err(|source| DocumentIoError::Decode {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
 }
 
 /// Serialize a document before handing its snapshot to a background writer.
@@ -321,9 +357,35 @@ mod tests {
 
         let json = serialize_document(&document).unwrap();
         write_document(&path, &json).unwrap();
-        let restored = read_document(&path).unwrap();
+        let OpenedDocument::Native(restored) = read_document(&path).unwrap() else {
+            panic!("native document was imported as SVG");
+        };
 
         assert_eq!(restored.descendants(restored.root).count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn svg_files_are_imported_as_editable_documents() {
+        let directory = temporary_test_directory("svg-import");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("drawing.SVG");
+        fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
+                <rect id="box" width="20" height="10" fill="#f00"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        let OpenedDocument::ImportedSvg(document) = read_document(&path).unwrap() else {
+            panic!("SVG document was decoded as a native document");
+        };
+        assert!(document
+            .descendants(document.root)
+            .filter_map(|id| document.get(id))
+            .any(|node| node.name == "box"));
+
         fs::remove_dir_all(directory).unwrap();
     }
 

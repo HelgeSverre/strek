@@ -4431,6 +4431,7 @@ dependencies = [
  "render_svg",
  "resvg",
  "rmcp",
+ "roxmltree",
  "schemars 1.2.2",
  "serde",
  "serde_json",

@@ -12,14 +12,15 @@ use serde_json::{json, Map, Value};
 use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight, Backspace,
-    BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
-    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportJpeg, ExportPng,
-    ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool, Group, InvertSelection,
-    JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
-    QuitApplication, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll,
-    SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath, TextLarger, TextSmaller,
-    TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel, TogglePathClosed, Undo,
-    Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    BringForward, BringToFront, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete, DeselectAll,
+    DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector, EllipseTool,
+    ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool,
+    Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts,
+    Paste, PenTool, QuitApplication, RectangleTool, Redo, ReversePath, SaveDocument,
+    SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath,
+    TextLarger, TextSmaller, TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel,
+    TogglePathClosed, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
+    ZoomToSelection,
 };
 
 const KEYMAP_VERSION: u64 = 1;
@@ -38,6 +39,9 @@ pub(crate) enum AppCommand {
     ExportPng,
     ExportJpeg,
     ExportWebP,
+    CopyAsSvg,
+    CopyAsPng,
+    CopyAsWebP,
     OpenKeyboardShortcuts,
     QuitApplication,
     Copy,
@@ -169,6 +173,30 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         "File",
         [],
         ExportWebP
+    ),
+    app_command!(
+        "edit.copy_as_svg",
+        "Copy as SVG",
+        "Copy the visible artwork as an SVG image",
+        "Edit",
+        [],
+        CopyAsSvg
+    ),
+    app_command!(
+        "edit.copy_as_png",
+        "Copy as PNG",
+        "Copy the visible artwork as a PNG image",
+        "Edit",
+        [],
+        CopyAsPng
+    ),
+    app_command!(
+        "edit.copy_as_webp",
+        "Copy as WebP",
+        "Copy the visible artwork as a lossless WebP image",
+        "Edit",
+        [],
+        CopyAsWebP
     ),
     app_command!(
         "preferences.open_keybindings",
@@ -880,6 +908,9 @@ pub(crate) fn action_for(target: CommandTarget) -> Box<dyn Action> {
             AppCommand::ExportPng => Box::new(ExportPng),
             AppCommand::ExportJpeg => Box::new(ExportJpeg),
             AppCommand::ExportWebP => Box::new(ExportWebP),
+            AppCommand::CopyAsSvg => Box::new(CopyAsSvg),
+            AppCommand::CopyAsPng => Box::new(CopyAsPng),
+            AppCommand::CopyAsWebP => Box::new(CopyAsWebP),
             AppCommand::OpenKeyboardShortcuts => Box::new(OpenKeyboardShortcuts),
             AppCommand::QuitApplication => Box::new(QuitApplication),
             AppCommand::Copy => Box::new(Copy),

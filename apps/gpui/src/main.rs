@@ -14,6 +14,7 @@ mod layer_panel;
 mod mcp;
 mod properties_panel;
 mod status_bar;
+mod svg_import;
 mod text_input;
 mod toolbar;
 
@@ -27,15 +28,17 @@ use editor_core::{
 };
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    DragMoveEvent, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent, KeyUpEvent, Menu,
-    MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds, WindowOptions,
+    DragMoveEvent, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, KeyDownEvent,
+    KeyUpEvent, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds,
+    WindowOptions,
 };
 
 const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
 const MAX_AUTOMATION_SELECTED_LAYERS: usize = 10_000;
 const MAX_AUTOMATION_SELECTED_LAYER_BYTES: usize = 256 * 1024;
 static OBJECT_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static ARTWORK_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 actions!(
     strek,
@@ -49,6 +52,9 @@ actions!(
         ExportPng,
         ExportJpeg,
         ExportWebP,
+        CopyAsSvg,
+        CopyAsPng,
+        CopyAsWebP,
         OpenKeyboardShortcuts,
         ShowCommandPalette,
         QuitApplication,
@@ -161,6 +167,59 @@ enum PendingDocumentAction {
     Close,
 }
 
+#[derive(Debug, Clone, Default)]
+enum DocumentOrigin {
+    #[default]
+    Untitled,
+    Native(PathBuf),
+    ImportedSvg(PathBuf),
+}
+
+impl DocumentOrigin {
+    fn source_path(&self) -> Option<&Path> {
+        match self {
+            Self::Untitled => None,
+            Self::Native(path) | Self::ImportedSvg(path) => Some(path),
+        }
+    }
+
+    fn native_path(&self) -> Option<&Path> {
+        match self {
+            Self::Native(path) => Some(path),
+            Self::Untitled | Self::ImportedSvg(_) => None,
+        }
+    }
+
+    fn requires_native_save(&self) -> bool {
+        matches!(self, Self::ImportedSvg(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClipboardArtworkFormat {
+    Svg,
+    Png,
+    WebP,
+}
+
+impl ClipboardArtworkFormat {
+    fn export_format(self) -> export::ExportFormat {
+        match self {
+            Self::Svg => export::ExportFormat::Svg,
+            Self::Png => export::ExportFormat::Png,
+            Self::WebP => export::ExportFormat::WebP,
+        }
+    }
+
+    fn image_format(self) -> ImageFormat {
+        match self {
+            Self::Svg => ImageFormat::Svg,
+            Self::Png => ImageFormat::Png,
+            Self::WebP => ImageFormat::Webp,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum FileOperation {
     #[default]
@@ -169,6 +228,7 @@ enum FileOperation {
     Opening,
     Saving,
     Exporting,
+    Copying,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,7 +287,7 @@ impl ObjectClipboard {
 /// Main application state as a GPUI Entity.
 struct Strek {
     editor: Editor,
-    document_path: Option<PathBuf>,
+    document_origin: DocumentOrigin,
     recent_files: document_io::RecentFiles,
     file_operation: FileOperation,
     allow_window_close: bool,
@@ -256,7 +316,7 @@ impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
         Self {
             editor: Editor::new(),
-            document_path: None,
+            document_origin: DocumentOrigin::Untitled,
             recent_files: document_io::RecentFiles::load(),
             file_operation: FileOperation::Idle,
             allow_window_close: false,
@@ -522,7 +582,7 @@ impl Strek {
         automation::AutomationState {
             process_id: std::process::id(),
             document: self.document_name(),
-            dirty: self.editor.is_dirty(),
+            dirty: self.document_is_dirty(),
             tool: automation_tool_name(self.editor.tool).to_owned(),
             interaction: automation_interaction_name(self.editor.interaction_kind()).to_owned(),
             selection_count: self.editor.selection().len(),
@@ -545,25 +605,34 @@ impl Strek {
     }
 
     fn document_name(&self) -> String {
-        self.document_path
-            .as_deref()
+        self.source_document_path()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .map(|name| {
-                name.strip_suffix(".strek.json")
-                    .or_else(|| name.strip_suffix(".json"))
-                    .unwrap_or(name)
-                    .to_owned()
+                let lowercase = name.to_ascii_lowercase();
+                for suffix in [".strek.json", ".json", ".svg"] {
+                    if lowercase.ends_with(suffix) {
+                        return name[..name.len() - suffix.len()].to_owned();
+                    }
+                }
+                name.to_owned()
             })
             .unwrap_or_else(|| "Untitled".to_owned())
     }
 
     fn document_location(&self) -> String {
-        self.document_path
-            .as_deref()
+        self.source_document_path()
             .and_then(Path::parent)
             .map(|parent| parent.display().to_string())
             .unwrap_or_else(|| "Unsaved document".to_owned())
+    }
+
+    fn source_document_path(&self) -> Option<&Path> {
+        self.document_origin.source_path()
+    }
+
+    fn document_is_dirty(&self) -> bool {
+        self.document_origin.requires_native_save() || self.editor.is_dirty()
     }
 
     fn selected_object_clipboard_text(&self) -> String {
@@ -592,7 +661,7 @@ impl Strek {
     }
 
     fn update_window_title(&self, window: &mut Window) {
-        let dirty_marker = if self.editor.is_dirty() { " •" } else { "" };
+        let dirty_marker = if self.document_is_dirty() { " •" } else { "" };
         window.set_window_title(&format!("{}{} — Strek", self.document_name(), dirty_marker));
     }
 
@@ -724,7 +793,7 @@ impl Strek {
     fn reset_document(&mut self) {
         self.cancel_numeric_property_scrub();
         self.editor = editor_preserving_creation_styles(&self.editor, Editor::new());
-        self.document_path = None;
+        self.document_origin = DocumentOrigin::Untitled;
         self.object_clipboard = None;
         self.command_palette = None;
         self.property_color_input = None;
@@ -736,11 +805,21 @@ impl Strek {
     }
 
     fn replace_document(&mut self, document: editor_core::Document, path: PathBuf) {
+        self.install_document(document);
+        self.document_origin = DocumentOrigin::Native(path.clone());
+        self.recent_files.record(&path);
+    }
+
+    fn replace_imported_document(&mut self, document: editor_core::Document, source: PathBuf) {
+        self.install_document(document);
+        self.document_origin = DocumentOrigin::ImportedSvg(source.clone());
+        self.recent_files.record(&source);
+    }
+
+    fn install_document(&mut self, document: editor_core::Document) {
         self.cancel_numeric_property_scrub();
         self.editor =
             editor_preserving_creation_styles(&self.editor, Editor::from_document(document));
-        self.document_path = Some(path.clone());
-        self.recent_files.record(&path);
         self.object_clipboard = None;
         self.command_palette = None;
         self.property_color_input = None;
@@ -769,7 +848,7 @@ impl Strek {
         if self.file_operation != FileOperation::Idle {
             return;
         }
-        if let Some(path) = self.document_path.clone() {
+        if let Some(path) = self.document_origin.native_path().map(Path::to_path_buf) {
             self.begin_save_to_path(path, None, window, cx);
         } else {
             self.begin_save_dialog(None, window, cx);
@@ -812,6 +891,18 @@ impl Strek {
 
     fn export_webp(&mut self, _: &ExportWebP, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_export_dialog(export::ExportFormat::WebP, window, cx);
+    }
+
+    fn copy_as_svg(&mut self, _: &CopyAsSvg, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_copy_artwork(ClipboardArtworkFormat::Svg, window, cx);
+    }
+
+    fn copy_as_png(&mut self, _: &CopyAsPng, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_copy_artwork(ClipboardArtworkFormat::Png, window, cx);
+    }
+
+    fn copy_as_webp(&mut self, _: &CopyAsWebP, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_copy_artwork(ClipboardArtworkFormat::WebP, window, cx);
     }
 
     fn open_keyboard_shortcuts(
@@ -932,19 +1023,25 @@ impl Strek {
                 | AppCommand::ExportPng
                 | AppCommand::ExportJpeg
                 | AppCommand::ExportWebP
+                | AppCommand::CopyAsSvg
+                | AppCommand::CopyAsPng
+                | AppCommand::CopyAsWebP
                 | AppCommand::QuitApplication,
             ) => self.file_operation == FileOperation::Idle,
             CommandTarget::App(AppCommand::Copy | AppCommand::Cut) => {
-                self.editor.text_input_snapshot().map_or_else(
-                    || !self.editor.selection().is_empty(),
-                    |snapshot| !snapshot.selection.is_empty(),
-                )
+                self.file_operation != FileOperation::Copying
+                    && self.editor.text_input_snapshot().map_or_else(
+                        || !self.editor.selection().is_empty(),
+                        |snapshot| !snapshot.selection.is_empty(),
+                    )
             }
             CommandTarget::App(AppCommand::DeleteBackward) => {
                 self.editor.text_input_snapshot().is_some() || !self.editor.selection().is_empty()
             }
             CommandTarget::App(AppCommand::Paste) => {
-                self.editor.text_input_snapshot().is_some() || self.object_clipboard.is_some()
+                self.file_operation != FileOperation::Copying
+                    && (self.editor.text_input_snapshot().is_some()
+                        || self.object_clipboard.is_some())
             }
             CommandTarget::App(
                 AppCommand::TextSmaller
@@ -987,7 +1084,7 @@ impl Strek {
         self.finish_layer_rename(true, cx);
         self.dismiss_menus();
         self.settle_for_document_io();
-        if !self.editor.is_dirty() {
+        if !self.document_is_dirty() {
             self.perform_document_action(action, window, cx);
             return;
         }
@@ -1008,7 +1105,9 @@ impl Strek {
                     editor.file_operation = FileOperation::Idle;
                     match answer {
                         0 => {
-                            if let Some(path) = editor.document_path.clone() {
+                            if let Some(path) =
+                                editor.document_origin.native_path().map(Path::to_path_buf)
+                            {
                                 editor.begin_save_to_path(path, Some(action), window, cx);
                             } else {
                                 editor.begin_save_dialog(Some(action), window, cx);
@@ -1091,7 +1190,14 @@ impl Strek {
                     editor.file_operation = FileOperation::Idle;
                     match result {
                         Ok(document) if editor.editor.current_revision() == opening_revision => {
-                            editor.replace_document(document, path);
+                            match document {
+                                document_io::OpenedDocument::Native(document) => {
+                                    editor.replace_document(document, path);
+                                }
+                                document_io::OpenedDocument::ImportedSvg(document) => {
+                                    editor.replace_imported_document(document, path);
+                                }
+                            }
                             cx.notify();
                         }
                         Ok(_) => editor.show_error(
@@ -1129,8 +1235,7 @@ impl Strek {
     ) {
         self.file_operation = FileOperation::Prompting;
         let directory = self
-            .document_path
-            .as_deref()
+            .source_document_path()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .or_else(|| env::current_dir().ok())
@@ -1188,8 +1293,7 @@ impl Strek {
 
         self.file_operation = FileOperation::Prompting;
         let directory = self
-            .document_path
-            .as_deref()
+            .source_document_path()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .or_else(|| env::current_dir().ok())
@@ -1267,6 +1371,64 @@ impl Strek {
         cx.notify();
     }
 
+    fn begin_copy_artwork(
+        &mut self,
+        format: ClipboardArtworkFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_layer_rename(true, cx);
+        self.dismiss_menus();
+        if self.file_operation != FileOperation::Idle {
+            return;
+        }
+        self.settle_for_document_io();
+        let Some(snapshot) = self.editor.artwork_snapshot() else {
+            self.show_error(
+                "Nothing to copy",
+                "Add at least one visible layer before copying artwork.".to_owned(),
+                window,
+                cx,
+            );
+            return;
+        };
+
+        self.file_operation = FileOperation::Copying;
+        let task = cx
+            .background_executor()
+            .spawn(async move { export::encode_artwork(format.export_format(), &snapshot) });
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = task.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(bytes) => {
+                            let sequence =
+                                ARTWORK_CLIPBOARD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                            let image = Image {
+                                format: format.image_format(),
+                                bytes,
+                                id: (u64::from(std::process::id()) << 32) | sequence,
+                            };
+                            editor.object_clipboard = None;
+                            cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                            cx.notify();
+                        }
+                        Err(error) => editor.show_error(
+                            "Could not copy artwork",
+                            error.to_string(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn begin_save_to_path(
         &mut self,
         path: PathBuf,
@@ -1296,10 +1458,10 @@ impl Strek {
                     match result {
                         Ok(()) => {
                             editor.editor.mark_revision_saved(revision);
-                            editor.document_path = Some(path.clone());
+                            editor.document_origin = DocumentOrigin::Native(path.clone());
                             editor.recent_files.record(&path);
                             if let Some(action) = resume {
-                                if editor.editor.is_dirty() {
+                                if editor.document_is_dirty() {
                                     editor.request_document_action(action, window, cx);
                                 } else {
                                     editor.perform_document_action(action, window, cx);
@@ -1348,7 +1510,7 @@ impl Strek {
         }
 
         self.settle_for_document_io();
-        if self.editor.is_dirty() {
+        if self.document_is_dirty() {
             self.request_document_action(PendingDocumentAction::Close, window, cx);
             false
         } else {
@@ -2388,6 +2550,9 @@ impl Strek {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Copying {
+            return;
+        }
         let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         if let Some(snapshot) = self.editor.text_input_snapshot() {
@@ -2413,6 +2578,9 @@ impl Strek {
     }
 
     fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Copying {
+            return;
+        }
         let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let mut changed = false;
@@ -2444,6 +2612,9 @@ impl Strek {
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Copying {
+            return;
+        }
         let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let mut changed = false;
@@ -3049,6 +3220,9 @@ impl Render for Strek {
             .on_action(cx.listener(Self::export_png))
             .on_action(cx.listener(Self::export_jpeg))
             .on_action(cx.listener(Self::export_webp))
+            .on_action(cx.listener(Self::copy_as_svg))
+            .on_action(cx.listener(Self::copy_as_png))
+            .on_action(cx.listener(Self::copy_as_webp))
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::show_command_palette))
             .on_action(cx.listener(Self::quit_application))
@@ -3172,7 +3346,7 @@ impl Render for Strek {
                 toolbar::DocumentHeader {
                     name: document_name,
                     location: document_location,
-                    dirty: self.editor.is_dirty(),
+                    dirty: self.document_is_dirty(),
                 },
                 tool,
                 toolbar::ZoomState {
@@ -3658,6 +3832,10 @@ fn main() {
                         MenuItem::action("Export PNG…", ExportPng),
                         MenuItem::action("Export JPEG…", ExportJpeg),
                         MenuItem::action("Export WebP…", ExportWebP),
+                        MenuItem::separator(),
+                        MenuItem::action("Copy as SVG", CopyAsSvg),
+                        MenuItem::action("Copy as PNG", CopyAsPng),
+                        MenuItem::action("Copy as WebP", CopyAsWebP),
                     ],
                 },
                 Menu {
@@ -3709,6 +3887,16 @@ fn main() {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn imported_svg_origin_requires_a_new_native_save_destination() {
+        let path = PathBuf::from("/tmp/logo.svg");
+        let origin = DocumentOrigin::ImportedSvg(path.clone());
+
+        assert_eq!(origin.source_path(), Some(path.as_path()));
+        assert_eq!(origin.native_path(), None);
+        assert!(origin.requires_native_save());
+    }
 
     #[test]
     fn canvas_input_uses_the_rendered_canvas_origin() {

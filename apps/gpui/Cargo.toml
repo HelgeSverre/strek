@@ -22,6 +22,7 @@ image = "0.25"
 lyon = "1.0"
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 rmcp = { version = "3.0.1", features = ["transport-io"] }
+roxmltree = "0.20"
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

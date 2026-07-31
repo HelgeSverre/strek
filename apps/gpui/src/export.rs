@@ -136,14 +136,18 @@ pub fn write_export(
     format: ExportFormat,
     snapshot: &ArtworkSnapshot,
 ) -> Result<(), ExportError> {
-    let bytes = encode(format, snapshot)?;
+    let bytes = encode_artwork(format, snapshot)?;
     document_io::write_atomic(path, &bytes).map_err(|source| ExportError::Write {
         path: path.to_path_buf(),
         source,
     })
 }
 
-fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, ExportError> {
+/// Encode one immutable artwork snapshot without writing it to disk.
+pub fn encode_artwork(
+    format: ExportFormat,
+    snapshot: &ArtworkSnapshot,
+) -> Result<Vec<u8>, ExportError> {
     let (view_min, size) = normalized_view_box(snapshot.bounds)?;
     let svg =
         render_svg::to_svg_string_export_with_view_box(&snapshot.display_list, view_min, size);
@@ -407,7 +411,7 @@ mod tests {
 
     #[test]
     fn svg_encoding_uses_the_artwork_bounds() {
-        let bytes = encode(ExportFormat::Svg, &snapshot()).unwrap();
+        let bytes = encode_artwork(ExportFormat::Svg, &snapshot()).unwrap();
         let svg = String::from_utf8(bytes).unwrap();
 
         assert!(svg.contains(r#"width="24" height="14""#));
@@ -416,7 +420,7 @@ mod tests {
 
     #[test]
     fn outlined_svg_converts_text_to_paths_and_preserves_the_view_box() {
-        let bytes = encode(ExportFormat::SvgOutlined, &text_snapshot()).unwrap();
+        let bytes = encode_artwork(ExportFormat::SvgOutlined, &text_snapshot()).unwrap();
         let svg = String::from_utf8(bytes).unwrap();
 
         assert!(!svg.contains("<text"));
@@ -428,7 +432,7 @@ mod tests {
 
     #[test]
     fn png_encoding_is_transparent_and_uses_artwork_dimensions() {
-        let bytes = encode(ExportFormat::Png, &snapshot()).unwrap();
+        let bytes = encode_artwork(ExportFormat::Png, &snapshot()).unwrap();
         let image = image::load_from_memory(&bytes).unwrap();
 
         assert_eq!(image.dimensions(), (24, 14));
@@ -437,7 +441,7 @@ mod tests {
 
     #[test]
     fn jpeg_encoding_is_rgb_and_composites_transparency_over_white() {
-        let bytes = encode(ExportFormat::Jpeg, &translucent_red_snapshot()).unwrap();
+        let bytes = encode_artwork(ExportFormat::Jpeg, &translucent_red_snapshot()).unwrap();
         assert_eq!(&bytes[..3], &[0xff, 0xd8, 0xff]);
 
         let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
@@ -459,7 +463,7 @@ mod tests {
 
     #[test]
     fn webp_encoding_is_lossless_and_preserves_straight_alpha() {
-        let bytes = encode(ExportFormat::WebP, &translucent_red_snapshot()).unwrap();
+        let bytes = encode_artwork(ExportFormat::WebP, &translucent_red_snapshot()).unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WEBP");
 
@@ -475,7 +479,7 @@ mod tests {
 
         for format in [ExportFormat::Png, ExportFormat::Jpeg, ExportFormat::WebP] {
             assert!(matches!(
-                encode(format, &snapshot),
+                encode_artwork(format, &snapshot),
                 Err(ExportError::RasterTooLarge {
                     width: 20_000,
                     height: 20_000
