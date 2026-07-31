@@ -133,6 +133,12 @@ actions!(
         PropertyToggleStroke,
         PropertyStrokeDown,
         PropertyStrokeUp,
+        ToggleCreationFill,
+        StartCreationFillColorInput,
+        ToggleCreationStroke,
+        StartCreationStrokeColorInput,
+        CreationStrokeDown,
+        CreationStrokeUp,
         TextLeft,
         TextRight,
         TextSelectLeft,
@@ -166,8 +172,15 @@ enum FileOperation {
     Exporting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorInputScope {
+    Selection,
+    Creation,
+}
+
 #[derive(Debug, Clone)]
 struct PropertyColorInput {
+    scope: ColorInputScope,
     target: properties_panel::ColorTarget,
     value: String,
     replace_on_type: bool,
@@ -390,7 +403,7 @@ impl Strek {
     }
 
     fn reset_document(&mut self) {
-        self.editor = Editor::new();
+        self.editor = editor_preserving_creation_styles(&self.editor, Editor::new());
         self.document_path = None;
         self.object_clipboard = None;
         self.text_image_cache = canvas::TextImageCache::default();
@@ -399,7 +412,8 @@ impl Strek {
     }
 
     fn replace_document(&mut self, document: editor_core::Document, path: PathBuf) {
-        self.editor = Editor::from_document(document);
+        self.editor =
+            editor_preserving_creation_styles(&self.editor, Editor::from_document(document));
         self.document_path = Some(path.clone());
         self.recent_files.record(&path);
         self.object_clipboard = None;
@@ -1751,7 +1765,12 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_property_color_input(properties_panel::ColorTarget::Fill, window, cx);
+        self.start_property_color_input(
+            ColorInputScope::Selection,
+            properties_panel::ColorTarget::Fill,
+            window,
+            cx,
+        );
     }
 
     fn start_stroke_color_input(
@@ -1760,11 +1779,17 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_property_color_input(properties_panel::ColorTarget::Stroke, window, cx);
+        self.start_property_color_input(
+            ColorInputScope::Selection,
+            properties_panel::ColorTarget::Stroke,
+            window,
+            cx,
+        );
     }
 
     fn start_property_color_input(
         &mut self,
+        scope: ColorInputScope,
         target: properties_panel::ColorTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1772,21 +1797,20 @@ impl Strek {
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
-        let paint = self
-            .editor
-            .selection()
-            .primary()
-            .and_then(|id| self.editor.document().get(id))
-            .and_then(|node| match target {
-                properties_panel::ColorTarget::Fill => node.style.fill.as_ref(),
-                properties_panel::ColorTarget::Stroke => {
-                    node.style.stroke.as_ref().map(|stroke| &stroke.paint)
-                }
-            })
-            .cloned()
-            .unwrap_or_else(editor_core::Paint::black);
+        let Some(style) = color_input_style(&self.editor, scope) else {
+            return;
+        };
+        let paint = match target {
+            properties_panel::ColorTarget::Fill => style.fill.as_ref(),
+            properties_panel::ColorTarget::Stroke => {
+                style.stroke.as_ref().map(|stroke| &stroke.paint)
+            }
+        }
+        .cloned()
+        .unwrap_or_else(editor_core::Paint::black);
         self.zoom_input = None;
         self.property_color_input = Some(PropertyColorInput {
+            scope,
             target,
             value: properties_panel::format_paint(&paint),
             replace_on_type: true,
@@ -1794,6 +1818,80 @@ impl Strek {
         });
         self.focus_handle.focus(window);
         cx.notify();
+    }
+
+    fn start_creation_fill_color_input(
+        &mut self,
+        _: &StartCreationFillColorInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_property_color_input(
+            ColorInputScope::Creation,
+            properties_panel::ColorTarget::Fill,
+            window,
+            cx,
+        );
+    }
+
+    fn start_creation_stroke_color_input(
+        &mut self,
+        _: &StartCreationStrokeColorInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_property_color_input(
+            ColorInputScope::Creation,
+            properties_panel::ColorTarget::Stroke,
+            window,
+            cx,
+        );
+    }
+
+    fn toggle_creation_fill(
+        &mut self,
+        _: &ToggleCreationFill,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.property_color_input = None;
+        if self.editor.toggle_creation_fill() {
+            cx.notify();
+        }
+    }
+
+    fn toggle_creation_stroke(
+        &mut self,
+        _: &ToggleCreationStroke,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.property_color_input = None;
+        if self.editor.toggle_creation_stroke() {
+            cx.notify();
+        }
+    }
+
+    fn creation_stroke_down(
+        &mut self,
+        _: &CreationStrokeDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.adjust_creation_stroke_width(-1.0) {
+            cx.notify();
+        }
+    }
+
+    fn creation_stroke_up(
+        &mut self,
+        _: &CreationStrokeUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.adjust_creation_stroke_width(1.0) {
+            cx.notify();
+        }
     }
 
     fn set_property_fill(&mut self, fill: Option<editor_core::Paint>, cx: &mut Context<Self>) {
@@ -2251,16 +2349,10 @@ impl Strek {
                     cx.stop_propagation();
                     return;
                 };
+                let scope = input.scope;
                 let target = input.target;
                 self.property_color_input = None;
-                let changed = match target {
-                    properties_panel::ColorTarget::Fill => {
-                        self.editor.set_selected_fill(Some(paint))
-                    }
-                    properties_panel::ColorTarget::Stroke => {
-                        self.editor.set_selected_stroke_paint(paint)
-                    }
-                };
+                let changed = apply_color_input(&mut self.editor, scope, target, paint);
                 if changed {
                     self.current_cursor = convert_cursor(self.editor.cursor());
                 }
@@ -2641,6 +2733,12 @@ impl Render for Strek {
             .on_action(cx.listener(Self::property_toggle_stroke))
             .on_action(cx.listener(Self::property_stroke_down))
             .on_action(cx.listener(Self::property_stroke_up))
+            .on_action(cx.listener(Self::toggle_creation_fill))
+            .on_action(cx.listener(Self::start_creation_fill_color_input))
+            .on_action(cx.listener(Self::toggle_creation_stroke))
+            .on_action(cx.listener(Self::start_creation_stroke_color_input))
+            .on_action(cx.listener(Self::creation_stroke_down))
+            .on_action(cx.listener(Self::creation_stroke_up))
             .on_action(cx.listener(Self::text_left))
             .on_action(cx.listener(Self::text_right))
             .on_action(cx.listener(Self::text_select_left))
@@ -2812,6 +2910,44 @@ fn editor_key_context(has_modal: bool, has_menu: bool, editing_text: bool) -> &'
         "StrekTextEditor"
     } else {
         "Strek"
+    }
+}
+
+fn editor_preserving_creation_styles(current: &Editor, mut replacement: Editor) -> Editor {
+    replacement.set_creation_style_defaults(current.creation_style_defaults().clone());
+    replacement
+}
+
+fn color_input_style(editor: &Editor, scope: ColorInputScope) -> Option<&editor_core::Style> {
+    match scope {
+        ColorInputScope::Selection => editor
+            .selection()
+            .primary()
+            .and_then(|id| editor.document().get(id))
+            .map(|node| &node.style),
+        ColorInputScope::Creation => editor.active_creation_style(),
+    }
+}
+
+fn apply_color_input(
+    editor: &mut Editor,
+    scope: ColorInputScope,
+    target: properties_panel::ColorTarget,
+    paint: editor_core::Paint,
+) -> bool {
+    match (scope, target) {
+        (ColorInputScope::Selection, properties_panel::ColorTarget::Fill) => {
+            editor.set_selected_fill(Some(paint))
+        }
+        (ColorInputScope::Selection, properties_panel::ColorTarget::Stroke) => {
+            editor.set_selected_stroke_paint(paint)
+        }
+        (ColorInputScope::Creation, properties_panel::ColorTarget::Fill) => {
+            editor.set_creation_fill(Some(paint))
+        }
+        (ColorInputScope::Creation, properties_panel::ColorTarget::Stroke) => {
+            editor.set_creation_stroke_paint(paint)
+        }
     }
 }
 
@@ -3068,6 +3204,70 @@ mod layout_tests {
         let mut value = "#12".to_owned();
         append_hex_input(&mut value, "g3f");
         assert_eq!(value, "#123F");
+    }
+
+    #[test]
+    fn creation_color_scope_does_not_mutate_the_lingering_selection() {
+        let mut editor = Editor::new();
+        let selected = editor
+            .document
+            .add_child(
+                editor.document.root,
+                editor_core::Node::shape(
+                    "Selected",
+                    editor_core::PathData::rect(0.0, 0.0, 10.0, 10.0),
+                ),
+            )
+            .unwrap();
+        editor.selection.select(selected);
+        assert!(editor.execute_action(EditorAction::ToolRectangle));
+        let selected_before = editor.document.get(selected).unwrap().style.clone();
+
+        assert!(apply_color_input(
+            &mut editor,
+            ColorInputScope::Creation,
+            properties_panel::ColorTarget::Fill,
+            editor_core::Paint::rgb(0.9, 0.1, 0.2),
+        ));
+
+        assert_eq!(
+            editor.document.get(selected).unwrap().style,
+            selected_before
+        );
+        assert_eq!(
+            editor.active_creation_style().unwrap().fill,
+            Some(editor_core::Paint::rgb(0.9, 0.1, 0.2))
+        );
+        assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn replacing_a_document_preserves_creation_styles_only_as_session_state() {
+        let mut current = Editor::new();
+        assert!(current.execute_action(EditorAction::ToolPen));
+        assert!(current.set_creation_stroke_paint(editor_core::Paint::rgb(0.2, 0.5, 0.9)));
+        let expected = current.creation_style_defaults().clone();
+
+        let document = editor_core::Document::new();
+        let root = document.root;
+        let mut replacement =
+            editor_preserving_creation_styles(&current, Editor::from_document(document));
+
+        assert_eq!(replacement.document.root, root);
+        assert_eq!(replacement.creation_style_defaults(), &expected);
+        assert!(!replacement.history.can_undo());
+        assert!(!replacement.is_dirty());
+        assert!(replacement.execute_action(EditorAction::ToolPen));
+        assert_eq!(
+            replacement
+                .active_creation_style()
+                .unwrap()
+                .stroke
+                .as_ref()
+                .unwrap()
+                .paint,
+            editor_core::Paint::rgb(0.2, 0.5, 0.9)
+        );
     }
 
     #[test]
