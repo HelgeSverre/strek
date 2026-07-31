@@ -2600,14 +2600,24 @@ impl Render for Strek {
         let text_layouts =
             canvas::shape_text_layouts(self.editor.document().text_items_for_layout(), window);
         self.editor.set_text_layouts(text_layouts);
-        let color_input =
-            self.property_color_input
-                .as_ref()
-                .map(|input| properties_panel::ColorInputSnapshot {
-                    target: input.target,
-                    value: input.value.clone(),
-                    invalid: input.invalid,
-                });
+        let color_input = self
+            .property_color_input
+            .as_ref()
+            .filter(|input| input.scope == ColorInputScope::Selection)
+            .map(|input| properties_panel::ColorInputSnapshot {
+                target: input.target,
+                value: input.value.clone(),
+                invalid: input.invalid,
+            });
+        let creation_color_input = self
+            .property_color_input
+            .as_ref()
+            .filter(|input| input.scope == ColorInputScope::Creation)
+            .map(|input| toolbar::CreationColorInputSnapshot {
+                target: input.target,
+                value: input.value.clone(),
+                invalid: input.invalid,
+            });
         let properties_snapshot = properties_panel::snapshot(&mut self.editor, color_input);
         let zoom_input = self
             .zoom_input
@@ -2835,7 +2845,11 @@ impl Render for Strek {
                             ))
                             .child(text_input::canvas_text_input(cx.entity().clone()))
                             .when_some(
-                                toolbar::render_context_bar(&self.editor, &self.keymap),
+                                toolbar::render_context_bar(
+                                    &self.editor,
+                                    &self.keymap,
+                                    creation_color_input,
+                                ),
                                 |canvas, bar| canvas.child(bar),
                             ),
                     )

@@ -920,14 +920,14 @@ pub(crate) fn parse_hex_paint(value: &str) -> Option<Paint> {
     ))
 }
 
-fn paint_as_rgba(paint: &Paint) -> u32 {
+pub(crate) fn paint_as_rgba(paint: &Paint) -> u32 {
     let Paint::Solid(channels) = paint;
     let [red, green, blue, alpha] =
         channels.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
     (red << 24) | (green << 16) | (blue << 8) | alpha
 }
 
-fn format_number(value: f32) -> String {
+pub(crate) fn format_number(value: f32) -> String {
     if (value.round() - value).abs() < 0.01 {
         format!("{value:.0}")
     } else {

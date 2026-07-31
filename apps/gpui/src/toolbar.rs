@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use editor_core::{Editor, EditorAction, InteractionKind, TextAlign, Tool};
+use editor_core::{Editor, EditorAction, InteractionKind, Paint, Style, TextAlign, Tool};
 use gpui::{
     anchored, div, point, prelude::*, px, rgb, rgba, Action, AnyElement, AnyView, App, Context,
     Corner, IntoElement, MouseButton, Render, SharedString, Window,
@@ -11,6 +11,7 @@ use gpui::{
 use crate::{
     assets::{icon, Icon},
     commands::{AppCommand, CommandTarget, Keymap},
+    properties_panel::{self, ColorTarget},
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
     BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
@@ -18,10 +19,11 @@ use crate::{
     ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool, Group, InvertSelection,
     JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
     RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool,
-    SendBackward, SendToBack, ShowCommandPalette, SplitPath, StartZoomInput, Strek, TextLarger,
-    TextSmaller, TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel,
-    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
-    ZoomResetAll, ZoomToFit, ZoomToSelection,
+    SendBackward, SendToBack, ShowCommandPalette, SplitPath, StartCreationFillColorInput,
+    StartCreationStrokeColorInput, StartZoomInput, Strek, TextLarger, TextSmaller, TextTool,
+    ToggleCreationFill, ToggleCreationStroke, ToggleDesignPanel, ToggleFrameBackground,
+    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, ZoomIn,
+    ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -111,6 +113,13 @@ pub struct ZoomInputSnapshot<'a> {
 pub struct ZoomState<'a> {
     pub level: f32,
     pub input: Option<ZoomInputSnapshot<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CreationColorInputSnapshot {
+    pub target: ColorTarget,
+    pub value: String,
+    pub invalid: bool,
 }
 
 pub struct MenuState<'a> {
@@ -296,7 +305,11 @@ pub fn render_header(
 }
 
 /// Context-sensitive property strip shown over the canvas.
-pub fn render_context_bar(editor: &Editor, keymap: &Keymap) -> Option<AnyElement> {
+pub(crate) fn render_context_bar(
+    editor: &Editor,
+    keymap: &Keymap,
+    color_input: Option<CreationColorInputSnapshot>,
+) -> Option<AnyElement> {
     if editor.interaction_kind() == InteractionKind::VectorEditing {
         return Some(
             context_panel()
@@ -331,6 +344,69 @@ pub fn render_context_bar(editor: &Editor, keymap: &Keymap) -> Option<AnyElement
                     TogglePathClosed,
                 ))
                 .child(context_primary_button("done", "Done", FinishEditing))
+                .into_any_element(),
+        );
+    }
+
+    if let Some((tool_label, style)) = creation_style_context(editor) {
+        let fill_input = color_input
+            .as_ref()
+            .filter(|input| input.target == ColorTarget::Fill);
+        let stroke_input = color_input
+            .as_ref()
+            .filter(|input| input.target == ColorTarget::Stroke);
+        let stroke_width = style.stroke.as_ref().map(|stroke| stroke.width);
+        return Some(
+            context_panel()
+                .child(context_label(tool_label))
+                .child(context_separator())
+                .child(context_toggle_text_button(
+                    "creation-fill-toggle",
+                    "Fill",
+                    "Toggle fill for new objects",
+                    style.fill.is_some(),
+                    ToggleCreationFill,
+                ))
+                .child(context_color_input(
+                    "creation-fill-color",
+                    style.fill.as_ref(),
+                    fill_input,
+                    "Set fill color for new objects",
+                    StartCreationFillColorInput,
+                ))
+                .child(context_separator())
+                .child(context_toggle_text_button(
+                    "creation-stroke-toggle",
+                    "Stroke",
+                    "Toggle stroke for new objects",
+                    stroke_width.is_some(),
+                    ToggleCreationStroke,
+                ))
+                .child(context_color_input(
+                    "creation-stroke-color",
+                    style.stroke.as_ref().map(|stroke| &stroke.paint),
+                    stroke_input,
+                    "Set stroke color for new objects",
+                    StartCreationStrokeColorInput,
+                ))
+                .child(context_text_button(
+                    "creation-stroke-down",
+                    "−",
+                    true,
+                    None,
+                    crate::CreationStrokeDown,
+                ))
+                .child(context_value(stroke_width.map_or_else(
+                    || "—".to_owned(),
+                    properties_panel::format_number,
+                )))
+                .child(context_text_button(
+                    "creation-stroke-up",
+                    "+",
+                    true,
+                    None,
+                    crate::CreationStrokeUp,
+                ))
                 .into_any_element(),
         );
     }
@@ -544,6 +620,78 @@ fn context_value(value: impl Into<SharedString>) -> impl IntoElement {
         .text_size(px(10.0))
         .text_align(gpui::TextAlign::Center)
         .child(value.into())
+}
+
+fn creation_style_context(editor: &Editor) -> Option<(&'static str, &Style)> {
+    let label = match editor.tool {
+        Tool::Rectangle => "Rectangle",
+        Tool::Ellipse => "Ellipse",
+        Tool::Line => "Line",
+        Tool::Pen => "Pen",
+        Tool::Select | Tool::Frame | Tool::Text | Tool::VectorEdit => return None,
+    };
+    Some((label, editor.active_creation_style()?))
+}
+
+fn context_color_input<A: Action + Clone>(
+    id: &'static str,
+    paint: Option<&Paint>,
+    input: Option<&CreationColorInputSnapshot>,
+    tooltip: &'static str,
+    action: A,
+) -> impl IntoElement {
+    let preview = input
+        .and_then(|input| properties_panel::parse_hex_paint(&input.value))
+        .or_else(|| paint.cloned());
+    let value = input.map_or_else(
+        || {
+            paint
+                .map(properties_panel::format_paint)
+                .unwrap_or_else(|| "None".to_owned())
+        },
+        |input| input.value.clone(),
+    );
+    let invalid = input.is_some_and(|input| input.invalid);
+
+    div()
+        .id(id)
+        .h(px(25.0))
+        .min_w(px(74.0))
+        .px(px(5.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(if invalid { 0xfca58f } else { BORDER }))
+        .bg(rgb(SURFACE))
+        .cursor_text()
+        .hover(|style| style.border_color(rgb(ACCENT)))
+        .child(
+            div()
+                .w(px(15.0))
+                .h(px(15.0))
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(preview
+                    .as_ref()
+                    .map(properties_panel::paint_as_rgba)
+                    .map(rgba)
+                    .unwrap_or_else(|| rgba(0x00000000))),
+        )
+        .child(
+            div()
+                .font_family("SFMono-Regular")
+                .text_size(px(9.0))
+                .text_color(rgb(if invalid { 0xfca58f } else { TEXT }))
+                .child(value),
+        )
+        .tooltip(editor_tooltip(tooltip, None))
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
+        })
 }
 
 fn context_separator() -> impl IntoElement {
@@ -1622,7 +1770,11 @@ fn menu_separator() -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{font_family_label, format_zoom_label, format_zoom_percentage, PortableFontFamily};
+    use super::{
+        creation_style_context, font_family_label, format_zoom_label, format_zoom_percentage,
+        PortableFontFamily,
+    };
+    use editor_core::{Editor, EditorAction, Node, Paint, PathData, Style};
 
     #[test]
     fn zoom_labels_preserve_decimal_percentages() {
@@ -1652,5 +1804,30 @@ mod tests {
         assert_eq!(font_family_label("sans-serif"), "System");
         assert_eq!(font_family_label("Custom Sans"), "Custom Sans");
         assert_eq!(font_family_label("  "), "Unknown");
+    }
+
+    #[test]
+    fn drawing_tool_context_uses_creation_style_despite_a_selection() {
+        let mut editor = Editor::new();
+        let selected_style = Style::fill(Paint::rgb(0.1, 0.2, 0.3));
+        let selected = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Selected", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(selected_style.clone()),
+            )
+            .unwrap();
+        editor.selection.select(selected);
+        assert!(editor.execute_action(EditorAction::ToolRectangle));
+        assert!(editor.set_creation_fill(Some(Paint::rgb(0.8, 0.2, 0.1))));
+
+        let (label, style) = creation_style_context(&editor).unwrap();
+
+        assert_eq!(label, "Rectangle");
+        assert_eq!(style.fill, Some(Paint::rgb(0.8, 0.2, 0.1)));
+        assert_eq!(editor.document.get(selected).unwrap().style, selected_style);
+        assert!(editor.execute_action(EditorAction::ToolText));
+        assert!(creation_style_context(&editor).is_none());
     }
 }
