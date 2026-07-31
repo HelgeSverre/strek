@@ -6181,6 +6181,28 @@ mod tests {
     }
 
     #[test]
+    fn small_group_drag_does_not_snap_to_its_own_children() {
+        let (mut editor, group, _, _) = editor_with_grouped_shapes();
+        let before = editor.document.world_transform(group);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(13.0, 14.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        assert_affine_approx_eq(
+            editor.document.world_transform(group),
+            Affine2::from_translation(Vec2::new(3.0, 4.0)) * before,
+        );
+    }
+
+    #[test]
     fn primary_modifier_drag_deep_selects_and_moves_only_the_child() {
         let (mut editor, group, first, second) = editor_with_grouped_shapes();
         let group_before = editor.document.world_transform(group);

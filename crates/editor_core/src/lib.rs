@@ -881,15 +881,16 @@ impl Document {
         }
     }
 
-    /// Get all snap points from nodes except the given excluded nodes.
+    /// Get all snap points outside the given excluded subtrees.
     pub fn all_snap_points(&mut self, exclude: &[NodeId]) -> Vec<snap::SnapPoint> {
         let mut points = Vec::new();
+        let excluded: HashSet<_> = exclude.iter().copied().collect();
 
         // Collect all visible, non-group nodes
         let ids: Vec<NodeId> = self
             .descendants(self.root)
             .filter(|&id| {
-                if exclude.contains(&id) {
+                if excluded.contains(&id) || self.has_selected_ancestor(id, &excluded) {
                     return false;
                 }
                 if let Some(node) = self.nodes.get(id) {
