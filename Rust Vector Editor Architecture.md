@@ -1,5 +1,8 @@
 # Rust Vector Editor Architecture
 
+> Historical design transcript. The current implementation and `SPEC.md` are
+> authoritative; the experimental web frontend described below has been retired.
+
 ## PROMPT 1
 
 Using rust, (not focusing on any gui lib) how would we architect and model a simple 'vector editor' (think figma, but without 99% of yhe features, just groups/layers, text/font, and light editing/positioning, basic autolayout-type automatic al7gnment, honna primarily be used for creating logos and icons.
@@ -1343,4 +1346,3 @@ If you want the next step, tell me which path you prefer first:
     
 
 Either way I can give you a “first milestone checklist” with the exact minimum structs/functions to implement.
-

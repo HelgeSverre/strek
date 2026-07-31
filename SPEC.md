@@ -30,15 +30,12 @@ The editor follows a three-layer architecture with strict separation of concerns
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        FRONTENDS                                │
-│  ┌─────────────────────┐       ┌─────────────────────┐          │
-│  │   Desktop (winit)   │       │    Web (wasm)       │          │
-│  │   + wgpu renderer   │       │   + SVG renderer    │          │
-│  └──────────┬──────────┘       └──────────┬──────────┘          │
-└─────────────┼──────────────────────────────┼────────────────────┘
-              │ EditorEvent                  │ EditorEvent
-              │ DisplayList                  │ DisplayList
-              ▼                              ▼
+│                         FRONTEND                                │
+│              GPUI product shell + native input                 │
+│              (winit/wgpu kept as a test harness)               │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ InputEvent / DisplayList
+                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      EDITOR CORE                                │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
@@ -132,22 +129,21 @@ vector-editor/
 │   │   └── src/
 │   │       └── lib.rs            # wgpu + lyon tessellation
 │   │
-│   └── render_svg/               # Web SVG renderer
+│   └── render_svg/               # SVG export renderer
 │       ├── Cargo.toml
 │       └── src/
 │           └── lib.rs            # SVG string generation
 │
 └── apps/
-    ├── desktop/                  # winit application
+    ├── gpui/                     # Primary product UI
+    │   ├── Cargo.toml
+    │   └── src/
+    │       └── main.rs           # GPUI shell, menus, native input
+    │
+    └── desktop/                  # Legacy wgpu renderer harness
     │   ├── Cargo.toml
     │   └── src/
     │       └── main.rs           # Event loop, window management
-    │
-    └── web/                      # wasm-bindgen application
-        ├── Cargo.toml
-        ├── src/
-        │   └── lib.rs            # WASM entry, DOM events, RAF loop
-        └── index.html            # HTML shell
 ```
 
 ### Cargo Workspace Configuration
@@ -161,7 +157,7 @@ members = [
     "crates/render_wgpu",
     "crates/render_svg",
     "apps/desktop",
-    "apps/web",
+    "apps/gpui",
 ]
 resolver = "2"
 
@@ -303,10 +299,7 @@ pub struct FrameData {
     /// Explicit height in local units
     pub height: f32,
 
-    /// Clip children to frame bounds
-    pub clip_content: bool,
-
-    /// Optional background (rendered behind children)
+    /// Optional background (white by default)
     pub background: Option<Paint>,
 }
 
@@ -315,8 +308,7 @@ impl Default for FrameData {
         Self {
             width: 100.0,
             height: 100.0,
-            clip_content: false,
-            background: None,
+            background: Some(Paint::white()),
         }
     }
 }
@@ -930,14 +922,7 @@ pub enum DisplayItem {
         transform: Affine2,
         opacity: f32,
     },
-    /// Begin a clipping region (for Frame with clip_content=true)
-    BeginClip {
-        path: PathData,
-        transform: Affine2,
-    },
-    /// End current clipping region
-    EndClip,
-    // Future: blend modes, filters
+    // Future: explicit masks, blend modes, filters
 }
 
 #[derive(Debug, Clone)]
@@ -982,8 +967,7 @@ impl Document {
                             opacity,
                         });
                     }
-                    // Note: BeginClip/EndClip wrapping children requires
-                    // tree-aware traversal (see implementation for details)
+                    // Frames are unclipped artboards by default.
                 }
                 NodeKind::Shape(path) => {
                     if let Some(fill) = &node.style.fill {
@@ -1296,47 +1280,11 @@ fn main() {
 }
 ```
 
-### 13.2 Web (wasm-bindgen)
+### 13.2 GPUI
 
-```rust
-// apps/web/src/lib.rs
-use wasm_bindgen::prelude::*;
-use std::{cell::RefCell, rc::Rc};
-use editor_core::{Editor, EditorEvent};
-
-#[wasm_bindgen(start)]
-pub fn start() -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
-
-    let window = web_sys::window().unwrap();
-    let document = window.document().unwrap();
-    let root = document.get_element_by_id("app").unwrap();
-
-    // Create SVG container
-    let svg = create_svg_element(&document)?;
-    root.append_child(&svg)?;
-
-    let editor = Rc::new(RefCell::new(Editor::new()));
-    let dirty = Rc::new(RefCell::new(true));
-
-    // Attach pointer event handlers
-    attach_pointer_handlers(&svg, editor.clone(), dirty.clone())?;
-
-    // Start render loop
-    start_render_loop(editor, dirty, svg)?;
-
-    Ok(())
-}
-
-fn start_render_loop(
-    editor: Rc<RefCell<Editor>>,
-    dirty: Rc<RefCell<bool>>,
-    svg: web_sys::SvgsvgElement,
-) -> Result<(), JsValue> {
-    // requestAnimationFrame loop
-    // If dirty, regenerate SVG and set innerHTML
-}
-```
+GPUI is the primary product frontend. It owns the Figma/Lunacy-style chrome,
+native text input bridge, pointer translation, and painting of the shared
+display list. The winit/wgpu app remains a renderer harness only.
 
 ---
 
@@ -1348,7 +1296,7 @@ Simple JSON serialization of the document:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "root": "node_0",
   "nodes": {
     "node_0": {
@@ -1370,7 +1318,6 @@ Simple JSON serialization of the document:
         "Frame": {
           "width": 24,
           "height": 24,
-          "clip_content": true,
           "background": { "Solid": [1.0, 1.0, 1.0, 1.0] }
         }
       },
@@ -1456,17 +1403,8 @@ pub fn export_svg(doc: &Document, frame_id: Option<NodeId>) -> String {
                         frame.width, frame.height, paint_to_css(bg)
                     ));
                 }
-                // Wrap children in clipPath if clipping
-                if frame.clip_content {
-                    svg.push_str(&format!(
-                        r#"<g clip-path="url(#clip-{})">"#, id.0
-                    ));
-                }
                 for &child in &node.children {
                     export_node(doc, child, svg);
-                }
-                if frame.clip_content {
-                    svg.push_str("</g>");
                 }
             }
             NodeKind::Shape(path) => {
@@ -1780,14 +1718,11 @@ slotmap = "1.0"         # Generational arena
 serde = "1.0"           # Serialization
 serde_json = "1.0"      # JSON format
 
-# Desktop
+# Product frontend
+gpui = "0.1"
+
+# Legacy renderer harness
 winit = "0.30"          # Windowing
 wgpu = "23.0"           # GPU rendering
 lyon = "1.0"            # Path tessellation
-# fontdue or cosmic-text for text
-
-# Web
-wasm-bindgen = "0.2"
-web-sys = "0.3"
-console_error_panic_hook = "0.1"
 ```
