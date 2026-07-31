@@ -627,6 +627,10 @@ fn paint_affine_text(
     let Some(rendered) = affine_text_svg(text, &layout, transform, opacity) else {
         return;
     };
+    let canvas_size = Vec2::new(canvas_bounds.size.width.0, canvas_bounds.size.height.0);
+    if !affine_text_intersects_canvas(rendered.min, rendered.size, canvas_size) {
+        return;
+    }
     let raster_scale = window.scale_factor() * 2.0;
     let Some((raster_width, raster_height)) = affine_text_raster_dimensions(
         rendered.size,
@@ -639,8 +643,9 @@ fn paint_affine_text(
     let key = format!("{}x{}:{}", raster_width, raster_height, rendered.svg);
 
     let image = text_cache.get(&key).or_else(|| {
-        let byte_len = u64::from(raster_width) * u64::from(raster_height) * 4;
-        if !text_cache.prepare_insert(byte_len, window) {
+        let image_byte_len = u64::from(raster_width) * u64::from(raster_height) * 4;
+        let cache_byte_len = image_byte_len.saturating_add(key.len() as u64);
+        if !text_cache.prepare_insert(cache_byte_len, window) {
             log::warn!("transformed text cache budget exhausted; skipping an uncached raster");
             return None;
         }
@@ -649,7 +654,7 @@ fn paint_affine_text(
         premultiplied_rgba_to_unpremultiplied_bgra(&mut pixels);
         let buffer = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
         let image = Arc::new(RenderImage::new(smallvec![Frame::new(buffer)]));
-        text_cache.insert(key, image.clone(), byte_len);
+        text_cache.insert(key, image.clone(), cache_byte_len);
         Some(image)
     });
     let Some(image) = image else {
@@ -660,6 +665,16 @@ fn paint_affine_text(
         size: gpui::size(px(rendered.size.x), px(rendered.size.y)),
     };
     let _ = window.paint_image(image_bounds, Corners::default(), image, 0, false);
+}
+
+fn affine_text_intersects_canvas(min: Vec2, size: Vec2, canvas_size: Vec2) -> bool {
+    min.is_finite()
+        && size.is_finite()
+        && canvas_size.is_finite()
+        && size.cmpgt(Vec2::ZERO).all()
+        && canvas_size.cmpgt(Vec2::ZERO).all()
+        && min.cmplt(canvas_size).all()
+        && (min + size).cmpgt(Vec2::ZERO).all()
 }
 
 fn affine_text_raster_dimensions(
@@ -1323,5 +1338,26 @@ mod tests {
             affine_text_raster_dimensions(Vec2::new(f32::INFINITY, 10.0), 1.0, 1_000, 50_000),
             None
         );
+    }
+
+    #[test]
+    fn affine_text_rasters_only_when_they_intersect_the_canvas() {
+        let canvas = Vec2::new(800.0, 600.0);
+
+        assert!(affine_text_intersects_canvas(
+            Vec2::new(-10.0, 20.0),
+            Vec2::new(20.0, 20.0),
+            canvas
+        ));
+        assert!(!affine_text_intersects_canvas(
+            Vec2::new(800.0, 20.0),
+            Vec2::new(20.0, 20.0),
+            canvas
+        ));
+        assert!(!affine_text_intersects_canvas(
+            Vec2::new(20.0, -20.0),
+            Vec2::new(20.0, 20.0),
+            canvas
+        ));
     }
 }
