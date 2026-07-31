@@ -1059,6 +1059,9 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
         self.show_layer_panel = !self.show_layer_panel;
         self.open_menu = None;
         cx.notify();
