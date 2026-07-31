@@ -199,6 +199,7 @@ struct VectorEditor {
     layers_panel_width: f32,
     design_panel_width: f32,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
+    layer_context_menu: Option<layer_panel::LayerContextMenu>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
     canvas_input_bounds: Option<Bounds<gpui::Pixels>>,
@@ -226,6 +227,7 @@ impl VectorEditor {
             layers_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             design_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             layer_name_input: None,
+            layer_context_menu: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
             canvas_input_bounds: None,
@@ -973,11 +975,12 @@ impl VectorEditor {
         self.property_color_input = None;
         self.zoom_input = None;
         let menu_closed = self.open_menu.take().is_some();
+        let layer_menu_closed = self.layer_context_menu.take().is_some();
         let executed = self.editor.execute_action(action);
         if executed {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
-        if executed || menu_closed {
+        if executed || menu_closed || layer_menu_closed {
             cx.notify();
         }
     }
@@ -2104,7 +2107,7 @@ impl VectorEditor {
     }
 
     fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.open_menu.take().is_some() {
+        if self.layer_context_menu.take().is_some() || self.open_menu.take().is_some() {
             cx.notify();
         } else {
             let effects = self.editor.handle_event(editor_core::InputEvent::KeyDown {
@@ -2476,7 +2479,7 @@ impl Render for VectorEditor {
                 || self.layer_name_input.is_some()
                 || self.property_color_input.is_some()
                 || self.zoom_input.is_some(),
-            self.open_menu.is_some(),
+            self.open_menu.is_some() || self.layer_context_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
         let selection_count = self.editor.selection().len();
@@ -2490,6 +2493,7 @@ impl Render for VectorEditor {
             design: show_design_panel,
         };
         let layer_name_input = self.layer_name_input.clone();
+        let layer_context_menu = self.layer_context_menu;
         let command_palette = self.command_palette.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
@@ -2780,6 +2784,14 @@ impl Render for VectorEditor {
                         keymap: &self.keymap,
                     },
                     window_size.width.0,
+                    cx,
+                ))
+            })
+            .when_some(layer_context_menu, |root, menu| {
+                root.child(layer_panel::render_layer_context_menu(
+                    menu,
+                    &self.editor,
+                    &self.keymap,
                     cx,
                 ))
             })

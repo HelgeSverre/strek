@@ -1,23 +1,111 @@
 //! Layer panel UI component.
 
-use editor_core::{LayerEntry, LayerIcon, NodeId};
+use std::borrow::BorrowMut;
+
+use editor_core::{Editor, EditorAction, LayerEntry, LayerIcon, NodeId};
 use gpui::{
-    div, prelude::*, px, rgb, rgba, Context, Entity, MouseButton, Render, SharedString,
-    StatefulInteractiveElement, Window,
+    anchored, div, prelude::*, px, rgb, rgba, Action, Context, Corner, Entity, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, SharedString, StatefulInteractiveElement, Window,
 };
 
 use crate::{
     assets::{icon, Icon},
+    commands::{CommandTarget, Keymap},
     layer_name_input::LayerNameInput,
     properties_panel::{self, PropertiesSnapshot},
     toolbar::editor_tooltip,
-    VectorEditor,
+    Delete, Duplicate, Group, Ungroup, VectorEditor,
 };
 
 pub const DEFAULT_PANEL_WIDTH: f32 = 248.0;
 pub const MIN_PANEL_WIDTH: f32 = 180.0;
 pub const MAX_PANEL_WIDTH: f32 = 420.0;
 pub const MIN_CANVAS_WIDTH: f32 = 320.0;
+
+const CONTEXT_MENU_WIDTH: f32 = 224.0;
+
+/// Layer and window-space anchor for the currently open layer-row menu.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LayerContextMenu {
+    target: NodeId,
+    position: Point<Pixels>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextSelectionPolicy {
+    Preserve,
+    SelectTarget,
+    TargetUnavailable,
+}
+
+fn context_selection_policy(
+    target_selected: bool,
+    target_editable: bool,
+) -> ContextSelectionPolicy {
+    if target_selected {
+        ContextSelectionPolicy::Preserve
+    } else if target_editable {
+        ContextSelectionPolicy::SelectTarget
+    } else {
+        ContextSelectionPolicy::TargetUnavailable
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LayerMenuAvailability {
+    duplicate: bool,
+    group: bool,
+    ungroup: bool,
+    delete: bool,
+}
+
+fn layer_menu_availability(editor: &Editor, target: NodeId) -> LayerMenuAvailability {
+    if !editor.selection().contains(target) {
+        return LayerMenuAvailability::default();
+    }
+
+    LayerMenuAvailability {
+        duplicate: editor.can_execute(EditorAction::Duplicate),
+        group: editor.can_execute(EditorAction::Group),
+        ungroup: editor.can_execute(EditorAction::Ungroup),
+        delete: editor.can_execute(EditorAction::Delete),
+    }
+}
+
+impl VectorEditor {
+    fn open_layer_context_menu(
+        &mut self,
+        target: NodeId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_layer_rename(true, cx);
+        self.open_menu = None;
+        let target_selected = self.editor.selection().contains(target);
+        let target_editable = self.editor.document().is_effectively_editable(target);
+        match context_selection_policy(target_selected, target_editable) {
+            ContextSelectionPolicy::Preserve => {}
+            ContextSelectionPolicy::SelectTarget => self.editor.select_layer(target, false),
+            ContextSelectionPolicy::TargetUnavailable => return,
+        }
+        if !self.editor.selection().contains(target) {
+            return;
+        }
+        self.layer_context_menu = Some(LayerContextMenu { target, position });
+        cx.notify();
+    }
+
+    fn close_layer_context_menu_from_mouse(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.layer_context_menu = None;
+        cx.stop_propagation();
+        cx.notify();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelSide {
@@ -96,6 +184,143 @@ pub fn render_layers_panel(
                 .children(rows),
         )
         .child(panel_resize_handle(PanelSide::Layers))
+}
+
+/// Render the window-level menu for a layer row.
+pub(crate) fn render_layer_context_menu(
+    menu: LayerContextMenu,
+    editor: &Editor,
+    keymap: &Keymap,
+    cx: &mut Context<VectorEditor>,
+) -> impl IntoElement {
+    let availability = layer_menu_availability(editor, menu.target);
+    let title = editor
+        .document()
+        .get(menu.target)
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| "Layer".to_owned());
+
+    div()
+        .id("layer-context-menu-scrim")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .on_any_mouse_down(cx.listener(VectorEditor::close_layer_context_menu_from_mouse))
+        .child(
+            anchored()
+                .anchor(Corner::TopLeft)
+                .position(menu.position)
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("layer-context-menu")
+                        .w(px(CONTEXT_MENU_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .py(px(6.0))
+                        .bg(rgb(0x292a2e))
+                        .border_1()
+                        .border_color(rgb(0x414349))
+                        .rounded(px(8.0))
+                        .shadow_lg()
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .px(px(12.0))
+                                .pt(px(3.0))
+                                .pb(px(6.0))
+                                .overflow_hidden()
+                                .text_color(rgb(0xf1f3f4))
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(layer_action_menu_item(
+                            "Duplicate",
+                            shortcut_for(keymap, EditorAction::Duplicate),
+                            availability.duplicate,
+                            Duplicate,
+                            cx,
+                        ))
+                        .child(layer_action_menu_item(
+                            "Group Selection",
+                            shortcut_for(keymap, EditorAction::Group),
+                            availability.group,
+                            Group,
+                            cx,
+                        ))
+                        .child(layer_action_menu_item(
+                            "Ungroup Selection",
+                            shortcut_for(keymap, EditorAction::Ungroup),
+                            availability.ungroup,
+                            Ungroup,
+                            cx,
+                        ))
+                        .child(layer_menu_separator())
+                        .child(layer_action_menu_item(
+                            "Delete",
+                            shortcut_for(keymap, EditorAction::Delete),
+                            availability.delete,
+                            Delete,
+                            cx,
+                        )),
+                ),
+        )
+}
+
+fn shortcut_for(keymap: &Keymap, action: EditorAction) -> SharedString {
+    keymap
+        .shortcut_label(CommandTarget::Editor(action))
+        .unwrap_or_default()
+        .into()
+}
+
+fn layer_action_menu_item<A: Action + Clone>(
+    label: &'static str,
+    shortcut: SharedString,
+    enabled: bool,
+    action: A,
+    cx: &mut Context<VectorEditor>,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!(
+            "layer-menu-item-{}",
+            label.replace(' ', "-").to_lowercase()
+        )))
+        .h(px(28.0))
+        .mx(px(5.0))
+        .px(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(4.0))
+        .opacity(if enabled { 1.0 } else { 0.35 })
+        .text_size(px(11.0))
+        .text_color(rgb(0xf1f3f4))
+        .child(div().flex_1().child(label))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(0xa8abb2))
+                .child(shortcut),
+        )
+        .when(enabled, |item| {
+            item.cursor_pointer()
+                .hover(|style| style.bg(rgb(0x35363b)))
+                .on_click(cx.listener(move |editor, _, window, cx| {
+                    editor.layer_context_menu = None;
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(action.clone()), cx.borrow_mut());
+                    cx.notify();
+                }))
+        })
+}
+
+fn layer_menu_separator() -> impl IntoElement {
+    div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(0x414349))
 }
 
 /// Render the persistent design inspector on the right side of the window.
@@ -239,6 +464,8 @@ fn render_layer_entry(
     let expand_id = entry.id;
     let visibility_id = entry.id;
     let lock_id = entry.id;
+    let context_menu_id = entry.id;
+    let more_menu_id = entry.id;
     let expand_tooltip = if entry.expanded {
         format!("Collapse {}", entry.name)
     } else {
@@ -293,6 +520,13 @@ fn render_layer_entry(
                 if editor.drop_layer_on(dragged.id, drop_target) {
                     cx.notify();
                 }
+                cx.stop_propagation();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |editor, event: &MouseDownEvent, _window, cx| {
+                editor.open_layer_context_menu(context_menu_id, event.position, cx);
                 cx.stop_propagation();
             }),
         )
@@ -352,6 +586,33 @@ fn render_layer_entry(
                 .when_some(name_input, |name, input| name.child(input))
                 .when(!is_renaming, |name| name.child(entry.name.clone())),
         )
+        // Explicit context-menu trigger for discoverability.
+        .child(
+            div()
+                .id(SharedString::from(format!("more-{:?}", entry.id)))
+                .w(px(24.0))
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xa8abb2))
+                .opacity(0.55)
+                .child("•••")
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x35363b)).opacity(1.0))
+                .tooltip(editor_tooltip("Layer actions", None))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(
+                    cx.listener(move |editor, event: &gpui::ClickEvent, _window, cx| {
+                        editor.open_layer_context_menu(more_menu_id, event.down.position, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+        )
         // Visibility toggle
         .child(
             div()
@@ -410,4 +671,69 @@ fn render_layer_entry(
                     cx.notify();
                 })),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use editor_core::{Document, Editor, Node, PathData};
+
+    use super::{
+        context_selection_policy, layer_menu_availability, ContextSelectionPolicy,
+        LayerMenuAvailability,
+    };
+
+    #[test]
+    fn context_selection_preserves_multiselect_and_replaces_only_editable_targets() {
+        assert_eq!(
+            context_selection_policy(true, true),
+            ContextSelectionPolicy::Preserve
+        );
+        assert_eq!(
+            context_selection_policy(true, false),
+            ContextSelectionPolicy::Preserve
+        );
+        assert_eq!(
+            context_selection_policy(false, true),
+            ContextSelectionPolicy::SelectTarget
+        );
+        assert_eq!(
+            context_selection_policy(false, false),
+            ContextSelectionPolicy::TargetUnavailable
+        );
+    }
+
+    #[test]
+    fn context_actions_are_scoped_to_the_target_selection() {
+        let mut document = Document::new();
+        let first = document
+            .add_child(
+                document.root,
+                Node::shape("First", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let second = document
+            .add_child(
+                document.root,
+                Node::shape("Second", PathData::rect(20.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let mut editor = Editor::from_document(document);
+        editor.select_layer(first, false);
+
+        assert_eq!(
+            layer_menu_availability(&editor, second),
+            LayerMenuAvailability::default()
+        );
+
+        editor.select_layer(second, true);
+        assert_eq!(
+            layer_menu_availability(&editor, first),
+            LayerMenuAvailability {
+                duplicate: true,
+                group: true,
+                ungroup: false,
+                delete: true,
+            }
+        );
+    }
 }
