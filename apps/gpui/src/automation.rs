@@ -5,13 +5,14 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{mpsc::SyncSender, Arc};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,10 @@ const CONNECTION_WORKERS: usize = 4;
 const MAX_QUEUED_CONNECTIONS: usize = 16;
 #[cfg(unix)]
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+#[cfg(unix)]
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(unix)]
+const EXECUTION_HEARTBEAT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -237,6 +242,50 @@ pub(crate) struct PendingRequest {
     request: AutomationRequest,
     responder: SyncSender<AutomationResponse>,
     deadline: Instant,
+    lifecycle: Arc<RequestLifecycle>,
+}
+
+const REQUEST_PENDING: u8 = 0;
+const REQUEST_EXECUTING: u8 = 1;
+const REQUEST_CANCELLED: u8 = 2;
+const REQUEST_COMPLETED: u8 = 3;
+
+struct RequestLifecycle(AtomicU8);
+
+impl RequestLifecycle {
+    fn pending() -> Self {
+        Self(AtomicU8::new(REQUEST_PENDING))
+    }
+
+    fn begin_execution(&self) -> bool {
+        self.0
+            .compare_exchange(
+                REQUEST_PENDING,
+                REQUEST_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel_pending(&self) -> bool {
+        self.0
+            .compare_exchange(
+                REQUEST_PENDING,
+                REQUEST_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn state(&self) -> u8 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn complete(&self) {
+        self.0.store(REQUEST_COMPLETED, Ordering::Release);
+    }
 }
 
 #[cfg(unix)]
@@ -251,10 +300,16 @@ impl PendingRequest {
         make_response: impl FnOnce(AutomationRequest) -> AutomationResponse,
     ) -> bool {
         if Instant::now() >= self.deadline {
+            self.lifecycle.cancel_pending();
+            return false;
+        }
+        if !self.lifecycle.begin_execution() {
             return false;
         }
         let response = make_response(self.request);
-        self.responder.send(response).is_ok()
+        let sent = self.responder.send(response).is_ok();
+        self.lifecycle.complete();
+        sent
     }
 }
 
@@ -380,37 +435,73 @@ fn serve_connection(
         }
     };
     let (response_sender, response_receiver) = mpsc::sync_channel(1);
+    let lifecycle = Arc::new(RequestLifecycle::pending());
     sender
         .send(PendingRequest {
             request,
             responder: response_sender,
             deadline,
+            lifecycle: Arc::clone(&lifecycle),
         })
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Strek window closed"))?;
-    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-        write_protocol_error(
-            &mut stream,
-            "Strek did not process the automation request in time",
-        )?;
-        return Ok(());
-    };
-    let response = match response_receiver.recv_timeout(remaining) {
-        Ok(response) => response,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+    let response = match wait_for_response(&mut stream, response_receiver, &lifecycle, deadline)? {
+        Some(response) => response,
+        None => {
             write_protocol_error(
                 &mut stream,
                 "Strek did not process the automation request in time",
             )?;
             return Ok(());
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Strek closed before processing the automation request",
-            ));
-        }
     };
     write_json_line(&mut stream, &response)
+}
+
+#[cfg(unix)]
+fn wait_for_response(
+    stream: &mut std::os::unix::net::UnixStream,
+    response_receiver: mpsc::Receiver<AutomationResponse>,
+    lifecycle: &RequestLifecycle,
+    deadline: Instant,
+) -> io::Result<Option<AutomationResponse>> {
+    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        match response_receiver.recv_timeout(remaining) {
+            Ok(response) => return Ok(Some(response)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(closed_before_response());
+            }
+        }
+    }
+
+    if lifecycle.cancel_pending() || lifecycle.state() == REQUEST_CANCELLED {
+        return Ok(None);
+    }
+
+    if !matches!(lifecycle.state(), REQUEST_EXECUTING | REQUEST_COMPLETED) {
+        return Err(io::Error::other("invalid automation request lifecycle"));
+    }
+
+    // A space is valid leading JSON whitespace and also keeps the client read
+    // deadline alive while an already-started UI mutation finishes.
+    loop {
+        stream.write_all(b" ")?;
+        match response_receiver.recv_timeout(EXECUTION_HEARTBEAT) {
+            Ok(response) => return Ok(Some(response)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(closed_before_response());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn closed_before_response() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Strek closed before processing the automation request",
+    )
 }
 
 #[cfg(unix)]
@@ -499,10 +590,7 @@ pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, 
         stream
             .write_all(&request_line)
             .map_err(|error| error.to_string())?;
-        let mut response_json = String::new();
-        BufReader::new(stream)
-            .read_line(&mut response_json)
-            .map_err(|error| error.to_string())?;
+        let response_json = read_response_line(stream).map_err(|error| error.to_string())?;
         serde_json::from_str(&response_json)
             .map_err(|error| format!("invalid response from Strek: {error}"))
     }
@@ -512,6 +600,30 @@ pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, 
         let _ = request;
         Err("Strek automation currently requires a Unix-domain socket".to_owned())
     }
+}
+
+#[cfg(unix)]
+fn read_response_line(reader: impl Read) -> io::Result<String> {
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::with_capacity(4096);
+    reader
+        .by_ref()
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut bytes)?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("automation response exceeds {MAX_RESPONSE_BYTES} bytes"),
+        ));
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "automation response ended before a newline",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
 #[cfg(unix)]
@@ -873,6 +985,7 @@ mod tests {
             deadline: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .expect("one second before now should be representable"),
+            lifecycle: Arc::new(RequestLifecycle::pending()),
         };
 
         assert!(!pending.respond_with(|_| {
@@ -884,6 +997,40 @@ mod tests {
             response.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn executing_request_cannot_be_cancelled_as_timed_out() {
+        let (responder, response) = std::sync::mpsc::sync_channel(1);
+        let lifecycle = Arc::new(RequestLifecycle::pending());
+        let pending = PendingRequest {
+            request: AutomationRequest::State,
+            responder,
+            deadline: Instant::now() + Duration::from_secs(1),
+            lifecycle: Arc::clone(&lifecycle),
+        };
+        let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(0);
+        let (finish_sender, finish_receiver) = std::sync::mpsc::sync_channel(0);
+
+        let worker = std::thread::spawn(move || {
+            pending.respond_with(|_| {
+                started_sender.send(()).unwrap();
+                finish_receiver.recv().unwrap();
+                AutomationResponse {
+                    ok: true,
+                    message: None,
+                    state: None,
+                }
+            })
+        });
+        started_receiver.recv().unwrap();
+
+        assert!(!lifecycle.cancel_pending());
+        assert_eq!(lifecycle.state(), REQUEST_EXECUTING);
+        finish_sender.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert!(response.recv().unwrap().ok);
+        assert_eq!(lifecycle.state(), REQUEST_COMPLETED);
     }
 
     #[cfg(unix)]
@@ -924,6 +1071,27 @@ mod tests {
         assert!(serialize_request_line(&request)
             .expect_err("oversized request should be rejected")
             .contains("exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_reader_requires_a_bounded_newline_terminated_message() {
+        let valid = read_response_line(io::Cursor::new(b" {\"ok\":true}\n")).unwrap();
+        assert_eq!(valid, " {\"ok\":true}\n");
+
+        let oversized = vec![b'x'; MAX_RESPONSE_BYTES + 1];
+        assert_eq!(
+            read_response_line(io::Cursor::new(oversized))
+                .expect_err("oversized response should fail")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_response_line(io::Cursor::new(b"{\"ok\":true}"))
+                .expect_err("unterminated response should fail")
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[cfg(unix)]
