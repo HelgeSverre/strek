@@ -1,0 +1,13 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "homebrew"]
+tap = "helgesverre/homebrew-tap"
+publish-jobs = ["homebrew"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+packages = ["strek"]
+precise-builds = true
+pr-run-mode = "skip"

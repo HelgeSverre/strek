@@ -40,6 +40,15 @@ primary frontend:
 just run-legacy
 ```
 
+## Install
+
+Tagged releases provide macOS binaries for Apple Silicon and Intel. After the
+first release, install Strek from Homebrew:
+
+```sh
+brew install helgesverre/tap/strek
+```
+
 ## Keyboard and pointer controls
 
 `Primary` means `⌘` on macOS and `Ctrl` on other platforms.
@@ -97,6 +106,11 @@ just test    # library tests
 just lint    # Clippy with warnings denied
 just format  # format the workspace
 ```
+
+Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and
+publish the `strek` formula to `helgesverre/homebrew-tap`. The repository needs
+a `HOMEBREW_TAP_TOKEN` Actions secret with write access to that tap before the
+first release.
 
 ## Package for macOS
 
