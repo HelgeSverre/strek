@@ -1,8 +1,22 @@
-# Strek
+<p align="center">
+  <img src="apps/gpui/assets/app-icon.png" width="144" height="144" alt="Strek app icon">
+</p>
 
-Strek is an experimental native vector editor written in Rust. The primary frontend is
-the GPUI desktop application in `apps/gpui`, with a workspace of reusable editor,
-rendering, and export crates underneath it.
+<h1 align="center">Strek</h1>
+
+<p align="center">
+  A native, automation-ready vector editor for logos and icons, built in Rust with GPUI.
+</p>
+
+<p align="center">
+  <a href="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml"><img src="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/platform-macOS-0C8CE9?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Platform: macOS">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0C8CE9?style=flat-square" alt="License: MIT"></a>
+</p>
+
+Strek pairs a GPUI desktop application with reusable editor, rendering, and
+export crates. Its native interface is designed around focused logo and icon
+workflows rather than general-purpose illustration.
 
 The project is under active development. Core editing workflows are usable, but
 the file format and UI should not yet be treated as stable.
