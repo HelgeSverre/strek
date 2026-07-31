@@ -9,3 +9,4 @@ slotmap = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 editor_render = { path = "../editor_render" }
+unicode-segmentation = { workspace = true }

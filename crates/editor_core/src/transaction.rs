@@ -20,21 +20,34 @@ pub struct Transaction {
     /// Original transforms for nodes being edited
     original_transforms: HashMap<NodeId, Affine2>,
 
+    /// Original composed transforms used to apply screen/world-space deltas.
+    original_world_transforms: HashMap<NodeId, Affine2>,
+
     /// Whether the transaction has been committed or cancelled
     finished: bool,
 }
 
 impl Transaction {
     /// Start a new transaction for moving the given nodes.
-    pub fn start_move(description: impl Into<String>, nodes: &[NodeId], doc: &Document) -> Self {
+    pub fn start_move(
+        description: impl Into<String>,
+        nodes: &[NodeId],
+        doc: &mut Document,
+    ) -> Self {
         let original_transforms = nodes
             .iter()
             .filter_map(|&id| doc.get(id).map(|node| (id, node.transform)))
+            .collect();
+        let original_world_transforms = nodes
+            .iter()
+            .copied()
+            .map(|id| (id, doc.world_transform(id)))
             .collect();
 
         Self {
             description: description.into(),
             original_transforms,
+            original_world_transforms,
             finished: false,
         }
     }
@@ -58,8 +71,8 @@ impl Transaction {
             return;
         }
 
-        for (&id, &original) in &self.original_transforms {
-            let new_transform = delta * original;
+        for (&id, &original_world) in &self.original_world_transforms {
+            let new_transform = doc.author_transform_from_world(id, delta * original_world);
             if let Some(node) = doc.nodes.get_mut(id) {
                 node.transform = new_transform;
             }
@@ -73,8 +86,9 @@ impl Transaction {
             return;
         }
 
-        for (&id, &original) in &self.original_transforms {
-            let new_transform = Affine2::from_translation(delta) * original;
+        let delta = Affine2::from_translation(delta);
+        for (&id, &original_world) in &self.original_world_transforms {
+            let new_transform = doc.author_transform_from_world(id, delta * original_world);
             if let Some(node) = doc.nodes.get_mut(id) {
                 node.transform = new_transform;
             }
@@ -147,7 +161,7 @@ mod tests {
         let original = doc.get(id).unwrap().transform;
 
         // Start transaction
-        let txn = Transaction::start_move("Move", &[id], &doc);
+        let txn = Transaction::start_move("Move", &[id], &mut doc);
 
         // Move during transaction
         txn.translate(Vec2::new(100.0, 50.0), &mut doc);
@@ -171,7 +185,7 @@ mod tests {
         let original = doc.get(id).unwrap().transform;
 
         // Start transaction
-        let txn = Transaction::start_move("Move", &[id], &doc);
+        let txn = Transaction::start_move("Move", &[id], &mut doc);
 
         // Move during transaction
         txn.translate(Vec2::new(100.0, 50.0), &mut doc);
@@ -193,7 +207,7 @@ mod tests {
         let id = doc.add_child(doc.root, shape).unwrap();
 
         // Start transaction but don't modify anything
-        let txn = Transaction::start_move("Move", &[id], &doc);
+        let txn = Transaction::start_move("Move", &[id], &mut doc);
 
         assert!(!txn.has_changes(&doc));
 
@@ -216,7 +230,7 @@ mod tests {
         let orig2 = doc.get(id2).unwrap().transform;
 
         // Start transaction with both nodes
-        let txn = Transaction::start_move("Move", &[id1, id2], &doc);
+        let txn = Transaction::start_move("Move", &[id1, id2], &mut doc);
 
         // Move both
         txn.translate(Vec2::new(10.0, 10.0), &mut doc);
@@ -231,5 +245,34 @@ mod tests {
 
         assert_eq!(new1 - orig1.translation, Vec2::new(10.0, 10.0));
         assert_eq!(new2 - orig2.translation, Vec2::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn translation_is_applied_in_world_space_under_transformed_parent() {
+        let mut doc = Document::new();
+        let group_id = doc
+            .add_child(
+                doc.root,
+                Node::group("Group").with_transform(Affine2::from_scale_angle_translation(
+                    Vec2::splat(2.0),
+                    0.4,
+                    Vec2::new(30.0, 20.0),
+                )),
+            )
+            .unwrap();
+        let shape_id = doc
+            .add_child(
+                group_id,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(5.0, 7.0))),
+            )
+            .unwrap();
+        let before = doc.world_transform(shape_id).translation;
+        let transaction = Transaction::start_move("Move", &[shape_id], &mut doc);
+
+        transaction.translate(Vec2::new(12.0, -8.0), &mut doc);
+
+        let after = doc.world_transform(shape_id).translation;
+        assert!((after - before - Vec2::new(12.0, -8.0)).length() < 0.0001);
     }
 }

@@ -1,12 +1,31 @@
 //! Display list generation from the document.
 
-use editor_render::{DisplayItem, DisplayList, Paint, PathCmd, PathData, Stroke, TextItem};
+use editor_render::{
+    DisplayItem, DisplayList, Paint, PathCmd, PathData, Stroke, TextAlignment, TextItem,
+};
 
 use crate::node::NodeKind;
 use crate::transform::View;
 use crate::Document;
 
 impl Document {
+    /// Collect render text descriptors for platform shaping.
+    pub fn text_items_for_layout(&self) -> Vec<(crate::NodeId, TextItem)> {
+        self.nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                if node.deleted {
+                    return None;
+                }
+                let NodeKind::Text(text) = &node.kind else {
+                    return None;
+                };
+                let fill = node.style.fill.clone().unwrap_or_else(crate::Paint::black);
+                Some((id, convert_text_item(text, &fill)))
+            })
+            .collect()
+    }
+
     /// Build a display list for rendering.
     ///
     /// The display list contains all visible items in paint order,
@@ -18,12 +37,19 @@ impl Document {
         for id in self.paint_order().collect::<Vec<_>>() {
             // Extract node data first to avoid borrow conflicts
             let (visible, kind, style) = match self.nodes.get(id) {
-                Some(n) => (n.visible, n.kind.clone(), n.style.clone()),
+                Some(n) => (n.visible && !n.deleted, n.kind.clone(), n.style.clone()),
                 None => continue,
             };
 
-            // Skip invisible nodes
-            if !visible {
+            // Visibility is inherited. A hidden frame or group must not leak
+            // visible descendants into the display list.
+            if !visible
+                || self.ancestors(id).any(|ancestor| {
+                    self.nodes
+                        .get(ancestor)
+                        .is_some_and(|node| !node.visible || node.deleted)
+                })
+            {
                 continue;
             }
 
@@ -61,14 +87,7 @@ impl Document {
                 NodeKind::Text(text) => {
                     if let Some(fill) = &style.fill {
                         items.push(DisplayItem::Text {
-                            text: TextItem {
-                                content: text.content.clone(),
-                                font_family: text.font_family().to_string(),
-                                font_size: text.font_size,
-                                font_weight: text.weight(),
-                                font_italic: text.italic(),
-                                fill: convert_paint(fill),
-                            },
+                            text: convert_text_item(&text, fill),
                             transform: screen_transform,
                             opacity,
                         });
@@ -85,8 +104,8 @@ impl Document {
                             opacity,
                         });
                     }
-                    // Children are rendered via paint_order traversal
-                    // Note: BeginClip/EndClip would require tree-aware traversal
+                    // Frames are artboards, not implicit clipping masks.
+                    // Children render through the normal paint-order traversal.
                 }
             }
         }
@@ -108,20 +127,34 @@ impl Document {
     }
 }
 
+fn convert_text_item(text: &crate::TextData, fill: &crate::Paint) -> TextItem {
+    TextItem {
+        content: text.content.clone(),
+        font_family: text.font_family().to_string(),
+        font_size: text.font_size,
+        font_weight: text.weight(),
+        font_italic: text.italic(),
+        fill: convert_paint(fill),
+        line_height: text.line_height,
+        alignment: match text.align {
+            crate::TextAlign::Left => TextAlignment::Left,
+            crate::TextAlign::Center => TextAlignment::Center,
+            crate::TextAlign::Right => TextAlignment::Right,
+        },
+        wrap_width: text.fixed_width(),
+    }
+}
+
 /// Convert core path data to render path data.
-fn convert_path(path: &crate::path::PathData) -> PathData {
+pub(crate) fn convert_path(path: &crate::path::PathData) -> PathData {
     PathData {
         commands: path
-            .commands
-            .iter()
+            .to_commands()
+            .into_iter()
             .map(|cmd| match cmd {
-                crate::path::PathCmd::MoveTo(p) => PathCmd::MoveTo(*p),
-                crate::path::PathCmd::LineTo(p) => PathCmd::LineTo(*p),
-                crate::path::PathCmd::CubicTo { c1, c2, p } => PathCmd::CubicTo {
-                    c1: *c1,
-                    c2: *c2,
-                    p: *p,
-                },
+                crate::path::PathCmd::MoveTo(p) => PathCmd::MoveTo(p),
+                crate::path::PathCmd::LineTo(p) => PathCmd::LineTo(p),
+                crate::path::PathCmd::CubicTo { c1, c2, p } => PathCmd::CubicTo { c1, c2, p },
                 crate::path::PathCmd::Close => PathCmd::Close,
             })
             .collect(),
@@ -210,6 +243,21 @@ mod tests {
 
         let list = doc.build_display_list(&view);
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn hidden_container_hides_descendants() {
+        let mut doc = Document::new();
+        let view = View::default();
+        let group = doc
+            .add_child(doc.root, Node::group("Hidden").with_visible(false))
+            .unwrap();
+        doc.add_child(
+            group,
+            Node::shape("Child", CorePathData::rect(0.0, 0.0, 10.0, 10.0)),
+        );
+
+        assert!(doc.build_display_list(&view).is_empty());
     }
 
     #[test]

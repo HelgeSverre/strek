@@ -69,6 +69,9 @@ pub enum InputEvent {
 
     /// Key released
     KeyUp { key: Key, modifiers: Modifiers },
+
+    /// Modifier-key state changed without pointer movement.
+    ModifiersChanged { modifiers: Modifiers },
 }
 
 /// Keyboard key.
@@ -146,6 +149,10 @@ pub enum Key {
     Space,
     Escape,
 
+    // Punctuation
+    BracketLeft,  // [
+    BracketRight, // ]
+
     // Modifiers (usually handled via Modifiers struct, but useful for detection)
     Shift,
     Control,
@@ -222,6 +229,8 @@ impl Key {
             "Tab" => Key::Tab,
             " " => Key::Space,
             "Escape" => Key::Escape,
+            "[" => Key::BracketLeft,
+            "]" => Key::BracketRight,
             "Shift" => Key::Shift,
             "Control" => Key::Control,
             "Alt" => Key::Alt,

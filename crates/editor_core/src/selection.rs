@@ -110,24 +110,25 @@ impl Selection {
 /// Result of a click for selection purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionAction {
-    /// Click on empty space - clear selection
-    ClickEmpty,
     /// Click on unselected node - select it
     ClickUnselected(NodeId),
     /// Click on already selected node - keep selection (for drag)
     ClickSelected(NodeId),
     /// Shift-click to toggle
     ToggleNode(NodeId),
-    /// Shift-click on empty - start marquee
+    /// Click on empty - start marquee (or clear on release if no drag)
     StartMarquee,
 }
 
 impl Selection {
     /// Determine what action to take based on a click.
+    ///
+    /// Clicking on empty space starts a marquee. If the user releases without
+    /// dragging, the selection is cleared. If they drag, marquee selection occurs.
     pub fn action_for_click(&self, hit: Option<NodeId>, shift_held: bool) -> SelectionAction {
         match (hit, shift_held) {
-            (None, false) => SelectionAction::ClickEmpty,
-            (None, true) => SelectionAction::StartMarquee,
+            // Click on empty space always starts marquee potential
+            (None, _) => SelectionAction::StartMarquee,
             (Some(id), true) => SelectionAction::ToggleNode(id),
             (Some(id), false) if self.contains(id) => SelectionAction::ClickSelected(id),
             (Some(id), false) => SelectionAction::ClickUnselected(id),
@@ -205,9 +206,10 @@ mod tests {
         let mut sel = Selection::new();
         sel.select(a);
 
+        // Click on empty always starts marquee (actual clear happens on release if no drag)
         assert_eq!(
             sel.action_for_click(None, false),
-            SelectionAction::ClickEmpty
+            SelectionAction::StartMarquee
         );
         assert_eq!(
             sel.action_for_click(None, true),

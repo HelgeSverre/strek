@@ -1,5 +1,5 @@
 use glam::Vec2;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A single path command in a vector path.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -17,10 +17,103 @@ pub enum PathCmd {
     Close,
 }
 
-/// Vector path data containing a sequence of path commands.
+/// Relationship between an anchor and its Bézier handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HandleMode {
+    /// No curve handles.
+    #[default]
+    Corner,
+    /// Handles stay collinear with equal lengths.
+    Mirrored,
+    /// Handles stay collinear while retaining independent lengths.
+    Aligned,
+    /// Handles move independently.
+    Independent,
+}
+
+/// An editable path anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PathAnchor {
+    /// Anchor position in node-local coordinates.
+    pub position: Vec2,
+    /// Incoming handle offset relative to `position`.
+    pub in_handle: Option<Vec2>,
+    /// Outgoing handle offset relative to `position`.
+    pub out_handle: Option<Vec2>,
+    /// Handle constraint used by direct editing.
+    pub mode: HandleMode,
+}
+
+impl PathAnchor {
+    /// Create a corner anchor.
+    pub fn corner(position: Vec2) -> Self {
+        Self {
+            position,
+            in_handle: None,
+            out_handle: None,
+            mode: HandleMode::Corner,
+        }
+    }
+
+    /// Create a smooth anchor with mirrored handles.
+    pub fn mirrored(position: Vec2, in_handle: Vec2, out_handle: Vec2) -> Self {
+        Self {
+            position,
+            in_handle: Some(in_handle),
+            out_handle: Some(out_handle),
+            mode: HandleMode::Mirrored,
+        }
+    }
+}
+
+/// One connected contour within a compound path.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PathContour {
+    pub anchors: Vec<PathAnchor>,
+    pub closed: bool,
+}
+
+impl PathContour {
+    /// Create an open contour.
+    pub fn open(anchors: impl IntoIterator<Item = PathAnchor>) -> Self {
+        Self {
+            anchors: anchors.into_iter().collect(),
+            closed: false,
+        }
+    }
+
+    /// Create a closed contour.
+    pub fn closed(anchors: impl IntoIterator<Item = PathAnchor>) -> Self {
+        Self {
+            anchors: anchors.into_iter().collect(),
+            closed: true,
+        }
+    }
+}
+
+/// Editable vector path data containing one or more contours.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PathData {
-    pub commands: Vec<PathCmd>,
+    pub contours: Vec<PathContour>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SerializedPathData {
+    Contours { contours: Vec<PathContour> },
+    Commands { commands: Vec<PathCmd> },
+}
+
+impl<'de> Deserialize<'de> for PathData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match SerializedPathData::deserialize(deserializer)? {
+            SerializedPathData::Contours { contours } => Ok(Self { contours }),
+            SerializedPathData::Commands { commands } => Ok(Self::from_commands(&commands)),
+        }
+    }
 }
 
 impl PathData {
@@ -32,14 +125,122 @@ impl PathData {
     /// Create a rectangle path.
     pub fn rect(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {
-            commands: vec![
-                PathCmd::MoveTo(Vec2::new(x, y)),
-                PathCmd::LineTo(Vec2::new(x + width, y)),
-                PathCmd::LineTo(Vec2::new(x + width, y + height)),
-                PathCmd::LineTo(Vec2::new(x, y + height)),
-                PathCmd::Close,
-            ],
+            contours: vec![PathContour::closed([
+                PathAnchor::corner(Vec2::new(x, y)),
+                PathAnchor::corner(Vec2::new(x + width, y)),
+                PathAnchor::corner(Vec2::new(x + width, y + height)),
+                PathAnchor::corner(Vec2::new(x, y + height)),
+            ])],
         }
+    }
+
+    /// Create an ellipse path contained within the given rectangle.
+    pub fn ellipse(x: f32, y: f32, width: f32, height: f32) -> Self {
+        let rx = width * 0.5;
+        let ry = height * 0.5;
+        let cx = x + rx;
+        let cy = y + ry;
+        let k = 0.552_284_8;
+
+        Self {
+            contours: vec![PathContour::closed([
+                PathAnchor::mirrored(
+                    Vec2::new(cx + rx, cy),
+                    Vec2::new(0.0, -ry * k),
+                    Vec2::new(0.0, ry * k),
+                ),
+                PathAnchor::mirrored(
+                    Vec2::new(cx, cy + ry),
+                    Vec2::new(rx * k, 0.0),
+                    Vec2::new(-rx * k, 0.0),
+                ),
+                PathAnchor::mirrored(
+                    Vec2::new(cx - rx, cy),
+                    Vec2::new(0.0, ry * k),
+                    Vec2::new(0.0, -ry * k),
+                ),
+                PathAnchor::mirrored(
+                    Vec2::new(cx, cy - ry),
+                    Vec2::new(-rx * k, 0.0),
+                    Vec2::new(rx * k, 0.0),
+                ),
+            ])],
+        }
+    }
+
+    /// Convert legacy drawing commands into editable contours.
+    pub fn from_commands(commands: &[PathCmd]) -> Self {
+        let mut contours = Vec::new();
+        let mut current = PathContour::default();
+
+        for command in commands {
+            match *command {
+                PathCmd::MoveTo(position) => {
+                    if !current.anchors.is_empty() {
+                        contours.push(current);
+                        current = PathContour::default();
+                    }
+                    current.anchors.push(PathAnchor::corner(position));
+                }
+                PathCmd::LineTo(position) => {
+                    current.anchors.push(PathAnchor::corner(position));
+                }
+                PathCmd::CubicTo { c1, c2, p } => {
+                    if let Some(previous) = current.anchors.last_mut() {
+                        previous.out_handle = Some(c1 - previous.position);
+                        if previous.mode == HandleMode::Corner {
+                            previous.mode = HandleMode::Independent;
+                        }
+                    }
+                    current.anchors.push(PathAnchor {
+                        position: p,
+                        in_handle: Some(c2 - p),
+                        out_handle: None,
+                        mode: HandleMode::Independent,
+                    });
+                }
+                PathCmd::Close => {
+                    current.closed = true;
+                    if !current.anchors.is_empty() {
+                        contours.push(current);
+                        current = PathContour::default();
+                    }
+                }
+            }
+        }
+
+        if !current.anchors.is_empty() {
+            contours.push(current);
+        }
+
+        Self { contours }
+    }
+
+    /// Convert editable contours into renderer commands.
+    pub fn to_commands(&self) -> Vec<PathCmd> {
+        let mut commands = Vec::new();
+
+        for contour in &self.contours {
+            let Some(first) = contour.anchors.first() else {
+                continue;
+            };
+            commands.push(PathCmd::MoveTo(first.position));
+
+            for pair in contour.anchors.windows(2) {
+                push_segment_command(&mut commands, pair[0], pair[1]);
+            }
+
+            if contour.closed && contour.anchors.len() > 1 {
+                let last = *contour
+                    .anchors
+                    .last()
+                    .expect("a non-empty contour has a last anchor");
+                push_segment_command(&mut commands, last, *first);
+                commands.push(PathCmd::Close);
+            }
+        }
+
+        commands
     }
 
     /// Compute the axis-aligned bounding box of this path in local coordinates.
@@ -48,25 +249,27 @@ impl PathData {
         let mut max = Vec2::splat(f32::NEG_INFINITY);
         let mut has_points = false;
 
-        for cmd in &self.commands {
-            let points: &[Vec2] = match cmd {
-                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => std::slice::from_ref(p),
-                PathCmd::CubicTo { c1, c2, p } => {
-                    // For cubic bezier bounds, we include control points
-                    // This is conservative but simple; proper bounds would
-                    // compute curve extrema
-                    min = min.min(*c1).min(*c2).min(*p);
-                    max = max.max(*c1).max(*c2).max(*p);
-                    has_points = true;
-                    continue;
-                }
-                PathCmd::Close => continue,
-            };
-
-            for &p in points {
-                min = min.min(p);
-                max = max.max(p);
+        for contour in &self.contours {
+            for anchor in &contour.anchors {
+                min = min.min(anchor.position);
+                max = max.max(anchor.position);
                 has_points = true;
+            }
+            for (from, to) in contour_segments(contour) {
+                if let Some((c1, c2)) = segment_controls(from, to) {
+                    for axis in 0..2 {
+                        for t in cubic_extrema(
+                            component(from.position, axis),
+                            component(c1, axis),
+                            component(c2, axis),
+                            component(to.position, axis),
+                        ) {
+                            let point = cubic_point(from.position, c1, c2, to.position, t);
+                            min = min.min(point);
+                            max = max.max(point);
+                        }
+                    }
+                }
             }
         }
 
@@ -76,6 +279,186 @@ impl PathData {
             None
         }
     }
+
+    /// Test whether a point lies inside the path using the even-odd fill rule.
+    pub fn contains_point(&self, point: Vec2) -> bool {
+        let mut inside = false;
+
+        for contour in &self.contours {
+            if !contour.closed {
+                continue;
+            }
+            let points = flatten_contour(contour, 0.25);
+            for pair in points.windows(2) {
+                let a = pair[0];
+                let b = pair[1];
+                if (a.y > point.y) != (b.y > point.y) {
+                    let intersection_x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
+                    if point.x < intersection_x {
+                        inside = !inside;
+                    }
+                }
+            }
+        }
+
+        inside
+    }
+
+    /// Distance from a point to the nearest flattened path segment.
+    pub fn distance_to_point(&self, point: Vec2, tolerance: f32) -> f32 {
+        self.contours
+            .iter()
+            .map(|contour| {
+                flatten_contour(contour, tolerance)
+                    .windows(2)
+                    .map(|pair| point_segment_distance(point, pair[0], pair[1]))
+                    .fold(f32::INFINITY, f32::min)
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+}
+
+fn push_segment_command(commands: &mut Vec<PathCmd>, from: PathAnchor, to: PathAnchor) {
+    if let Some((c1, c2)) = segment_controls(from, to) {
+        commands.push(PathCmd::CubicTo {
+            c1,
+            c2,
+            p: to.position,
+        });
+    } else {
+        commands.push(PathCmd::LineTo(to.position));
+    }
+}
+
+fn contour_segments(contour: &PathContour) -> Vec<(PathAnchor, PathAnchor)> {
+    let mut segments = contour
+        .anchors
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>();
+
+    if contour.closed && contour.anchors.len() > 1 {
+        segments.push((
+            *contour
+                .anchors
+                .last()
+                .expect("a closed contour has a last anchor"),
+            contour.anchors[0],
+        ));
+    }
+
+    segments
+}
+
+fn segment_controls(from: PathAnchor, to: PathAnchor) -> Option<(Vec2, Vec2)> {
+    if from.out_handle.is_none() && to.in_handle.is_none() {
+        return None;
+    }
+
+    Some((
+        from.position + from.out_handle.unwrap_or(Vec2::ZERO),
+        to.position + to.in_handle.unwrap_or(Vec2::ZERO),
+    ))
+}
+
+fn component(point: Vec2, axis: usize) -> f32 {
+    if axis == 0 {
+        point.x
+    } else {
+        point.y
+    }
+}
+
+fn cubic_extrema(p0: f32, p1: f32, p2: f32, p3: f32) -> Vec<f32> {
+    let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+    let b = 2.0 * (p0 - 2.0 * p1 + p2);
+    let c = p1 - p0;
+    const EPSILON: f32 = 1.0e-6;
+
+    if a.abs() < EPSILON {
+        if b.abs() < EPSILON {
+            return Vec::new();
+        }
+        let t = -c / b;
+        return (0.0..=1.0).contains(&t).then_some(t).into_iter().collect();
+    }
+
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return Vec::new();
+    }
+
+    let root = discriminant.sqrt();
+    [(-b + root) / (2.0 * a), (-b - root) / (2.0 * a)]
+        .into_iter()
+        .filter(|t| (0.0..=1.0).contains(t))
+        .collect()
+}
+
+fn cubic_point(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+    let one_minus_t = 1.0 - t;
+    one_minus_t.powi(3) * p0
+        + 3.0 * one_minus_t.powi(2) * t * p1
+        + 3.0 * one_minus_t * t.powi(2) * p2
+        + t.powi(3) * p3
+}
+
+fn flatten_contour(contour: &PathContour, tolerance: f32) -> Vec<Vec2> {
+    let Some(first) = contour.anchors.first() else {
+        return Vec::new();
+    };
+    let mut points = vec![first.position];
+    for (from, to) in contour_segments(contour) {
+        if let Some((c1, c2)) = segment_controls(from, to) {
+            flatten_cubic(
+                from.position,
+                c1,
+                c2,
+                to.position,
+                tolerance.max(0.01),
+                0,
+                &mut points,
+            );
+        } else {
+            points.push(to.position);
+        }
+    }
+    points
+}
+
+fn flatten_cubic(
+    p0: Vec2,
+    p1: Vec2,
+    p2: Vec2,
+    p3: Vec2,
+    tolerance: f32,
+    depth: u8,
+    points: &mut Vec<Vec2>,
+) {
+    let flatness = point_segment_distance(p1, p0, p3).max(point_segment_distance(p2, p0, p3));
+    if flatness <= tolerance || depth >= 12 {
+        points.push(p3);
+        return;
+    }
+
+    let p01 = (p0 + p1) * 0.5;
+    let p12 = (p1 + p2) * 0.5;
+    let p23 = (p2 + p3) * 0.5;
+    let p012 = (p01 + p12) * 0.5;
+    let p123 = (p12 + p23) * 0.5;
+    let midpoint = (p012 + p123) * 0.5;
+    flatten_cubic(p0, p01, p012, midpoint, tolerance, depth + 1, points);
+    flatten_cubic(midpoint, p123, p23, p3, tolerance, depth + 1, points);
+}
+
+fn point_segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_squared();
+    if length_squared <= f32::EPSILON {
+        return point.distance(start);
+    }
+    let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
 }
 
 /// Axis-aligned bounding rectangle.
@@ -187,6 +570,47 @@ mod tests {
         let bounds = path.bounds().unwrap();
         assert_eq!(bounds.min, Vec2::new(10.0, 20.0));
         assert_eq!(bounds.max, Vec2::new(110.0, 70.0));
+    }
+
+    #[test]
+    fn test_ellipse_path_bounds() {
+        let path = PathData::ellipse(10.0, 20.0, 100.0, 50.0);
+        let bounds = path.bounds().unwrap();
+        assert_eq!(bounds.min, Vec2::new(10.0, 20.0));
+        assert_eq!(bounds.max, Vec2::new(110.0, 70.0));
+        assert_eq!(path.to_commands().len(), 6);
+    }
+
+    #[test]
+    fn cubic_bounds_ignore_control_points_outside_curve_extrema() {
+        let path = PathData::from_commands(&[
+            PathCmd::MoveTo(Vec2::ZERO),
+            PathCmd::CubicTo {
+                c1: Vec2::new(0.0, 100.0),
+                c2: Vec2::new(100.0, 100.0),
+                p: Vec2::new(100.0, 0.0),
+            },
+        ]);
+
+        let bounds = path.bounds().unwrap();
+        assert!((bounds.max.y - 75.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fill_hit_test_does_not_use_the_bounding_box() {
+        let ellipse = PathData::ellipse(0.0, 0.0, 100.0, 100.0);
+        assert!(ellipse.contains_point(Vec2::splat(50.0)));
+        assert!(!ellipse.contains_point(Vec2::splat(2.0)));
+    }
+
+    #[test]
+    fn legacy_commands_deserialize_into_contours() {
+        let json = r#"{"commands":[{"MoveTo":[0.0,0.0]},{"LineTo":[10.0,0.0]},{"LineTo":[10.0,10.0]},"Close"]}"#;
+        let path: PathData = serde_json::from_str(json).unwrap();
+
+        assert_eq!(path.contours.len(), 1);
+        assert!(path.contours[0].closed);
+        assert_eq!(path.contours[0].anchors.len(), 3);
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub enum NodeKind {
     /// Vector path (lines, curves, shapes)
     Shape(PathData),
 
-    /// Text content (placeholder for future implementation)
+    /// Semantic editable text content and layout properties
     Text(TextData),
 }
 
@@ -88,6 +88,16 @@ pub enum TextAlign {
     Right,
 }
 
+/// Horizontal sizing behavior for a text node.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum TextSizing {
+    /// The text box grows to the measured line width.
+    #[default]
+    AutoWidth,
+    /// Text wraps to an explicit local-space width.
+    FixedWidth { width: f32 },
+}
+
 /// Text node data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextData {
@@ -105,6 +115,10 @@ pub struct TextData {
 
     /// Text alignment within bounds
     pub align: TextAlign,
+
+    /// Auto-width or wrapped fixed-width sizing.
+    #[serde(default)]
+    pub sizing: TextSizing,
 }
 
 impl Default for TextData {
@@ -115,6 +129,7 @@ impl Default for TextData {
             font_size: 16.0,
             line_height: 1.2,
             align: TextAlign::Left,
+            sizing: TextSizing::AutoWidth,
         }
     }
 }
@@ -152,6 +167,22 @@ impl TextData {
         self
     }
 
+    /// Set a fixed wrapping width.
+    pub fn with_fixed_width(mut self, width: f32) -> Self {
+        self.sizing = TextSizing::FixedWidth {
+            width: width.max(1.0),
+        };
+        self
+    }
+
+    /// Return the explicit wrapping width, if any.
+    pub fn fixed_width(&self) -> Option<f32> {
+        match self.sizing {
+            TextSizing::AutoWidth => None,
+            TextSizing::FixedWidth { width } => Some(width),
+        }
+    }
+
     // Convenience accessors for backward compatibility
     /// Get the font family.
     pub fn font_family(&self) -> &str {
@@ -179,11 +210,13 @@ pub struct FrameData {
     /// Explicit height in local units
     pub height: f32,
 
-    /// Clip children to frame bounds
-    pub clip_content: bool,
-
     /// Optional background (rendered behind children)
+    #[serde(default = "default_frame_background")]
     pub background: Option<Paint>,
+}
+
+fn default_frame_background() -> Option<Paint> {
+    Some(Paint::white())
 }
 
 impl Default for FrameData {
@@ -191,8 +224,7 @@ impl Default for FrameData {
         Self {
             width: 100.0,
             height: 100.0,
-            clip_content: false,
-            background: None,
+            background: default_frame_background(),
         }
     }
 }
@@ -203,8 +235,7 @@ impl FrameData {
         Self {
             width,
             height,
-            clip_content: false,
-            background: None,
+            background: default_frame_background(),
         }
     }
 
@@ -213,7 +244,6 @@ impl FrameData {
         Self {
             width,
             height,
-            clip_content: false,
             background: Some(background),
         }
     }

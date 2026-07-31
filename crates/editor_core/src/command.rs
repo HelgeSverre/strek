@@ -1,6 +1,6 @@
 use glam::Affine2;
 
-use crate::node::{Node, NodeId};
+use crate::node::{FrameData, Node, NodeId, TextData};
 use crate::path::PathData;
 use crate::style::Style;
 use crate::Document;
@@ -27,6 +27,20 @@ pub enum Patch {
         id: NodeId,
         before: PathData,
         after: PathData,
+    },
+
+    /// Change a text node's semantic content and layout properties
+    SetText {
+        id: NodeId,
+        before: TextData,
+        after: TextData,
+    },
+
+    /// Change a frame's explicit dimensions or background
+    SetFrame {
+        id: NodeId,
+        before: FrameData,
+        after: FrameData,
     },
 
     /// Change a node's name
@@ -106,7 +120,28 @@ impl Patch {
                         *path = after.clone();
                     }
                 }
-                doc.dirty.bounds = true;
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
+            }
+
+            Patch::SetText { id, after, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    if let crate::NodeKind::Text(text) = &mut node.kind {
+                        *text = after.clone();
+                    }
+                }
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
+            }
+
+            Patch::SetFrame { id, after, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    if let crate::NodeKind::Frame(frame) = &mut node.kind {
+                        *frame = after.clone();
+                    }
+                }
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
             }
 
             Patch::SetName { id, after, .. } => {
@@ -119,6 +154,7 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.visible = *after;
                 }
+                doc.mark_bounds_dirty(*id);
             }
 
             Patch::SetLocked { id, after, .. } => {
@@ -151,6 +187,9 @@ impl Patch {
                 }
 
                 doc.mark_transform_dirty(*id);
+                doc.mark_bounds_dirty(*before_parent);
+                doc.mark_bounds_dirty(*after_parent);
+                doc.mark_layout_dirty();
             }
 
             Patch::CreateNode {
@@ -182,6 +221,7 @@ impl Patch {
                 }
 
                 doc.mark_transform_dirty(*id);
+                doc.mark_layout_dirty();
             }
 
             Patch::DeleteNode { id, parent, .. } => {
@@ -195,12 +235,15 @@ impl Patch {
                     node.deleted = true;
                 }
                 doc.cache.invalidate(*id);
+                doc.mark_bounds_dirty(*parent);
+                doc.mark_layout_dirty();
             }
 
             Patch::ReorderChildren { parent, after, .. } => {
                 if let Some(parent_node) = doc.nodes.get_mut(*parent) {
                     parent_node.children = after.clone();
                 }
+                doc.mark_layout_dirty();
             }
         }
     }
@@ -227,7 +270,28 @@ impl Patch {
                         *path = before.clone();
                     }
                 }
-                doc.dirty.bounds = true;
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
+            }
+
+            Patch::SetText { id, before, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    if let crate::NodeKind::Text(text) = &mut node.kind {
+                        *text = before.clone();
+                    }
+                }
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
+            }
+
+            Patch::SetFrame { id, before, .. } => {
+                if let Some(node) = doc.nodes.get_mut(*id) {
+                    if let crate::NodeKind::Frame(frame) = &mut node.kind {
+                        *frame = before.clone();
+                    }
+                }
+                doc.mark_bounds_dirty(*id);
+                doc.mark_layout_dirty();
             }
 
             Patch::SetName { id, before, .. } => {
@@ -240,6 +304,7 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.visible = *before;
                 }
+                doc.mark_bounds_dirty(*id);
             }
 
             Patch::SetLocked { id, before, .. } => {
@@ -272,6 +337,9 @@ impl Patch {
                 }
 
                 doc.mark_transform_dirty(*id);
+                doc.mark_bounds_dirty(*before_parent);
+                doc.mark_bounds_dirty(*after_parent);
+                doc.mark_layout_dirty();
             }
 
             Patch::CreateNode { id, parent, .. } => {
@@ -283,6 +351,8 @@ impl Patch {
                     node.deleted = true;
                 }
                 doc.cache.invalidate(*id);
+                doc.mark_bounds_dirty(*parent);
+                doc.mark_layout_dirty();
             }
 
             Patch::DeleteNode {
@@ -304,12 +374,14 @@ impl Patch {
                 }
 
                 doc.mark_transform_dirty(*id);
+                doc.mark_layout_dirty();
             }
 
             Patch::ReorderChildren { parent, before, .. } => {
                 if let Some(parent_node) = doc.nodes.get_mut(*parent) {
                     parent_node.children = before.clone();
                 }
+                doc.mark_layout_dirty();
             }
         }
     }
@@ -410,5 +482,67 @@ mod tests {
 
         cmd.unapply(&mut doc);
         assert_eq!(doc.get(id).unwrap().name, original_name);
+    }
+
+    #[test]
+    fn deleting_a_child_invalidates_cached_ancestor_bounds() {
+        let mut doc = Document::new();
+        let root = doc.root;
+        let group = doc.add_child(root, Node::group("Group")).unwrap();
+        doc.add_child(
+            group,
+            Node::shape("A", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+        );
+        let far = doc
+            .add_child(
+                group,
+                Node::shape("B", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(100.0, 0.0))),
+            )
+            .unwrap();
+        assert_eq!(doc.world_bounds(group).unwrap().max.x, 110.0);
+        let node = doc.get(far).unwrap().clone();
+        let command = Command::new("Delete").with_patch(Patch::DeleteNode {
+            id: far,
+            node: Box::new(node),
+            parent: group,
+            index: 1,
+        });
+
+        command.apply(&mut doc);
+        assert_eq!(doc.world_bounds(group).unwrap().max.x, 10.0);
+        command.unapply(&mut doc);
+        assert_eq!(doc.world_bounds(group).unwrap().max.x, 110.0);
+    }
+
+    #[test]
+    fn geometry_patch_recomputes_warm_auto_layout_offsets() {
+        let mut doc = Document::new();
+        let group = Node::group("Auto").with_layout(crate::Layout::Auto(
+            crate::AutoLayout::horizontal().with_spacing(10.0),
+        ));
+        let group = doc.add_child(doc.root, group).unwrap();
+        let first = doc
+            .add_child(
+                group,
+                Node::shape("First", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let second = doc
+            .add_child(
+                group,
+                Node::shape("Second", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        assert_eq!(doc.world_transform(second).translation.x, 20.0);
+
+        Patch::SetPath {
+            id: first,
+            before: PathData::rect(0.0, 0.0, 10.0, 10.0),
+            after: PathData::rect(0.0, 0.0, 30.0, 10.0),
+        }
+        .apply_forward(&mut doc);
+
+        assert_eq!(doc.world_transform(second).translation.x, 40.0);
     }
 }

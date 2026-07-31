@@ -30,25 +30,34 @@ pub mod transaction;
 pub mod transform;
 
 pub use action::{ActionCategory, ActionMeta, EditorAction, Shortcut};
-pub use layers::{LayerEntry, LayerIcon, LayerPanelState};
 pub use cache::{Cache, DirtyFlags};
 pub use command::{Command, Patch};
-pub use editor::{Editor, Tool};
+pub use editor::{AnchorRef, Editor, InteractionKind, TextInputSnapshot, TextNavigation, Tool};
 pub use history::History;
 pub use input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
+pub use layers::{LayerEntry, LayerIcon, LayerPanelState};
 pub use layout::{AlignCross, AlignMain, AutoLayout, Direction, Edges, LayoutOffset};
-pub use node::{FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData};
-pub use path::{PathCmd, PathData, Rect};
+pub use node::{
+    FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData, TextSizing,
+};
+pub use path::{HandleMode, PathAnchor, PathCmd, PathContour, PathData, Rect};
 pub use selection::{Selection, SelectionAction};
-pub use snap::{AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult};
+pub use snap::{
+    AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult,
+};
 pub use style::{Paint, Stroke, Style};
-pub use text::{FontId, GlyphRun, PositionedGlyph, SimpleTextEngine, TextEngine, TextMetrics};
+pub use text::{
+    estimate_text_metrics, FontId, GlyphRun, PositionedGlyph, SimpleTextEngine, TextEngine,
+    TextLayout, TextLayoutLine, TextMetrics,
+};
 pub use transaction::Transaction;
 pub use transform::View;
 
 use glam::{Affine2, Vec2};
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 
 /// Serializable document format (excludes derived cache data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +74,129 @@ pub struct SavedDocument {
 
 impl SavedDocument {
     /// Current file format version
-    pub const CURRENT_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
+}
+
+/// Error returned while decoding a saved document.
+#[derive(Debug)]
+pub enum DocumentLoadError {
+    InvalidJson(serde_json::Error),
+    UnsupportedVersion { version: u32, current: u32 },
+    InvalidDocument { reason: DocumentValidationError },
+}
+
+/// Structural reason a serialized document cannot be loaded safely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentValidationError {
+    MissingRoot {
+        root: NodeId,
+    },
+    DeletedRoot {
+        root: NodeId,
+    },
+    RootHasParent {
+        root: NodeId,
+        parent: NodeId,
+    },
+    RootNotGroup {
+        root: NodeId,
+    },
+    DanglingParent {
+        node: NodeId,
+        parent: NodeId,
+    },
+    DanglingChild {
+        parent: NodeId,
+        child: NodeId,
+    },
+    DuplicateChild {
+        parent: NodeId,
+        child: NodeId,
+    },
+    ParentChildMismatch {
+        parent: NodeId,
+        child: NodeId,
+    },
+    MultipleRoots {
+        declared_root: NodeId,
+        additional_root: NodeId,
+    },
+    Cycle {
+        node: NodeId,
+    },
+    UnreachableNode {
+        node: NodeId,
+    },
+}
+
+impl fmt::Display for DocumentValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingRoot { root } => write!(formatter, "root {root:?} does not exist"),
+            Self::DeletedRoot { root } => write!(formatter, "root {root:?} is deleted"),
+            Self::RootHasParent { root, parent } => {
+                write!(formatter, "root {root:?} has parent {parent:?}")
+            }
+            Self::RootNotGroup { root } => write!(formatter, "root {root:?} is not a group"),
+            Self::DanglingParent { node, parent } => {
+                write!(formatter, "node {node:?} references missing parent {parent:?}")
+            }
+            Self::DanglingChild { parent, child } => {
+                write!(formatter, "node {parent:?} references missing child {child:?}")
+            }
+            Self::DuplicateChild { parent, child } => {
+                write!(formatter, "node {parent:?} contains duplicate child {child:?}")
+            }
+            Self::ParentChildMismatch { parent, child } => write!(
+                formatter,
+                "parent {parent:?} and child {child:?} do not reference each other"
+            ),
+            Self::MultipleRoots {
+                declared_root,
+                additional_root,
+            } => write!(
+                formatter,
+                "document declares root {declared_root:?} but live node {additional_root:?} is also root"
+            ),
+            Self::Cycle { node } => {
+                write!(formatter, "node graph contains a cycle at {node:?}")
+            }
+            Self::UnreachableNode { node } => {
+                write!(formatter, "live node {node:?} is unreachable from the root")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DocumentValidationError {}
+
+impl fmt::Display for DocumentLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidJson(error) => write!(formatter, "invalid document JSON: {error}"),
+            Self::UnsupportedVersion { version, current } => write!(
+                formatter,
+                "document version {version} is newer than supported version {current}"
+            ),
+            Self::InvalidDocument { reason } => write!(formatter, "invalid document: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for DocumentLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidJson(error) => Some(error),
+            Self::InvalidDocument { reason } => Some(reason),
+            Self::UnsupportedVersion { .. } => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for DocumentLoadError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::InvalidJson(error)
+    }
 }
 
 /// The main document structure containing the scene graph.
@@ -82,6 +213,10 @@ pub struct Document {
 
     /// Dirty flags for incremental updates
     pub dirty: DirtyFlags,
+
+    /// Platform-shaped text layouts keyed by node. This is derived runtime data
+    /// and is intentionally excluded from the saved document.
+    text_layouts: HashMap<NodeId, text::TextLayout>,
 }
 
 impl Document {
@@ -95,6 +230,7 @@ impl Document {
             root,
             cache: Cache::new(),
             dirty: DirtyFlags::all_dirty(),
+            text_layouts: HashMap::new(),
         }
     }
 
@@ -128,8 +264,7 @@ impl Document {
         }
 
         // Mark transforms dirty
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
 
         Some(id)
     }
@@ -173,8 +308,7 @@ impl Document {
             self.cache.invalidate(*node_id);
         }
 
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
 
         true
     }
@@ -214,8 +348,7 @@ impl Document {
             node.parent = Some(new_parent);
         }
 
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
 
         true
     }
@@ -239,14 +372,40 @@ impl Document {
         })
     }
 
+    /// Whether a node and its ancestor chain are live and visible.
+    pub fn is_effectively_visible(&self, id: NodeId) -> bool {
+        self.nodes
+            .get(id)
+            .is_some_and(|node| !node.deleted && node.visible)
+            && self.ancestors(id).all(|ancestor| {
+                self.nodes
+                    .get(ancestor)
+                    .is_some_and(|node| !node.deleted && node.visible)
+            })
+    }
+
+    /// Whether a node and its ancestor chain are live, visible, and unlocked.
+    pub fn is_effectively_editable(&self, id: NodeId) -> bool {
+        self.is_effectively_visible(id)
+            && !self
+                .ancestors(id)
+                .chain(std::iter::once(id))
+                .any(|node| self.nodes.get(node).is_some_and(|node| node.locked))
+    }
+
     /// Iterate over all descendants of a node (excluding the node itself).
     pub fn descendants(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         DescendantIterator::new(self, id)
     }
 
     /// Check if any ancestor of `id` is in the given set.
-    pub fn has_selected_ancestor(&self, id: NodeId, selected: &std::collections::HashSet<NodeId>) -> bool {
-        self.ancestors(id).any(|ancestor| selected.contains(&ancestor))
+    pub fn has_selected_ancestor(
+        &self,
+        id: NodeId,
+        selected: &std::collections::HashSet<NodeId>,
+    ) -> bool {
+        self.ancestors(id)
+            .any(|ancestor| selected.contains(&ancestor))
     }
 
     /// Filter a selection to exclude nodes whose ancestors are also selected.
@@ -282,11 +441,27 @@ impl Document {
     pub fn mark_transform_dirty(&mut self, id: NodeId) {
         self.dirty.transforms = true;
         self.dirty.bounds = true;
+        self.dirty.layout = true;
 
         // Invalidate cache for this node and descendants
         self.cache.invalidate(id);
         for descendant in self.descendants(id).collect::<Vec<_>>() {
             self.cache.invalidate(descendant);
+        }
+        for ancestor in self.ancestors(id).collect::<Vec<_>>() {
+            self.cache.world_bounds.remove(ancestor);
+        }
+    }
+
+    /// Mark geometry-dependent bounds as dirty.
+    pub fn mark_bounds_dirty(&mut self, id: NodeId) {
+        self.dirty.bounds = true;
+        self.dirty.layout = true;
+        self.dirty.transforms = true;
+        self.text_layouts.remove(&id);
+        self.cache.world_bounds.remove(id);
+        for ancestor in self.ancestors(id).collect::<Vec<_>>() {
+            self.cache.world_bounds.remove(ancestor);
         }
     }
 
@@ -295,6 +470,30 @@ impl Document {
         self.dirty.layout = true;
         self.dirty.transforms = true;
         self.dirty.bounds = true;
+    }
+
+    /// Replace platform-shaped text layouts used by bounds and editor interaction geometry.
+    pub fn set_text_layouts(&mut self, layouts: HashMap<NodeId, text::TextLayout>) {
+        if self.text_layouts == layouts {
+            return;
+        }
+        self.text_layouts = layouts;
+        self.mark_layout_dirty();
+        self.cache.world_bounds.clear();
+    }
+
+    /// Resolve the platform layout for a text node, falling back to deterministic metrics.
+    pub fn text_layout(&self, id: NodeId) -> Option<text::TextLayout> {
+        let node = self.nodes.get(id)?;
+        let NodeKind::Text(text) = &node.kind else {
+            return None;
+        };
+        Some(
+            self.text_layouts
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| text::fallback_text_layout(text)),
+        )
     }
 
     /// Get the layout offset for a node (from auto-layout parent).
@@ -404,9 +603,13 @@ impl Document {
                 Some(layout::MeasuredSize::from_rect(bounds))
             }
             NodeKind::Text(text) => {
-                // Estimate text bounds
-                let width = text.content.len() as f32 * text.font_size * 0.6;
-                let height = text.font_size;
+                let platform = self.text_layouts.get(&id);
+                let width = platform
+                    .map(|layout| layout.width)
+                    .unwrap_or_else(|| crate::text::estimate_text_metrics(text).width);
+                let height = platform
+                    .map(text::TextLayout::height)
+                    .unwrap_or_else(|| crate::text::estimate_text_metrics(text).height);
                 Some(layout::MeasuredSize::new(width, height))
             }
         }
@@ -420,6 +623,14 @@ impl Document {
         if self.dirty.transforms {
             self.recompute_world_transforms();
             self.dirty.transforms = false;
+        }
+    }
+
+    /// Clear bounds cached before the most recent geometry or tree change.
+    fn ensure_bounds_valid(&mut self) {
+        if self.dirty.bounds {
+            self.cache.world_bounds.clear();
+            self.dirty.bounds = false;
         }
     }
 
@@ -469,6 +680,90 @@ impl Document {
             .unwrap_or(Affine2::IDENTITY)
     }
 
+    /// Convert a desired world transform into a node-local author transform.
+    pub fn author_transform_from_world(&mut self, id: NodeId, world: Affine2) -> Affine2 {
+        self.ensure_transforms_valid();
+        let parent_world = self
+            .nodes
+            .get(id)
+            .and_then(|node| node.parent)
+            .and_then(|parent| self.cache.world_transform.get(parent).copied())
+            .unwrap_or(Affine2::IDENTITY);
+        let layout = Affine2::from_translation(self.cache.get_layout_offset(id));
+        let local_from_world = parent_world * layout;
+        let determinant = local_from_world.matrix2.determinant();
+        if !determinant.is_finite()
+            || determinant.abs() <= f32::EPSILON
+            || !world.matrix2.is_finite()
+            || !world.translation.is_finite()
+        {
+            return self
+                .nodes
+                .get(id)
+                .map(|node| node.transform)
+                .unwrap_or(Affine2::IDENTITY);
+        }
+        local_from_world.inverse() * world
+    }
+
+    /// Reapply desired world transforms until ancestor auto-layout measurement
+    /// and parent-controlled offsets stabilize.
+    pub(crate) fn restore_world_transforms(&mut self, preserved: &[(NodeId, Affine2)]) {
+        const MAX_LAYOUT_PASSES: usize = 16;
+        const TRANSFORM_EPSILON: f32 = 1e-6;
+
+        for _ in 0..MAX_LAYOUT_PASSES {
+            // Derive the whole batch from one stable layout snapshot. Applying
+            // one child before deriving the next would make the result depend
+            // on selection order while the ancestor group is being measured.
+            let updates = preserved
+                .iter()
+                .filter_map(|&(id, world)| {
+                    let transform = self.author_transform_from_world(id, world);
+                    let before = self.nodes.get(id)?.transform;
+                    before
+                        .to_cols_array()
+                        .into_iter()
+                        .zip(transform.to_cols_array())
+                        .any(|(before, after)| (before - after).abs() > TRANSFORM_EPSILON)
+                        .then_some((id, transform))
+                })
+                .collect::<Vec<_>>();
+            if updates.is_empty() {
+                break;
+            }
+            for &(id, transform) in &updates {
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.transform = transform;
+                }
+            }
+            for (id, _) in updates {
+                self.mark_transform_dirty(id);
+            }
+        }
+    }
+
+    /// Apply a world-space delta to an original node transform.
+    pub fn transform_with_world_delta(
+        &mut self,
+        id: NodeId,
+        original: Affine2,
+        delta: Affine2,
+    ) -> Affine2 {
+        let current = self.nodes.get(id).map(|node| node.transform);
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.transform = original;
+        }
+        self.mark_transform_dirty(id);
+        let original_world = self.world_transform(id);
+        let transformed = self.author_transform_from_world(id, delta * original_world);
+        if let (Some(node), Some(current)) = (self.nodes.get_mut(id), current) {
+            node.transform = current;
+        }
+        self.mark_transform_dirty(id);
+        transformed
+    }
+
     /// Get the local bounds for a node (in node's coordinate space).
     /// - Group: None (computed from children via world_bounds)
     /// - Frame: explicit width × height (independent of children)
@@ -491,18 +786,17 @@ impl Document {
                 ))
             }
             NodeKind::Shape(path) => path.bounds(),
-            NodeKind::Text(text) => {
-                // Placeholder: estimate text bounds
-                let width = text.content.len() as f32 * text.font_size * 0.6;
-                let height = text.font_size;
-                Some(Rect::from_pos_size(Vec2::ZERO, Vec2::new(width, height)))
-            }
+            NodeKind::Text(text) => Some(self.text_layouts.get(&id).map_or_else(
+                || crate::text::estimate_text_metrics(text).bounds(),
+                |layout| Rect::from_pos_size(Vec2::ZERO, Vec2::new(layout.width, layout.height())),
+            )),
         }
     }
 
     /// Get the world bounds for a node (axis-aligned in world space).
     pub fn world_bounds(&mut self, id: NodeId) -> Option<Rect> {
         self.ensure_transforms_valid();
+        self.ensure_bounds_valid();
 
         // Check cache first
         if let Some(&bounds) = self.cache.world_bounds.get(id) {
@@ -531,6 +825,13 @@ impl Document {
                 let mut combined = Rect::empty();
 
                 for child in children {
+                    if self
+                        .nodes
+                        .get(child)
+                        .is_none_or(|node| node.deleted || !node.visible)
+                    {
+                        continue;
+                    }
                     if let Some(child_bounds) = self.world_bounds(child) {
                         if combined.is_empty() {
                             combined = child_bounds;
@@ -557,9 +858,12 @@ impl Document {
                 Some(transform_rect(local_bounds, world_transform))
             }
             NodeKind::Text(text) => {
-                let width = text.content.len() as f32 * text.font_size * 0.6;
-                let height = text.font_size;
-                let local_bounds = Rect::from_pos_size(Vec2::ZERO, Vec2::new(width, height));
+                let local_bounds = self.text_layouts.get(&id).map_or_else(
+                    || crate::text::estimate_text_metrics(&text).bounds(),
+                    |layout| {
+                        Rect::from_pos_size(Vec2::ZERO, Vec2::new(layout.width, layout.height()))
+                    },
+                );
                 Some(transform_rect(local_bounds, world_transform))
             }
         }
@@ -586,7 +890,15 @@ impl Document {
                     return false;
                 }
                 if let Some(node) = self.nodes.get(id) {
-                    node.visible && !node.is_group()
+                    !node.deleted
+                        && node.visible
+                        && !node.locked
+                        && !node.is_group()
+                        && !self.ancestors(id).any(|ancestor| {
+                            self.nodes.get(ancestor).is_some_and(|ancestor| {
+                                ancestor.deleted || !ancestor.visible || ancestor.locked
+                            })
+                        })
                 } else {
                     false
                 }
@@ -617,25 +929,84 @@ impl Document {
 
     /// Internal hit test implementation.
     fn hit_test_internal(&mut self, world_pos: Vec2, include_groups: bool) -> Option<NodeId> {
-        // Check nodes in reverse paint order (front to back)
-        for id in self.reverse_paint_order().collect::<Vec<_>>() {
-            let node = self.nodes.get(id)?;
+        self.hit_test_with_tolerance(world_pos, include_groups, 4.0)
+    }
 
-            // Skip deleted or invisible nodes
-            if node.deleted || !node.visible {
+    /// Hit test with a caller-provided world-space stroke tolerance.
+    pub fn hit_test_with_tolerance(
+        &mut self,
+        world_pos: Vec2,
+        include_groups: bool,
+        tolerance: f32,
+    ) -> Option<NodeId> {
+        for id in self.reverse_paint_order().collect::<Vec<_>>() {
+            let Some(node) = self.nodes.get(id) else {
+                continue;
+            };
+
+            if node.deleted
+                || !node.visible
+                || node.locked
+                || self.ancestors(id).any(|ancestor| {
+                    self.nodes
+                        .get(ancestor)
+                        .is_some_and(|node| node.deleted || !node.visible || node.locked)
+                })
+            {
                 continue;
             }
 
-            // Skip groups unless explicitly including them
             if !include_groups && node.is_group() {
                 continue;
             }
 
-            // Check bounds
-            if let Some(bounds) = self.world_bounds(id) {
-                if bounds.contains(world_pos) {
+            let kind = node.kind.clone();
+            let style = node.style.clone();
+            if matches!(kind, NodeKind::Group) {
+                if self
+                    .world_bounds(id)
+                    .is_some_and(|bounds| bounds.contains(world_pos))
+                {
                     return Some(id);
                 }
+                continue;
+            }
+
+            let world = self.world_transform(id);
+            let determinant = world.matrix2.determinant();
+            if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+                continue;
+            }
+            let local = world.inverse().transform_point2(world_pos);
+            let minimum_scale = world
+                .matrix2
+                .x_axis
+                .length()
+                .min(world.matrix2.y_axis.length())
+                .max(f32::EPSILON);
+            let local_tolerance = tolerance / minimum_scale;
+
+            let hit = match kind {
+                NodeKind::Group => false,
+                NodeKind::Frame(frame) => {
+                    Rect::from_pos_size(Vec2::ZERO, Vec2::new(frame.width, frame.height))
+                        .contains(local)
+                }
+                NodeKind::Text(_) => self
+                    .local_bounds(id)
+                    .is_some_and(|bounds| bounds.contains(local)),
+                NodeKind::Shape(path) => {
+                    let fill_hit = style.fill.is_some() && path.contains_point(local);
+                    let stroke_hit = style.stroke.is_some_and(|stroke| {
+                        path.distance_to_point(local, local_tolerance * 0.25)
+                            <= stroke.width * 0.5 + local_tolerance
+                    });
+                    fill_hit || stroke_hit
+                }
+            };
+
+            if hit {
+                return Some(id);
             }
         }
 
@@ -657,51 +1028,78 @@ impl Document {
             return None;
         }
 
-        // Verify all nodes exist and get their common parent
+        // Verify all nodes exist exactly once and get their common parent.
+        let unique = nodes.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != nodes.len() {
+            return None;
+        }
         let first_parent = self.nodes.get(nodes[0])?.parent?;
+        if self.nodes.get(first_parent)?.deleted {
+            return None;
+        }
 
-        // All nodes must have the same parent for simple grouping
+        // All nodes must have the same parent for simple grouping.
         for &id in nodes {
             let node = self.nodes.get(id)?;
-            if node.parent != Some(first_parent) {
+            if node.deleted || node.parent != Some(first_parent) {
                 return None;
             }
         }
 
-        // Find the minimum index among the nodes (for group placement)
-        let parent_children = &self.nodes.get(first_parent)?.children;
-        let min_index = nodes
+        let parent_children = self.nodes.get(first_parent)?.children.clone();
+        let mut nodes = nodes.to_vec();
+        nodes.sort_by_key(|id| {
+            parent_children
+                .iter()
+                .position(|child| child == id)
+                .unwrap_or(usize::MAX)
+        });
+        if nodes
             .iter()
-            .filter_map(|&id| parent_children.iter().position(|&c| c == id))
-            .min()?;
+            .any(|id| !parent_children.iter().any(|child| child == id))
+        {
+            return None;
+        }
+        let min_index = parent_children
+            .iter()
+            .position(|child| child == &nodes[0])?;
 
-        // Create the new group
+        // Reparenting changes both ancestor transforms and auto-layout
+        // translations. Snapshot the visual result before changing the tree.
+        let parent_world = self.world_transform(first_parent);
+        let determinant = parent_world.matrix2.determinant();
+        if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+            return None;
+        }
+        let preserved = nodes
+            .iter()
+            .map(|&id| (id, self.world_transform(id)))
+            .collect::<Vec<_>>();
+
+        // Create the new group.
         let group = Node::group("Group");
         let group_id = self.nodes.insert(group);
 
-        // Set the group's parent
         if let Some(g) = self.nodes.get_mut(group_id) {
             g.parent = Some(first_parent);
         }
 
-        // Remove nodes from parent and add to group
         if let Some(parent) = self.nodes.get_mut(first_parent) {
-            parent.children.retain(|c| !nodes.contains(c));
+            parent.children.retain(|c| !unique.contains(c));
             parent.children.insert(min_index, group_id);
         }
 
-        // Add nodes to the group and update their parent
-        for &id in nodes {
+        for &id in &nodes {
             if let Some(node) = self.nodes.get_mut(id) {
                 node.parent = Some(group_id);
             }
         }
         if let Some(g) = self.nodes.get_mut(group_id) {
-            g.children = nodes.to_vec();
+            g.children = nodes;
         }
 
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
+        self.restore_world_transforms(&preserved);
 
         Some(group_id)
     }
@@ -717,7 +1115,7 @@ impl Document {
         let node = self.nodes.get(group_id)?;
 
         // Must be a group
-        if !node.is_group() {
+        if node.deleted || !node.is_group() {
             return None;
         }
 
@@ -730,7 +1128,17 @@ impl Document {
             return Some(vec![]);
         }
 
-        // Find group's index in parent
+        let parent_world = self.world_transform(parent_id);
+        let determinant = parent_world.matrix2.determinant();
+        if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+            return None;
+        }
+        let preserved = children
+            .iter()
+            .map(|&id| (id, self.world_transform(id)))
+            .collect::<Vec<_>>();
+
+        // Find group's index in parent.
         let group_index = self
             .nodes
             .get(parent_id)?
@@ -759,8 +1167,8 @@ impl Document {
         }
         self.cache.invalidate(group_id);
 
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
+        self.restore_world_transforms(&preserved);
 
         Some(children)
     }
@@ -776,6 +1184,7 @@ impl Document {
             if let Some(parent) = self.nodes.get_mut(parent_id) {
                 parent.children.retain(|&c| c != id);
                 parent.children.push(id);
+                self.mark_layout_dirty();
                 return true;
             }
         }
@@ -793,6 +1202,7 @@ impl Document {
             if let Some(parent) = self.nodes.get_mut(parent_id) {
                 parent.children.retain(|&c| c != id);
                 parent.children.insert(0, id);
+                self.mark_layout_dirty();
                 return true;
             }
         }
@@ -843,15 +1253,12 @@ impl Document {
 
         // Clone children
         for (i, &child_id) in old_children.iter().enumerate() {
-            if let Some(new_child) = self.deep_clone(child_id, new_id, i) {
-                if let Some(new_node) = self.nodes.get_mut(new_id) {
-                    new_node.children.push(new_child);
-                }
-            }
+            // `deep_clone` inserts the cloned child into `new_id`; appending it
+            // again here would duplicate every child reference.
+            self.deep_clone(child_id, new_id, i)?;
         }
 
-        self.dirty.transforms = true;
-        self.dirty.bounds = true;
+        self.mark_layout_dirty();
 
         Some(new_id)
     }
@@ -867,14 +1274,199 @@ impl Document {
         }
     }
 
-    /// Create a document from a saved format.
-    pub fn from_saved(saved: SavedDocument) -> Self {
-        Self {
+    /// Create a document from a saved format after validating its live scene graph.
+    pub fn from_saved(saved: SavedDocument) -> Result<Self, DocumentLoadError> {
+        if saved.version > SavedDocument::CURRENT_VERSION {
+            return Err(DocumentLoadError::UnsupportedVersion {
+                version: saved.version,
+                current: SavedDocument::CURRENT_VERSION,
+            });
+        }
+        Self::validate_saved_graph(&saved)
+            .map_err(|reason| DocumentLoadError::InvalidDocument { reason })?;
+
+        Ok(Self {
             nodes: saved.nodes,
             root: saved.root,
             cache: Cache::new(),
             dirty: DirtyFlags::all_dirty(),
+            text_layouts: HashMap::new(),
+        })
+    }
+
+    fn validate_saved_graph(saved: &SavedDocument) -> Result<(), DocumentValidationError> {
+        let root = saved
+            .nodes
+            .get(saved.root)
+            .ok_or(DocumentValidationError::MissingRoot { root: saved.root })?;
+        if root.deleted {
+            return Err(DocumentValidationError::DeletedRoot { root: saved.root });
         }
+        if let Some(parent) = root.parent {
+            return Err(DocumentValidationError::RootHasParent {
+                root: saved.root,
+                parent,
+            });
+        }
+        if !root.is_group() {
+            return Err(DocumentValidationError::RootNotGroup { root: saved.root });
+        }
+
+        for (node_id, node) in &saved.nodes {
+            if let Some(parent) = node.parent {
+                if !saved.nodes.contains_key(parent) {
+                    return Err(DocumentValidationError::DanglingParent {
+                        node: node_id,
+                        parent,
+                    });
+                }
+            }
+
+            let mut children = HashSet::with_capacity(node.children.len());
+            for &child in &node.children {
+                if !saved.nodes.contains_key(child) {
+                    return Err(DocumentValidationError::DanglingChild {
+                        parent: node_id,
+                        child,
+                    });
+                }
+                if !children.insert(child) {
+                    return Err(DocumentValidationError::DuplicateChild {
+                        parent: node_id,
+                        child,
+                    });
+                }
+            }
+        }
+
+        let live_nodes = saved
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| (!node.deleted).then_some(id))
+            .collect::<Vec<_>>();
+
+        for &node_id in &live_nodes {
+            let node = &saved.nodes[node_id];
+            if node_id != saved.root && node.parent.is_none() {
+                return Err(DocumentValidationError::MultipleRoots {
+                    declared_root: saved.root,
+                    additional_root: node_id,
+                });
+            }
+
+            for &child in &node.children {
+                let child_node = &saved.nodes[child];
+                if !child_node.deleted && child_node.parent != Some(node_id) {
+                    return Err(DocumentValidationError::ParentChildMismatch {
+                        parent: node_id,
+                        child,
+                    });
+                }
+            }
+
+            if let Some(parent) = node.parent {
+                let parent_node = &saved.nodes[parent];
+                if !parent_node.deleted && !parent_node.children.contains(&node_id) {
+                    return Err(DocumentValidationError::ParentChildMismatch {
+                        parent,
+                        child: node_id,
+                    });
+                }
+            }
+        }
+
+        let all_nodes = saved.nodes.keys().collect::<Vec<_>>();
+        let mut checked = HashSet::with_capacity(all_nodes.len());
+        for &start in &all_nodes {
+            if checked.contains(&start) {
+                continue;
+            }
+
+            let mut path = HashSet::new();
+            let mut chain = Vec::new();
+            let mut current = start;
+            loop {
+                if checked.contains(&current) {
+                    break;
+                }
+                if !path.insert(current) {
+                    return Err(DocumentValidationError::Cycle { node: current });
+                }
+                chain.push(current);
+
+                let Some(parent) = saved.nodes[current].parent else {
+                    break;
+                };
+                current = parent;
+            }
+            checked.extend(chain);
+        }
+
+        let mut incoming_edges = all_nodes
+            .iter()
+            .copied()
+            .map(|node| (node, 0_usize))
+            .collect::<HashMap<_, _>>();
+        for (parent, node) in &saved.nodes {
+            for child in &node.children {
+                let incoming = incoming_edges.get_mut(child).ok_or(
+                    DocumentValidationError::DanglingChild {
+                        parent,
+                        child: *child,
+                    },
+                )?;
+                *incoming += 1;
+            }
+        }
+        let mut leaves = incoming_edges
+            .iter()
+            .filter_map(|(&node, &incoming)| (incoming == 0).then_some(node))
+            .collect::<VecDeque<_>>();
+        let mut visited_count = 0;
+        while let Some(node_id) = leaves.pop_front() {
+            visited_count += 1;
+            for child in &saved.nodes[node_id].children {
+                let incoming = incoming_edges.get_mut(child).ok_or(
+                    DocumentValidationError::DanglingChild {
+                        parent: node_id,
+                        child: *child,
+                    },
+                )?;
+                *incoming -= 1;
+                if *incoming == 0 {
+                    leaves.push_back(*child);
+                }
+            }
+        }
+        if visited_count != all_nodes.len() {
+            if let Some(node) = incoming_edges
+                .into_iter()
+                .find_map(|(node, incoming)| (incoming > 0).then_some(node))
+            {
+                return Err(DocumentValidationError::Cycle { node });
+            }
+        }
+
+        let mut reachable = HashSet::with_capacity(live_nodes.len());
+        let mut stack = vec![saved.root];
+        while let Some(node_id) = stack.pop() {
+            if !reachable.insert(node_id) {
+                continue;
+            }
+            stack.extend(
+                saved.nodes[node_id]
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|child| !saved.nodes[*child].deleted),
+            );
+        }
+
+        if let Some(&node) = live_nodes.iter().find(|node| !reachable.contains(node)) {
+            return Err(DocumentValidationError::UnreachableNode { node });
+        }
+
+        Ok(())
     }
 
     /// Serialize document to JSON string.
@@ -883,9 +1475,20 @@ impl Document {
     }
 
     /// Deserialize document from JSON string.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+    pub fn from_json(json: &str) -> Result<Self, DocumentLoadError> {
+        #[derive(Deserialize)]
+        struct VersionHeader {
+            version: u32,
+        }
+        let header: VersionHeader = serde_json::from_str(json)?;
+        if header.version > SavedDocument::CURRENT_VERSION {
+            return Err(DocumentLoadError::UnsupportedVersion {
+                version: header.version,
+                current: SavedDocument::CURRENT_VERSION,
+            });
+        }
         let saved: SavedDocument = serde_json::from_str(json)?;
-        Ok(Self::from_saved(saved))
+        Self::from_saved(saved)
     }
 }
 
@@ -996,6 +1599,19 @@ impl<'a> Iterator for PaintOrderIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_affine_approx_eq(actual: Affine2, expected: Affine2) {
+        for (actual, expected) in actual
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.to_cols_array())
+        {
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
 
     #[test]
     fn test_new_document() {
@@ -1312,6 +1928,42 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_deep_clones_each_descendant_once() {
+        let mut doc = Document::new();
+        let group_id = doc.add_child(doc.root, Node::group("Group")).unwrap();
+        let shape_id = doc
+            .add_child(
+                group_id,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let nested_group_id = doc
+            .add_child(group_id, Node::group("Nested group"))
+            .unwrap();
+        doc.add_child(
+            nested_group_id,
+            Node::shape("Nested shape", PathData::rect(0.0, 0.0, 5.0, 5.0)),
+        )
+        .unwrap();
+
+        let copy_id = doc.duplicate(group_id).unwrap();
+        let copy_children = doc.get(copy_id).unwrap().children.clone();
+
+        assert_eq!(copy_children.len(), 2);
+        assert_ne!(copy_children[0], shape_id);
+        assert_ne!(copy_children[1], nested_group_id);
+        assert_eq!(doc.get(copy_children[0]).unwrap().parent, Some(copy_id));
+        assert_eq!(doc.get(copy_children[1]).unwrap().parent, Some(copy_id));
+
+        let nested_copy_children = &doc.get(copy_children[1]).unwrap().children;
+        assert_eq!(nested_copy_children.len(), 1);
+        assert_eq!(
+            doc.get(nested_copy_children[0]).unwrap().parent,
+            Some(copy_children[1])
+        );
+    }
+
+    #[test]
     fn test_auto_layout_horizontal() {
         let mut doc = Document::new();
 
@@ -1350,6 +2002,104 @@ mod tests {
         assert!((pos1.y - 0.0).abs() < 0.001);
         assert!((pos2.y - 0.0).abs() < 0.001);
         assert!((pos3.y - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn direct_reorder_invalidates_warm_auto_layout_offsets() {
+        let mut doc = Document::new();
+        let parent = doc
+            .add_child(
+                doc.root,
+                Node::group("Row")
+                    .with_layout(Layout::Auto(AutoLayout::horizontal().with_spacing(10.0))),
+            )
+            .unwrap();
+        let first = doc
+            .add_child(
+                parent,
+                Node::shape("A", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let second = doc
+            .add_child(
+                parent,
+                Node::shape("B", PathData::rect(0.0, 0.0, 20.0, 10.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            doc.world_transform(second).transform_point2(Vec2::ZERO),
+            Vec2::new(20.0, 0.0)
+        );
+        assert!(doc.send_to_back(second));
+
+        assert_eq!(
+            doc.world_transform(second).transform_point2(Vec2::ZERO),
+            Vec2::ZERO
+        );
+        assert_eq!(
+            doc.world_transform(first).transform_point2(Vec2::ZERO),
+            Vec2::new(30.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn direct_group_and_ungroup_preserve_world_transforms_in_auto_layout() {
+        let mut doc = Document::new();
+        let parent = doc
+            .add_child(
+                doc.root,
+                Node::group("Row")
+                    .with_layout(Layout::Auto(
+                        AutoLayout::horizontal()
+                            .with_spacing(11.0)
+                            .with_uniform_padding(5.0)
+                            .with_align_cross(AlignCross::Center),
+                    ))
+                    .with_transform(Affine2::from_scale_angle_translation(
+                        Vec2::new(1.4, 0.7),
+                        0.3,
+                        Vec2::new(50.0, 30.0),
+                    )),
+            )
+            .unwrap();
+        let first = doc
+            .add_child(
+                parent,
+                Node::shape("A", PathData::rect(0.0, 0.0, 12.0, 9.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(3.0, 2.0))),
+            )
+            .unwrap();
+        doc.add_child(
+            parent,
+            Node::shape("B", PathData::rect(0.0, 0.0, 8.0, 14.0)),
+        )
+        .unwrap();
+        let last = doc
+            .add_child(
+                parent,
+                Node::shape("C", PathData::rect(0.0, 0.0, 16.0, 7.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(-2.0, 4.0))),
+            )
+            .unwrap();
+        let first_world = doc.world_transform(first);
+        let last_world = doc.world_transform(last);
+
+        let group = doc.group_nodes(&[last, first]).unwrap();
+
+        assert_affine_approx_eq(doc.world_transform(first), first_world);
+        assert_affine_approx_eq(doc.world_transform(last), last_world);
+        assert_eq!(doc.get(group).unwrap().children, vec![first, last]);
+
+        doc.get_mut(group).unwrap().transform =
+            Affine2::from_scale_angle_translation(Vec2::new(0.8, 1.3), -0.25, Vec2::new(6.0, -3.0));
+        doc.mark_transform_dirty(group);
+        let transformed_first = doc.world_transform(first);
+        let transformed_last = doc.world_transform(last);
+
+        assert_eq!(doc.ungroup(group), Some(vec![first, last]));
+        assert_affine_approx_eq(doc.world_transform(first), transformed_first);
+        assert_affine_approx_eq(doc.world_transform(last), transformed_last);
     }
 
     #[test]
@@ -1537,6 +2287,216 @@ mod tests {
         assert!(text_node.is_text());
     }
 
+    fn invalid_saved_reason(saved: SavedDocument) -> DocumentValidationError {
+        match Document::from_saved(saved) {
+            Err(DocumentLoadError::InvalidDocument { reason }) => reason,
+            result => panic!("expected an invalid document error, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn saved_document_rejects_missing_and_deleted_roots() {
+        let doc = Document::new();
+        let mut missing = doc.to_saved();
+        missing.nodes.remove(missing.root);
+        assert!(matches!(
+            invalid_saved_reason(missing),
+            DocumentValidationError::MissingRoot { .. }
+        ));
+
+        let mut deleted = doc.to_saved();
+        deleted.nodes[deleted.root].deleted = true;
+        assert!(matches!(
+            invalid_saved_reason(deleted),
+            DocumentValidationError::DeletedRoot { .. }
+        ));
+    }
+
+    #[test]
+    fn saved_document_rejects_dangling_parent_and_child_ids() {
+        let mut doc = Document::new();
+        let child = doc
+            .add_child(doc.root, Node::group("Child"))
+            .expect("root exists");
+
+        let mut dangling_parent = doc.to_saved();
+        let removed_parent = dangling_parent.nodes.insert(Node::group("Removed"));
+        dangling_parent.nodes.remove(removed_parent);
+        dangling_parent.nodes[child].parent = Some(removed_parent);
+        assert!(matches!(
+            invalid_saved_reason(dangling_parent),
+            DocumentValidationError::DanglingParent { node, parent }
+                if node == child && parent == removed_parent
+        ));
+
+        let mut dangling_child = doc.to_saved();
+        dangling_child.nodes.remove(child);
+        assert!(matches!(
+            invalid_saved_reason(dangling_child),
+            DocumentValidationError::DanglingChild { parent, child: missing }
+                if parent == doc.root && missing == child
+        ));
+    }
+
+    #[test]
+    fn saved_document_rejects_duplicate_children_and_parent_mismatches() {
+        let mut doc = Document::new();
+        let child = doc
+            .add_child(doc.root, Node::group("Child"))
+            .expect("root exists");
+        let other_parent = doc
+            .add_child(doc.root, Node::group("Other"))
+            .expect("root exists");
+
+        let mut duplicate = doc.to_saved();
+        duplicate.nodes[duplicate.root].children.push(child);
+        assert!(matches!(
+            invalid_saved_reason(duplicate),
+            DocumentValidationError::DuplicateChild {
+                parent,
+                child: duplicate_child
+            } if parent == doc.root && duplicate_child == child
+        ));
+
+        let mut mismatch = doc.to_saved();
+        mismatch.nodes[child].parent = Some(other_parent);
+        assert!(matches!(
+            invalid_saved_reason(mismatch),
+            DocumentValidationError::ParentChildMismatch {
+                parent,
+                child: mismatched_child
+            } if parent == doc.root && mismatched_child == child
+        ));
+    }
+
+    #[test]
+    fn saved_document_rejects_multiple_roots_and_unreachable_live_nodes() {
+        let doc = Document::new();
+        let mut multiple_roots = doc.to_saved();
+        let additional_root = multiple_roots.nodes.insert(Node::group("Other root"));
+        assert!(matches!(
+            invalid_saved_reason(multiple_roots),
+            DocumentValidationError::MultipleRoots {
+                declared_root,
+                additional_root: found
+            } if declared_root == doc.root && found == additional_root
+        ));
+
+        let mut doc = Document::new();
+        let deleted_parent = doc
+            .add_child(doc.root, Node::group("Deleted parent"))
+            .expect("root exists");
+        let child = doc
+            .add_child(deleted_parent, Node::group("Live child"))
+            .expect("parent exists");
+        let mut unreachable = doc.to_saved();
+        unreachable.nodes[unreachable.root]
+            .children
+            .retain(|node| *node != deleted_parent);
+        unreachable.nodes[deleted_parent].deleted = true;
+        assert!(matches!(
+            invalid_saved_reason(unreachable),
+            DocumentValidationError::UnreachableNode { node } if node == child
+        ));
+    }
+
+    #[test]
+    fn saved_document_rejects_cycles() {
+        let doc = Document::new();
+        let mut saved = doc.to_saved();
+        let first = saved.nodes.insert(Node::group("First"));
+        let second = saved.nodes.insert(Node::group("Second"));
+        saved.nodes[first].parent = Some(second);
+        saved.nodes[first].children.push(second);
+        saved.nodes[second].parent = Some(first);
+        saved.nodes[second].children.push(first);
+
+        assert!(matches!(
+            invalid_saved_reason(saved),
+            DocumentValidationError::Cycle { node } if node == first || node == second
+        ));
+    }
+
+    #[test]
+    fn malformed_saved_graph_is_rejected_when_loaded_from_json() {
+        let doc = Document::new();
+        let mut saved = doc.to_saved();
+        saved.nodes[saved.root].children.push(saved.root);
+        saved.nodes[saved.root].children.push(saved.root);
+        let json = serde_json::to_string(&saved).expect("saved document should serialize");
+
+        assert!(matches!(
+            Document::from_json(&json),
+            Err(DocumentLoadError::InvalidDocument {
+                reason: DocumentValidationError::DuplicateChild { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn valid_soft_deleted_undo_state_still_loads() {
+        let mut doc = Document::new();
+        let group = doc
+            .add_child(doc.root, Node::group("Group"))
+            .expect("root exists");
+        doc.add_child(group, Node::group("Child"))
+            .expect("group exists");
+        assert!(doc.remove(group));
+
+        assert!(Document::from_saved(doc.to_saved()).is_ok());
+    }
+
+    #[test]
+    fn version_one_documents_are_migrated_on_load() {
+        let mut doc = Document::new();
+        doc.add_child(
+            doc.root,
+            Node::text("Legacy label", "Hello")
+                .with_transform(Affine2::from_translation(Vec2::new(10.0, 20.0))),
+        );
+        fn remove_sizing(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    object.remove("sizing");
+                    for child in object.values_mut() {
+                        remove_sizing(child);
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for child in array {
+                        remove_sizing(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut saved: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        saved["version"] = serde_json::json!(1);
+        remove_sizing(&mut saved);
+        let json = serde_json::to_string(&saved).unwrap();
+
+        let restored = Document::from_json(&json).unwrap();
+        let text_id = restored.nodes[restored.root].children[0];
+        let NodeKind::Text(text) = &restored.nodes[text_id].kind else {
+            panic!("legacy text node should survive migration");
+        };
+        assert_eq!(text.content, "Hello");
+        assert_eq!(text.sizing, TextSizing::AutoWidth);
+    }
+
+    #[test]
+    fn future_document_versions_are_rejected() {
+        let future = SavedDocument::CURRENT_VERSION + 1;
+        let json = format!(r#"{{"version": {future}, "unknown_future_data": true}}"#);
+
+        let error = Document::from_json(&json).unwrap_err();
+        assert!(matches!(
+            error,
+            DocumentLoadError::UnsupportedVersion { version, current }
+                if version == future && current == SavedDocument::CURRENT_VERSION
+        ));
+    }
+
     #[test]
     fn test_filter_selection_for_transform() {
         let mut doc = Document::new();
@@ -1569,5 +2529,63 @@ mod tests {
         // Case 4: Select one child and group - should return group only
         let filtered = doc.filter_selection_for_transform(&[group_id, shape1_id]);
         assert_eq!(filtered, vec![group_id]);
+    }
+
+    #[test]
+    fn child_geometry_change_invalidates_cached_group_bounds() {
+        let mut doc = Document::new();
+        let group_id = doc.add_child(doc.root, Node::group("Group")).unwrap();
+        let shape_id = doc
+            .add_child(
+                group_id,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        assert_eq!(doc.world_bounds(group_id).unwrap().max, Vec2::splat(10.0));
+
+        Patch::SetPath {
+            id: shape_id,
+            before: PathData::rect(0.0, 0.0, 10.0, 10.0),
+            after: PathData::rect(0.0, 0.0, 40.0, 20.0),
+        }
+        .apply_forward(&mut doc);
+
+        assert_eq!(
+            doc.world_bounds(group_id).unwrap().max,
+            Vec2::new(40.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn world_delta_under_singular_parent_does_not_corrupt_child_transform() {
+        let mut doc = Document::new();
+        let group =
+            Node::group("Collapsed").with_transform(Affine2::from_scale(Vec2::new(0.0, 1.0)));
+        let group_id = doc.add_child(doc.root, group).unwrap();
+        let child = Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0))
+            .with_transform(Affine2::from_translation(Vec2::new(5.0, 7.0)));
+        let child_id = doc.add_child(group_id, child).unwrap();
+        let before = doc.get(child_id).unwrap().transform;
+
+        let after = doc.transform_with_world_delta(
+            child_id,
+            before,
+            Affine2::from_translation(Vec2::new(10.0, 0.0)),
+        );
+
+        assert_eq!(after, before);
+        assert!(after.matrix2.is_finite());
+        assert!(after.translation.is_finite());
+    }
+
+    #[test]
+    fn ellipse_hit_test_rejects_aabb_corner() {
+        let mut doc = Document::new();
+        let ellipse = Node::shape("Ellipse", PathData::ellipse(0.0, 0.0, 100.0, 100.0))
+            .with_style(Style::fill(Paint::black()));
+        let ellipse_id = doc.add_child(doc.root, ellipse).unwrap();
+
+        assert_eq!(doc.hit_test(Vec2::splat(50.0)), Some(ellipse_id));
+        assert_eq!(doc.hit_test(Vec2::splat(1.0)), None);
     }
 }

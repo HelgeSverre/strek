@@ -64,11 +64,15 @@ pub enum DisplayItem {
         opacity: f32,
     },
 
-    /// Begin a clipping region (for Frame with clip_content=true).
-    BeginClip { path: PathData, transform: Affine2 },
-
-    /// End current clipping region.
-    EndClip,
+    /// Transient shape shown while a drawing tool is active.
+    ///
+    /// This is UI-only and must not be included in exported artwork.
+    ToolPreview {
+        path: PathData,
+        fill: Paint,
+        stroke: Stroke,
+        transform: Affine2,
+    },
 
     /// Snap guide line for visual feedback during dragging.
     SnapGuide {
@@ -87,6 +91,29 @@ pub enum DisplayItem {
         /// Maximum corner in screen coordinates.
         max: Vec2,
     },
+
+    /// Marquee selection rectangle (drawn while dragging to select).
+    MarqueeRect {
+        /// Minimum corner in screen coordinates.
+        min: Vec2,
+        /// Maximum corner in screen coordinates.
+        max: Vec2,
+    },
+
+    /// Anchor point shown during direct vector editing.
+    VectorAnchor { position: Vec2, selected: bool },
+
+    /// Line connecting an anchor to one Bézier handle.
+    VectorHandle { anchor: Vec2, handle: Vec2 },
+
+    /// Text caret line in screen coordinates.
+    TextCaret { start: Vec2, end: Vec2 },
+
+    /// One visual line of an active text selection or IME composition.
+    TextSelectionRect { corners: [Vec2; 4], marked: bool },
+
+    /// Resize or rotation control for the current selection.
+    TransformHandle { position: Vec2, rotation: bool },
 }
 
 /// Path data for rendering.
@@ -262,6 +289,15 @@ pub enum LineJoin {
     Bevel,
 }
 
+/// Horizontal text alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// Text item for rendering.
 #[derive(Debug, Clone)]
 pub struct TextItem {
@@ -282,6 +318,15 @@ pub struct TextItem {
 
     /// Fill paint
     pub fill: Paint,
+
+    /// Line-height multiplier.
+    pub line_height: f32,
+
+    /// Horizontal alignment within a fixed-width box.
+    pub alignment: TextAlignment,
+
+    /// Explicit wrapping width in local units.
+    pub wrap_width: Option<f32>,
 }
 
 impl TextItem {
@@ -294,6 +339,9 @@ impl TextItem {
             font_weight: 400,
             font_italic: false,
             fill: Paint::black(),
+            line_height: 1.2,
+            alignment: TextAlignment::Left,
+            wrap_width: None,
         }
     }
 

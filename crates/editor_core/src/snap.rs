@@ -37,7 +37,10 @@ impl SnapKind {
 
     /// Check if this is a vertical snap (affects Y position).
     pub fn is_vertical(&self) -> bool {
-        matches!(self, SnapKind::Top | SnapKind::CenterY | SnapKind::Bottom | SnapKind::Baseline)
+        matches!(
+            self,
+            SnapKind::Top | SnapKind::CenterY | SnapKind::Bottom | SnapKind::Baseline
+        )
     }
 }
 
@@ -78,8 +81,16 @@ impl SnapPoint {
             Self::new(Vec2::new(center.x, bounds.max.y), SnapKind::Bottom, node_id),
             // Corners
             Self::new(bounds.min, SnapKind::Corner, node_id),
-            Self::new(Vec2::new(bounds.max.x, bounds.min.y), SnapKind::Corner, node_id),
-            Self::new(Vec2::new(bounds.min.x, bounds.max.y), SnapKind::Corner, node_id),
+            Self::new(
+                Vec2::new(bounds.max.x, bounds.min.y),
+                SnapKind::Corner,
+                node_id,
+            ),
+            Self::new(
+                Vec2::new(bounds.min.x, bounds.max.y),
+                SnapKind::Corner,
+                node_id,
+            ),
             Self::new(bounds.max, SnapKind::Corner, node_id),
         ]
     }
@@ -190,7 +201,12 @@ impl SnapEngine {
     /// Find snap for a set of source snap points being dragged.
     ///
     /// Returns the snapped position and snap matches.
-    pub fn find_snap(&self, source_points: &[SnapPoint], drag_offset: Vec2, zoom: f32) -> SnapResult {
+    pub fn find_snap(
+        &self,
+        source_points: &[SnapPoint],
+        drag_offset: Vec2,
+        zoom: f32,
+    ) -> SnapResult {
         if !self.config.enabled {
             return SnapResult::none(drag_offset);
         }
@@ -212,8 +228,7 @@ impl SnapEngine {
                 // Check horizontal snap (X alignment)
                 if source.kind.is_horizontal() && target.kind.is_horizontal() {
                     let dist = (source_pos.x - target.position.x).abs();
-                    if dist < threshold
-                        && (best_snap_x.is_none() || dist < best_snap_x.unwrap().0)
+                    if dist < threshold && (best_snap_x.is_none() || dist < best_snap_x.unwrap().0)
                     {
                         best_snap_x = Some((
                             dist,
@@ -230,8 +245,7 @@ impl SnapEngine {
                 // Check vertical snap (Y alignment)
                 if source.kind.is_vertical() && target.kind.is_vertical() {
                     let dist = (source_pos.y - target.position.y).abs();
-                    if dist < threshold
-                        && (best_snap_y.is_none() || dist < best_snap_y.unwrap().0)
+                    if dist < threshold && (best_snap_y.is_none() || dist < best_snap_y.unwrap().0)
                     {
                         best_snap_y = Some((
                             dist,
@@ -253,10 +267,10 @@ impl SnapEngine {
                 let source_pos = source.position + drag_offset;
 
                 // Snap X to grid
-                let grid_x = (source_pos.x / self.config.grid_spacing).round() * self.config.grid_spacing;
+                let grid_x =
+                    (source_pos.x / self.config.grid_spacing).round() * self.config.grid_spacing;
                 let dist_x = (source_pos.x - grid_x).abs();
-                if dist_x < threshold
-                    && (best_snap_x.is_none() || dist_x < best_snap_x.unwrap().0)
+                if dist_x < threshold && (best_snap_x.is_none() || dist_x < best_snap_x.unwrap().0)
                 {
                     best_snap_x = Some((
                         dist_x,
@@ -270,10 +284,10 @@ impl SnapEngine {
                 }
 
                 // Snap Y to grid
-                let grid_y = (source_pos.y / self.config.grid_spacing).round() * self.config.grid_spacing;
+                let grid_y =
+                    (source_pos.y / self.config.grid_spacing).round() * self.config.grid_spacing;
                 let dist_y = (source_pos.y - grid_y).abs();
-                if dist_y < threshold
-                    && (best_snap_y.is_none() || dist_y < best_snap_y.unwrap().0)
+                if dist_y < threshold && (best_snap_y.is_none() || dist_y < best_snap_y.unwrap().0)
                 {
                     best_snap_y = Some((
                         dist_y,
@@ -357,13 +371,19 @@ pub fn calculate_alignment(bounds: &[Rect], axis: AlignAxis) -> Vec<Vec2> {
             let total: f32 = bounds.iter().map(|b| b.center().x).sum();
             total / bounds.len() as f32
         }
-        AlignAxis::Right => bounds.iter().map(|b| b.max.x).fold(f32::NEG_INFINITY, f32::max),
+        AlignAxis::Right => bounds
+            .iter()
+            .map(|b| b.max.x)
+            .fold(f32::NEG_INFINITY, f32::max),
         AlignAxis::Top => bounds.iter().map(|b| b.min.y).fold(f32::INFINITY, f32::min),
         AlignAxis::CenterY => {
             let total: f32 = bounds.iter().map(|b| b.center().y).sum();
             total / bounds.len() as f32
         }
-        AlignAxis::Bottom => bounds.iter().map(|b| b.max.y).fold(f32::NEG_INFINITY, f32::max),
+        AlignAxis::Bottom => bounds
+            .iter()
+            .map(|b| b.max.y)
+            .fold(f32::NEG_INFINITY, f32::max),
     };
 
     // Calculate the delta for each node
@@ -496,9 +516,9 @@ mod tests {
     #[test]
     fn test_calculate_distribution_horizontal() {
         let bounds = vec![
-            Rect::new(Vec2::new(0.0, 0.0), Vec2::new(20.0, 20.0)),   // center.x = 10
+            Rect::new(Vec2::new(0.0, 0.0), Vec2::new(20.0, 20.0)), // center.x = 10
             Rect::new(Vec2::new(100.0, 0.0), Vec2::new(120.0, 20.0)), // center.x = 110
-            Rect::new(Vec2::new(30.0, 0.0), Vec2::new(50.0, 20.0)),   // center.x = 40
+            Rect::new(Vec2::new(30.0, 0.0), Vec2::new(50.0, 20.0)), // center.x = 40
         ];
 
         let deltas = calculate_distribution(&bounds, DistributeAxis::Horizontal);
