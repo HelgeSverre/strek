@@ -40,6 +40,8 @@ the file format and UI should not yet be treated as stable.
   is committed as one undo step and `Escape` cancels it
 - Frame background toggling and per-tool fill/stroke defaults for new shapes and
   paths
+- Reusable fill/stroke color picker with a hue/saturation wheel, HEX and alpha
+  editing, presets, and HSV, HSL, RGB, and gamut-mapped OKLCH controls
 - Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files
 - Editable SVG import for paths and basic shape primitives, with explicit errors

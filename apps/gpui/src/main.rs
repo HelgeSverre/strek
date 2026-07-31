@@ -5,6 +5,7 @@
 mod assets;
 mod automation;
 mod canvas;
+mod color_picker;
 mod command_palette;
 mod commands;
 mod document_io;
@@ -255,9 +256,7 @@ enum ColorInputScope {
 struct PropertyColorInput {
     scope: ColorInputScope,
     target: properties_panel::ColorTarget,
-    value: String,
-    replace_on_type: bool,
-    invalid: bool,
+    picker: color_picker::ColorPickerState,
 }
 
 #[derive(Debug, Clone)]
@@ -533,6 +532,27 @@ impl Strek {
                             self.toggle_design_panel(&ToggleDesignPanel, window, cx);
                         }
                     }
+                    UiTarget::FillColorPicker | UiTarget::StrokeColorPicker => {
+                        let target = match target {
+                            UiTarget::FillColorPicker => properties_panel::ColorTarget::Fill,
+                            UiTarget::StrokeColorPicker => properties_panel::ColorTarget::Stroke,
+                            _ => unreachable!(),
+                        };
+                        if visible {
+                            self.start_property_color_input(
+                                ColorInputScope::Selection,
+                                target,
+                                window,
+                                cx,
+                            );
+                        } else if self
+                            .property_color_input
+                            .as_ref()
+                            .is_some_and(|input| input.target == target)
+                        {
+                            self.dismiss_color_picker(cx);
+                        }
+                    }
                 }
                 if scrub_cancelled {
                     cx.notify();
@@ -613,6 +633,7 @@ impl Strek {
             design_panel_visible: self.show_design_panel,
             main_menu_open: self.open_menu == Some(toolbar::MenuKind::Main),
             command_palette_open: self.command_palette.is_some(),
+            color_picker_open: self.property_color_input.is_some(),
             numeric_property_scrub_active: self.numeric_property_scrub.is_some(),
             actions,
         }
@@ -2390,9 +2411,7 @@ impl Strek {
         self.property_color_input = Some(PropertyColorInput {
             scope,
             target,
-            value: properties_panel::format_paint(&paint),
-            replace_on_type: true,
-            invalid: false,
+            picker: color_picker::ColorPickerState::new(paint),
         });
         self.focus_handle.focus(window);
         cx.notify();
@@ -2424,6 +2443,77 @@ impl Strek {
             window,
             cx,
         );
+    }
+
+    pub(crate) fn set_color_picker_model(
+        &mut self,
+        model: color_picker::ColorModel,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.set_model(model);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_color_picker_paint(
+        &mut self,
+        paint: editor_core::Paint,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.set_paint(paint);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_color_picker_control_bounds(
+        &mut self,
+        control: color_picker::ColorPickerControl,
+        bounds: Bounds<gpui::Pixels>,
+    ) {
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.set_control_bounds(control, bounds);
+        }
+    }
+
+    pub(crate) fn update_color_picker_from_point(
+        &mut self,
+        control: color_picker::ColorPickerControl,
+        point: gpui::Point<gpui::Pixels>,
+        drag_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .property_color_input
+            .as_mut()
+            .is_some_and(|input| input.picker.update_from_point(control, point, drag_bounds))
+        {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn commit_color_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = &mut self.property_color_input else {
+            return;
+        };
+        let Some(paint) = input.picker.resolve_hex() else {
+            cx.notify();
+            return;
+        };
+        let scope = input.scope;
+        let target = input.target;
+        self.property_color_input = None;
+        if apply_color_input(&mut self.editor, scope, target, paint) {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_color_picker(&mut self, cx: &mut Context<Self>) {
+        if self.property_color_input.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn toggle_creation_fill(
@@ -2952,55 +3042,27 @@ impl Strek {
         };
         match event.keystroke.key.as_str() {
             "escape" => {
-                self.property_color_input = None;
-                cx.notify();
+                self.dismiss_color_picker(cx);
             }
             "enter" => {
-                let Some(input) = self.property_color_input.as_ref() else {
-                    return;
-                };
-                let Some(paint) = properties_panel::parse_hex_paint(&input.value) else {
-                    if let Some(input) = &mut self.property_color_input {
-                        input.invalid = true;
-                    }
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                };
-                let scope = input.scope;
-                let target = input.target;
-                self.property_color_input = None;
-                let changed = apply_color_input(&mut self.editor, scope, target, paint);
-                if changed {
-                    self.current_cursor = convert_cursor(self.editor.cursor());
-                }
-                cx.notify();
+                self.commit_color_picker(cx);
             }
             "backspace" | "delete" => {
                 if let Some(input) = &mut self.property_color_input {
-                    if input.replace_on_type {
-                        input.value.clear();
-                    } else {
-                        input.value.pop();
-                    }
-                    input.replace_on_type = false;
-                    input.invalid = false;
+                    input.picker.backspace();
                     cx.notify();
                 }
             }
             "a" if primary => {
                 if let Some(input) = &mut self.property_color_input {
-                    input.replace_on_type = true;
-                    input.invalid = false;
+                    input.picker.select_hex();
                     cx.notify();
                 }
             }
             "v" if primary => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     if let Some(input) = &mut self.property_color_input {
-                        input.value = sanitize_hex_input(&text);
-                        input.replace_on_type = false;
-                        input.invalid = false;
+                        input.picker.replace_hex(&text);
                         cx.notify();
                     }
                 }
@@ -3014,12 +3076,7 @@ impl Strek {
                     return;
                 };
                 if let Some(input) = &mut self.property_color_input {
-                    if input.replace_on_type {
-                        input.value.clear();
-                        input.replace_on_type = false;
-                    }
-                    append_hex_input(&mut input.value, text);
-                    input.invalid = false;
+                    input.picker.append_hex(text);
                     cx.notify();
                 }
             }
@@ -3264,8 +3321,8 @@ impl Render for Strek {
             .filter(|input| input.scope == ColorInputScope::Selection)
             .map(|input| properties_panel::ColorInputSnapshot {
                 target: input.target,
-                value: input.value.clone(),
-                invalid: input.invalid,
+                value: input.picker.hex_value().to_owned(),
+                invalid: input.picker.invalid(),
             });
         let creation_color_input = self
             .property_color_input
@@ -3273,9 +3330,24 @@ impl Render for Strek {
             .filter(|input| input.scope == ColorInputScope::Creation)
             .map(|input| toolbar::CreationColorInputSnapshot {
                 target: input.target,
-                value: input.value.clone(),
-                invalid: input.invalid,
+                value: input.picker.hex_value().to_owned(),
+                invalid: input.picker.invalid(),
             });
+        let color_picker = self.property_color_input.as_ref().map(|input| {
+            let title = match (input.scope, input.target) {
+                (ColorInputScope::Selection, properties_panel::ColorTarget::Fill) => "Fill color",
+                (ColorInputScope::Selection, properties_panel::ColorTarget::Stroke) => {
+                    "Stroke color"
+                }
+                (ColorInputScope::Creation, properties_panel::ColorTarget::Fill) => {
+                    "New shape fill"
+                }
+                (ColorInputScope::Creation, properties_panel::ColorTarget::Stroke) => {
+                    "New shape stroke"
+                }
+            };
+            input.picker.snapshot(title)
+        });
         let properties_snapshot = properties_panel::snapshot(&mut self.editor, color_input);
         let zoom_input = self
             .zoom_input
@@ -3555,6 +3627,16 @@ impl Render for Strek {
                     cx,
                 ))
             })
+            .when_some(color_picker, |root, snapshot| {
+                root.child(color_picker::render(
+                    snapshot,
+                    color_picker::ColorPickerPlacement {
+                        top: toolbar::HEADER_HEIGHT + 12.0,
+                        right: visible_panel_width(show_design_panel, design_panel_width) + 12.0,
+                    },
+                    editor_entity.clone(),
+                ))
+            })
             .when_some(command_palette, |root, palette| root.child(palette))
     }
 }
@@ -3692,24 +3774,6 @@ fn apply_color_input(
         }
         (ColorInputScope::Creation, properties_panel::ColorTarget::Stroke) => {
             editor.set_creation_stroke_paint(paint)
-        }
-    }
-}
-
-fn sanitize_hex_input(value: &str) -> String {
-    let mut sanitized = String::with_capacity(9);
-    append_hex_input(&mut sanitized, value);
-    sanitized
-}
-
-fn append_hex_input(value: &mut String, text: &str) {
-    for character in text.chars() {
-        if character == '#' && value.is_empty() {
-            value.push(character);
-        } else if character.is_ascii_hexdigit()
-            && value.chars().filter(|character| *character != '#').count() < 8
-        {
-            value.push(character.to_ascii_uppercase());
         }
     }
 }
@@ -4138,16 +4202,6 @@ mod layout_tests {
         assert_eq!(names.len(), 1);
         assert_eq!(names[0].len(), MAX_AUTOMATION_SELECTED_LAYER_BYTES - 1);
         assert!(names[0].is_char_boundary(names[0].len()));
-    }
-
-    #[test]
-    fn color_input_keeps_one_prefix_and_eight_hex_digits() {
-        assert_eq!(sanitize_hex_input("  #12ab34cd trailing"), "#12AB34CD");
-        assert_eq!(sanitize_hex_input("##ff00aa"), "#FF00AA");
-
-        let mut value = "#12".to_owned();
-        append_hex_input(&mut value, "g3f");
-        assert_eq!(value, "#123F");
     }
 
     #[test]

@@ -132,6 +132,8 @@ pub(crate) enum UiTarget {
     CommandPalette,
     LayersPanel,
     DesignPanel,
+    FillColorPicker,
+    StrokeColorPicker,
 }
 
 impl FromStr for UiTarget {
@@ -143,8 +145,10 @@ impl FromStr for UiTarget {
             "command_palette" | "command-palette" => Ok(Self::CommandPalette),
             "layers_panel" | "layers-panel" => Ok(Self::LayersPanel),
             "design_panel" | "design-panel" => Ok(Self::DesignPanel),
+            "fill_color_picker" | "fill-color-picker" => Ok(Self::FillColorPicker),
+            "stroke_color_picker" | "stroke-color-picker" => Ok(Self::StrokeColorPicker),
             _ => Err(format!(
-                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, or design-panel"
+                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, design-panel, fill-color-picker, or stroke-color-picker"
             )),
         }
     }
@@ -207,6 +211,8 @@ pub(crate) struct AutomationState {
     pub design_panel_visible: bool,
     pub main_menu_open: bool,
     pub command_palette_open: bool,
+    #[serde(default)]
+    pub color_picker_open: bool,
     #[serde(default)]
     pub numeric_property_scrub_active: bool,
     pub actions: Vec<AutomationAction>,
@@ -1173,6 +1179,15 @@ mod tests {
             parse_request("ui".to_owned(), &mut args),
             Ok(AutomationRequest::SetUi {
                 target: UiTarget::CommandPalette,
+                visible: true
+            })
+        ));
+
+        let mut args = ["fill-color-picker", "show"].into_iter().map(str::to_owned);
+        assert!(matches!(
+            parse_request("ui".to_owned(), &mut args),
+            Ok(AutomationRequest::SetUi {
+                target: UiTarget::FillColorPicker,
                 visible: true
             })
         ));

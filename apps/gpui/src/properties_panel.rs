@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::{
+    color_picker::{format_paint, paint_as_rgba, parse_hex_paint},
     toolbar::{editor_tooltip, font_family_label, PortableFontFamily},
     AlignTextCenter, AlignTextLeft, AlignTextRight, PropertyFillBlack, PropertyFillBlue,
     PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite, PropertyRotateLeft,
@@ -1097,62 +1098,6 @@ fn paint_matches(paint: Option<&Paint>, expected: [f32; 4]) -> bool {
     matches!(paint, Some(Paint::Solid(color)) if *color == expected)
 }
 
-pub(crate) fn format_paint(paint: &Paint) -> String {
-    let Paint::Solid([red, green, blue, alpha]) = paint;
-    let channels =
-        [red, green, blue, alpha].map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
-    if channels[3] == u8::MAX {
-        format!("#{:02X}{:02X}{:02X}", channels[0], channels[1], channels[2])
-    } else {
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            channels[0], channels[1], channels[2], channels[3]
-        )
-    }
-}
-
-pub(crate) fn parse_hex_paint(value: &str) -> Option<Paint> {
-    let value = value.trim().strip_prefix('#').unwrap_or(value.trim());
-    let expanded;
-    let value = match value.len() {
-        3 | 4 => {
-            expanded = value
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => value,
-        _ => return None,
-    };
-    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let channel = |start| u8::from_str_radix(&value[start..start + 2], 16).ok();
-    let red = channel(0)?;
-    let green = channel(2)?;
-    let blue = channel(4)?;
-    let alpha = if value.len() == 8 {
-        channel(6)?
-    } else {
-        u8::MAX
-    };
-    let normalized = |channel: u8| f32::from(channel) / 255.0;
-    Some(Paint::rgba(
-        normalized(red),
-        normalized(green),
-        normalized(blue),
-        normalized(alpha),
-    ))
-}
-
-pub(crate) fn paint_as_rgba(paint: &Paint) -> u32 {
-    let Paint::Solid(channels) = paint;
-    let [red, green, blue, alpha] =
-        channels.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
-    (red << 24) | (green << 16) | (blue << 8) | alpha
-}
-
 pub(crate) fn format_number(value: f32) -> String {
     if (value.round() - value).abs() < 0.01 {
         format!("{value:.0}")
@@ -1172,8 +1117,8 @@ fn format_percent(scale: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_degrees, format_paint, format_percent, numeric_property_delta, parse_hex_paint,
-        snapshot, uniform_padding, SelectionValue,
+        format_degrees, format_percent, numeric_property_delta, snapshot, uniform_padding,
+        SelectionValue,
     };
     use editor_core::{
         AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, NumericAdjustmentMode,
@@ -1259,31 +1204,6 @@ mod tests {
         for (target, mode, expected_delta) in expected {
             assert_eq!(numeric_property_delta(target, 12.0, mode), expected_delta);
         }
-    }
-
-    #[test]
-    fn hex_colors_support_short_rgb_and_alpha_forms() {
-        assert_eq!(
-            parse_hex_paint("#0c8"),
-            Some(Paint::rgba(0.0, 0.8, 8.0 / 15.0, 1.0))
-        );
-        assert_eq!(
-            parse_hex_paint("33669980"),
-            Some(Paint::rgba(
-                0x33 as f32 / 255.0,
-                0x66 as f32 / 255.0,
-                0x99 as f32 / 255.0,
-                0x80 as f32 / 255.0,
-            ))
-        );
-        assert!(parse_hex_paint("#12xz89").is_none());
-        assert!(parse_hex_paint("#12345").is_none());
-    }
-
-    #[test]
-    fn paint_format_omits_opaque_alpha_and_preserves_transparency() {
-        assert_eq!(format_paint(&Paint::rgb(1.0, 0.5, 0.0)), "#FF8000");
-        assert_eq!(format_paint(&Paint::rgba(0.2, 0.4, 0.6, 0.5)), "#33669980");
     }
 
     #[test]

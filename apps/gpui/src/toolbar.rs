@@ -10,6 +10,7 @@ use gpui::{
 
 use crate::{
     assets::{icon, Icon},
+    color_picker::{format_paint, paint_as_rgba, parse_hex_paint},
     commands::{AppCommand, CommandTarget, Keymap},
     properties_panel::{self, ColorTarget},
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
@@ -642,14 +643,10 @@ fn context_color_input<A: Action + Clone>(
     action: A,
 ) -> impl IntoElement {
     let preview = input
-        .and_then(|input| properties_panel::parse_hex_paint(&input.value))
+        .and_then(|input| parse_hex_paint(&input.value))
         .or_else(|| paint.cloned());
     let value = input.map_or_else(
-        || {
-            paint
-                .map(properties_panel::format_paint)
-                .unwrap_or_else(|| "None".to_owned())
-        },
+        || paint.map(format_paint).unwrap_or_else(|| "None".to_owned()),
         |input| input.value.clone(),
     );
     let invalid = input.is_some_and(|input| input.invalid);
@@ -678,7 +675,7 @@ fn context_color_input<A: Action + Clone>(
                 .border_color(rgb(BORDER))
                 .bg(preview
                     .as_ref()
-                    .map(properties_panel::paint_as_rgba)
+                    .map(paint_as_rgba)
                     .map(rgba)
                     .unwrap_or_else(|| rgba(0x00000000))),
         )

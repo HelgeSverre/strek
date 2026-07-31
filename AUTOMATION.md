@@ -73,8 +73,9 @@ Running `strek automate` without a subcommand is equivalent to
 | `strek automate screenshot <output.png>` | Activate Strek and save a complete window screenshot. |
 
 The CLI accepts these UI targets: `main-menu`, `command-palette`,
-`layers-panel`, and `design-panel`. Underscores are accepted in place of
-hyphens.
+`layers-panel`, `design-panel`, `fill-color-picker`, and
+`stroke-color-picker`. The color-picker targets operate on the current
+selection. Underscores are accepted in place of hyphens.
 
 All commands except `screenshot` print an `AutomationResponse` as formatted
 JSON and exit nonzero when the request fails:
@@ -108,6 +109,7 @@ JSON and exit nonzero when the request fails:
 | `design_panel_visible` | Design panel visibility. |
 | `main_menu_open` | Whether the main menu is open. |
 | `command_palette_open` | Whether the command palette is open. |
+| `color_picker_open` | Whether a fill or stroke color picker is open. |
 | `numeric_property_scrub_active` | Whether a numeric property is being scrubbed. |
 | `actions` | Editor command objects containing `id`, `label`, and `enabled`. |
 
@@ -259,7 +261,8 @@ from the stdio server to that application's local automation endpoint.
 
 MCP pointer phases are `down`, `move`, and `up`; buttons are `left`, `middle`,
 and `right`. All modifier flags default to `false`. MCP UI targets use
-`main_menu`, `command_palette`, `layers_panel`, and `design_panel`.
+`main_menu`, `command_palette`, `layers_panel`, `design_panel`,
+`fill_color_picker`, and `stroke_color_picker`.
 
 A typical tool sequence is:
 
