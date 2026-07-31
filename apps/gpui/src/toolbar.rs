@@ -14,14 +14,14 @@ use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
     BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
-    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportPng, ExportSvg,
-    FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument,
-    OpenDocument, OpenKeyboardShortcuts, Paste, PenTool, RectangleTool, Redo, ReversePath,
-    SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
-    ShowCommandPalette, SplitPath, StartZoomInput, TextLarger, TextSmaller, TextTool,
-    ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed,
-    ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll,
-    ZoomToFit, ZoomToSelection,
+    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportJpeg, ExportPng,
+    ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool, Group, InvertSelection,
+    JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
+    RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool,
+    SendBackward, SendToBack, ShowCommandPalette, SplitPath, StartZoomInput, TextLarger,
+    TextSmaller, TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel,
+    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut,
+    ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -856,7 +856,15 @@ fn render_main_menu(
             SaveDocumentAs,
         ))
         .child(menu_item("Export SVG…", "", !file_busy, ExportSvg))
+        .child(menu_item(
+            "Export outlined SVG…",
+            "",
+            !file_busy,
+            ExportSvgOutlined,
+        ))
         .child(menu_item("Export PNG…", "", !file_busy, ExportPng))
+        .child(menu_item("Export JPEG…", "", !file_busy, ExportJpeg))
+        .child(menu_item("Export WebP…", "", !file_busy, ExportWebP))
         .when(!recent_items.is_empty(), |menu| {
             menu.child(menu_section("Recent")).children(recent_items)
         })

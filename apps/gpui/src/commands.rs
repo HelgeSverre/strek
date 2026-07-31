@@ -13,13 +13,13 @@ use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight, Backspace,
     BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
-    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportPng, ExportSvg,
-    FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument,
-    OpenDocument, OpenKeyboardShortcuts, Paste, PenTool, QuitApplication, RectangleTool, Redo,
-    ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
-    ShowCommandPalette, SplitPath, TextLarger, TextSmaller, TextTool, ToggleDesignPanel,
-    ToggleFrameBackground, ToggleLayerPanel, TogglePathClosed, Undo, Ungroup, ZoomIn, ZoomOut,
-    ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportJpeg, ExportPng,
+    ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool, Group, InvertSelection,
+    JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
+    QuitApplication, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll,
+    SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath, TextLarger, TextSmaller,
+    TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel, TogglePathClosed, Undo,
+    Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 const KEYMAP_VERSION: u64 = 1;
@@ -34,7 +34,10 @@ pub(crate) enum AppCommand {
     SaveDocument,
     SaveDocumentAs,
     ExportSvg,
+    ExportSvgOutlined,
     ExportPng,
+    ExportJpeg,
+    ExportWebP,
     OpenKeyboardShortcuts,
     QuitApplication,
     Copy,
@@ -142,6 +145,30 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         "File",
         [],
         ExportPng
+    ),
+    app_command!(
+        "file.export_svg_outlined",
+        "Export SVG with Outlined Text…",
+        "Export portable SVG with text converted to vector paths",
+        "File",
+        [],
+        ExportSvgOutlined
+    ),
+    app_command!(
+        "file.export_jpeg",
+        "Export as JPEG…",
+        "Export the visible artwork as an opaque JPEG",
+        "File",
+        [],
+        ExportJpeg
+    ),
+    app_command!(
+        "file.export_webp",
+        "Export as WebP…",
+        "Export the visible artwork as a lossless WebP image",
+        "File",
+        [],
+        ExportWebP
     ),
     app_command!(
         "preferences.open_keybindings",
@@ -849,7 +876,10 @@ pub(crate) fn action_for(target: CommandTarget) -> Box<dyn Action> {
             AppCommand::SaveDocument => Box::new(SaveDocument),
             AppCommand::SaveDocumentAs => Box::new(SaveDocumentAs),
             AppCommand::ExportSvg => Box::new(ExportSvg),
+            AppCommand::ExportSvgOutlined => Box::new(ExportSvgOutlined),
             AppCommand::ExportPng => Box::new(ExportPng),
+            AppCommand::ExportJpeg => Box::new(ExportJpeg),
+            AppCommand::ExportWebP => Box::new(ExportWebP),
             AppCommand::OpenKeyboardShortcuts => Box::new(OpenKeyboardShortcuts),
             AppCommand::QuitApplication => Box::new(QuitApplication),
             AppCommand::Copy => Box::new(Copy),

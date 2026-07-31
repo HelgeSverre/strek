@@ -34,7 +34,10 @@ actions!(
         SaveDocument,
         SaveDocumentAs,
         ExportSvg,
+        ExportSvgOutlined,
         ExportPng,
+        ExportJpeg,
+        ExportWebP,
         OpenKeyboardShortcuts,
         ShowCommandPalette,
         QuitApplication,
@@ -453,8 +456,25 @@ impl VectorEditor {
         self.begin_export_dialog(export::ExportFormat::Svg, window, cx);
     }
 
+    fn export_svg_outlined(
+        &mut self,
+        _: &ExportSvgOutlined,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_export_dialog(export::ExportFormat::SvgOutlined, window, cx);
+    }
+
     fn export_png(&mut self, _: &ExportPng, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_export_dialog(export::ExportFormat::Png, window, cx);
+    }
+
+    fn export_jpeg(&mut self, _: &ExportJpeg, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_export_dialog(export::ExportFormat::Jpeg, window, cx);
+    }
+
+    fn export_webp(&mut self, _: &ExportWebP, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_export_dialog(export::ExportFormat::WebP, window, cx);
     }
 
     fn open_keyboard_shortcuts(
@@ -554,7 +574,10 @@ impl VectorEditor {
                 | AppCommand::SaveDocument
                 | AppCommand::SaveDocumentAs
                 | AppCommand::ExportSvg
+                | AppCommand::ExportSvgOutlined
                 | AppCommand::ExportPng
+                | AppCommand::ExportJpeg
+                | AppCommand::ExportWebP
                 | AppCommand::QuitApplication,
             ) => self.file_operation == FileOperation::Idle,
             CommandTarget::App(AppCommand::Copy | AppCommand::Cut) => {
@@ -2559,7 +2582,10 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::save_document))
             .on_action(cx.listener(Self::save_document_as))
             .on_action(cx.listener(Self::export_svg))
+            .on_action(cx.listener(Self::export_svg_outlined))
             .on_action(cx.listener(Self::export_png))
+            .on_action(cx.listener(Self::export_jpeg))
+            .on_action(cx.listener(Self::export_webp))
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::show_command_palette))
             .on_action(cx.listener(Self::quit_application))
@@ -2972,7 +2998,10 @@ fn main() {
                         MenuItem::action("Save As…", SaveDocumentAs),
                         MenuItem::separator(),
                         MenuItem::action("Export SVG…", ExportSvg),
+                        MenuItem::action("Export SVG with Outlined Text…", ExportSvgOutlined),
                         MenuItem::action("Export PNG…", ExportPng),
+                        MenuItem::action("Export JPEG…", ExportJpeg),
+                        MenuItem::action("Export WebP…", ExportWebP),
                     ],
                 },
                 Menu {
