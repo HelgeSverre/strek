@@ -2209,11 +2209,7 @@ impl VectorEditor {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.command_palette.is_some()
-            || self.zoom_input.is_some()
-            || self.property_color_input.is_some()
-            || event.keystroke.key != "space"
-        {
+        if event.keystroke.key != "space" {
             return;
         }
         let effects = self.editor.handle_event(editor_core::InputEvent::KeyUp {

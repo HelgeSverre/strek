@@ -1079,15 +1079,36 @@ impl Editor {
     /// Cancel pointer-driven work before a viewport layout change.
     ///
     /// Text, vector, and Pen editing sessions remain active. An in-progress
-    /// Pen pointer gesture is ended without discarding its anchors. If panning
-    /// temporarily suspended another pointer interaction, both transient
-    /// layers are cancelled; suspended editing is restored.
+    /// text selection or Pen gesture is ended without discarding its editing
+    /// session. An interrupted vector drag is restored to its pointer-down
+    /// snapshot. If panning temporarily suspended another pointer interaction,
+    /// both transient layers are cancelled; suspended editing is restored.
     pub fn cancel_pointer_interaction(&mut self) -> bool {
-        let mut cancelled = false;
+        let mut cancelled = std::mem::take(&mut self.space_pan_active);
+        self.needs_redraw |= cancelled;
         loop {
             match &mut self.drag {
-                DragState::None | DragState::TextEditing(_) | DragState::VectorEditing(_) => {
-                    return cancelled
+                DragState::None => return cancelled,
+                DragState::TextEditing(session) => {
+                    let pointer_cancelled = session.pointer_selection_anchor.take().is_some();
+                    self.needs_redraw |= pointer_cancelled;
+                    return cancelled || pointer_cancelled;
+                }
+                DragState::VectorEditing(session) => {
+                    let originals = session.dragging.take().map(|(_, _, originals)| originals);
+                    let Some(originals) = originals else {
+                        return cancelled;
+                    };
+                    for (id, path) in originals {
+                        if let Some(node) = self.document.get_mut(id) {
+                            if let Some(document_path) = node.path_mut() {
+                                *document_path = path;
+                            }
+                        }
+                        self.document.mark_bounds_dirty(id);
+                    }
+                    self.needs_redraw = true;
+                    return true;
                 }
                 DragState::Pen(session) => {
                     let pointer_cancelled = session.pointer_down || session.active_anchor.is_some();
@@ -2031,11 +2052,11 @@ impl Editor {
                 self.needs_redraw = true;
             }
             DragState::CreatingShape {
+                shape,
                 start_pos,
                 current_pos,
                 modifiers: current_modifiers,
                 snap_result,
-                ..
             } => {
                 let raw_delta = world_pos - *start_pos;
                 let source_points = creation_snap_points(*start_pos);
@@ -2043,7 +2064,11 @@ impl Editor {
                     self.snap_engine
                         .find_snap(&source_points, raw_delta, self.view.zoom);
                 let snapped_pos = *start_pos + result.position;
-                let constrained_pos = creation_endpoint(*start_pos, snapped_pos, modifiers.shift);
+                let constrained_pos = if *shape == ShapeKind::Line {
+                    constrained_line_endpoint(*start_pos, snapped_pos, modifiers.shift)
+                } else {
+                    creation_endpoint(*start_pos, snapped_pos, modifiers.shift)
+                };
 
                 if (constrained_pos.x - snapped_pos.x).abs() > f32::EPSILON {
                     result.snap_x = None;
@@ -5519,9 +5544,18 @@ impl Editor {
         let content_width = bounds.width();
         let content_height = bounds.height();
 
-        if content_width <= 0.0 || content_height <= 0.0 {
+        if !content_width.is_finite()
+            || !content_height.is_finite()
+            || content_width < 0.0
+            || content_height < 0.0
+        {
             return;
         }
+
+        // Lines and point-like paths have a zero-sized axis. Give that axis a
+        // small visual extent so fit-to-selection remains meaningful.
+        let content_width = content_width.max(1.0);
+        let content_height = content_height.max(1.0);
 
         // Calculate zoom to fit
         let available_width = (viewport_width - 2.0 * padding).max(1.0);
@@ -6509,6 +6543,78 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_pointer_work_ends_text_selection_without_leaving_text_editing() {
+        let mut editor = Editor::new();
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Text", "Editing"))
+            .unwrap();
+        editor.begin_existing_text_edit(text);
+        editor.text_pointer_down(Vec2::new(1.0, 1.0), Modifiers::default());
+        let DragState::TextEditing(session) = &editor.drag else {
+            panic!("expected text editing");
+        };
+        assert!(session.pointer_selection_anchor.is_some());
+
+        assert!(editor.cancel_pointer_interaction());
+
+        let DragState::TextEditing(session) = &editor.drag else {
+            panic!("text editing should remain active");
+        };
+        assert!(session.pointer_selection_anchor.is_none());
+    }
+
+    #[test]
+    fn cancelling_pointer_work_restores_an_active_vector_drag() {
+        let mut editor = Editor::new();
+        let id = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Path", PathData::rect(0.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+        let original = editor.document.get(id).unwrap().path().unwrap().clone();
+        editor.selection.select(id);
+        assert!(editor.execute_action(EditorAction::EnterVectorEdit));
+        editor.vector_pointer_down(Vec2::ZERO, Modifiers::default());
+        editor.vector_pointer_move(Vec2::splat(10.0), Modifiers::default());
+        assert_ne!(editor.document.get(id).unwrap().path(), Some(&original));
+
+        assert!(editor.cancel_pointer_interaction());
+
+        let DragState::VectorEditing(session) = &editor.drag else {
+            panic!("vector editing should remain active");
+        };
+        assert!(session.dragging.is_none());
+        assert!(session.undo.is_empty());
+        assert_eq!(editor.document.get(id).unwrap().path(), Some(&original));
+
+        editor.vector_pointer_move(Vec2::splat(30.0), Modifiers::default());
+        assert_eq!(editor.document.get(id).unwrap().path(), Some(&original));
+    }
+
+    #[test]
+    fn cancelling_pointer_work_releases_the_temporary_hand_tool() {
+        let mut editor = Editor::new();
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Space,
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.space_pan_active);
+
+        assert!(editor.cancel_pointer_interaction());
+
+        assert!(!editor.space_pan_active);
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert_ne!(editor.interaction_kind(), InteractionKind::Panning);
+    }
+
+    #[test]
     fn cancelling_pointer_work_preserves_pen_anchors_and_ends_only_its_pointer_gesture() {
         let mut editor = Editor::new();
         assert!(editor.execute_action(EditorAction::ToolPen));
@@ -7329,6 +7435,39 @@ mod tests {
 
         assert_eq!(editor.view.zoom, 4.0);
         assert_eq!(editor.view.pan, Vec2::new(80.0, 50.0));
+    }
+
+    #[test]
+    fn zoom_to_selection_handles_horizontal_and_vertical_lines() {
+        for (name, end) in [
+            ("Horizontal", Vec2::new(100.0, 0.0)),
+            ("Vertical", Vec2::new(0.0, 100.0)),
+        ] {
+            let mut editor = Editor::new();
+            editor.set_viewport_size(Vec2::new(800.0, 600.0));
+            let path = PathData {
+                contours: vec![PathContour::open([
+                    PathAnchor::corner(Vec2::ZERO),
+                    PathAnchor::corner(end),
+                ])],
+            };
+            let id = editor
+                .document
+                .add_child(
+                    editor.document.root,
+                    Node::shape(name, path).with_style(Style::stroke(Stroke::black(1.5))),
+                )
+                .unwrap();
+            editor.selection.select(id);
+
+            editor.zoom_to_selection();
+
+            assert!(editor.view.zoom > 1.0, "{name} should be fitted");
+            assert!(
+                (editor.view.to_screen(end * 0.5) - Vec2::new(400.0, 300.0)).length() < 0.001,
+                "{name} should be centered"
+            );
+        }
     }
 
     #[test]
@@ -8913,6 +9052,44 @@ mod tests {
             .world_bounds(editor.selection.primary().unwrap())
             .unwrap();
         assert_eq!(bounds.max, Vec2::splat(100.0));
+    }
+
+    #[test]
+    fn constrained_line_hides_snap_guides_its_endpoint_does_not_reach() {
+        let mut editor = Editor::new();
+        editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Target", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_transform(Affine2::from_translation(Vec2::new(100.0, 200.0))),
+            )
+            .unwrap();
+        editor.execute_action(EditorAction::ToolLine);
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::ZERO,
+            button: MouseButton::Left,
+            modifiers,
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(95.0, 50.0),
+            modifiers,
+        });
+
+        let display_list = editor.build_display_list();
+
+        assert_eq!(
+            display_list
+                .items
+                .iter()
+                .filter(|item| matches!(item, editor_render::DisplayItem::SnapGuide { .. }))
+                .count(),
+            0
+        );
     }
 
     #[test]
