@@ -1369,6 +1369,16 @@ impl Editor {
         if before_parent == after_parent && before_index == after_index {
             return false;
         }
+        if before_parent != after_parent {
+            let after_parent_world = self.document.world_transform(after_parent);
+            let determinant = after_parent_world.matrix2.determinant();
+            if !determinant.is_finite()
+                || determinant.abs() <= f32::EPSILON
+                || !after_parent_world.translation.is_finite()
+            {
+                return false;
+            }
+        }
 
         self.settle_interaction();
         let before_world = self.document.world_transform(id);
@@ -6715,6 +6725,33 @@ mod tests {
 
         assert!(editor.execute_action(EditorAction::Undo));
         assert_eq!(editor.document.get(root).unwrap().children, ids);
+    }
+
+    #[test]
+    fn layer_reparent_rejects_a_singular_destination() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let child = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let singular_parent = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Singular").with_transform(Affine2::from_scale(Vec2::new(0.0, 1.0))),
+            )
+            .unwrap();
+
+        assert!(!editor.reparent_layer(child, singular_parent, 0));
+        assert_eq!(
+            editor.document.get(child).and_then(|node| node.parent),
+            Some(root)
+        );
+        assert!(!editor.history.can_undo());
     }
 
     #[test]
