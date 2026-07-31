@@ -5388,6 +5388,7 @@ dependencies = [
  "log",
  "lyon",
  "resvg",
+ "serde_json",
  "smallvec",
  "unicode-segmentation",
 ]
