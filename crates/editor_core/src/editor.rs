@@ -707,6 +707,10 @@ impl Editor {
             return false;
         }
 
+        if !matches!(action, EditorAction::Undo | EditorAction::Redo) {
+            self.cancel_active_numeric_property_scrub();
+        }
+
         let action_manages_interaction = matches!(
             action,
             EditorAction::ToolSelect
@@ -3236,6 +3240,9 @@ impl Editor {
 
     /// Whether Undo has a meaningful target in the current editing context.
     pub fn can_undo_in_context(&self) -> bool {
+        if self.numeric_property_scrub.is_some() {
+            return true;
+        }
         match &self.drag {
             DragState::Pen(_) => self.can_undo_pen_edit(),
             DragState::TextEditing(_) => self.can_undo_text_edit(),
@@ -3254,6 +3261,9 @@ impl Editor {
 
     /// Undo within an active semantic edit before falling back to document history.
     pub fn undo_in_context(&mut self) -> bool {
+        if self.cancel_active_numeric_property_scrub() {
+            return true;
+        }
         match self.interaction_kind() {
             InteractionKind::Pen => self.undo_pen_edit(),
             InteractionKind::TextEditing => self.undo_text_edit(),
@@ -3286,6 +3296,9 @@ impl Editor {
 
     /// Whether Redo has a meaningful target in the current editing context.
     pub fn can_redo_in_context(&self) -> bool {
+        if self.numeric_property_scrub.is_some() {
+            return true;
+        }
         match &self.drag {
             DragState::Pen(_) => self.can_redo_pen_edit(),
             DragState::TextEditing(_) => self.can_redo_text_edit(),
@@ -3312,6 +3325,9 @@ impl Editor {
 
     /// Redo within an active semantic edit before falling back to document history.
     pub fn redo_in_context(&mut self) -> bool {
+        if self.cancel_active_numeric_property_scrub() {
+            return true;
+        }
         match self.interaction_kind() {
             InteractionKind::Pen => self.redo_pen_edit(),
             InteractionKind::TextEditing => self.redo_text_edit(),
@@ -4854,6 +4870,7 @@ impl Editor {
 
     /// Delete the current selection.
     pub fn delete_selection(&mut self) {
+        self.cancel_active_numeric_property_scrub();
         if self.selection.is_empty() {
             return;
         }
@@ -4897,6 +4914,7 @@ impl Editor {
 
     /// Group the current selection (with undo support).
     pub fn group_selection(&mut self) {
+        self.cancel_active_numeric_property_scrub();
         let selected: Vec<_> = self.selection.iter().collect();
         let mut nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 2 {
@@ -5018,6 +5036,7 @@ impl Editor {
 
     /// Ungroup the selected group(s) (with undo support).
     pub fn ungroup_selection(&mut self) {
+        self.cancel_active_numeric_property_scrub();
         let selected_groups: Vec<_> = self
             .selection
             .iter()
@@ -5140,6 +5159,7 @@ impl Editor {
 
     /// Duplicate the current selection (with undo support).
     pub fn duplicate_selection(&mut self) {
+        self.cancel_active_numeric_property_scrub();
         // Filter selection to avoid duplicating children of selected parents
         let all_nodes: Vec<_> = self.selection.iter().collect();
         let nodes = self.document.filter_selection_for_transform(&all_nodes);
@@ -5211,6 +5231,7 @@ impl Editor {
 
     /// Snapshot the selected object subtrees in paint order.
     pub fn copy_selection(&mut self) -> Option<EditorClipboard> {
+        self.cancel_active_numeric_property_scrub();
         let selected = self.selection.iter().collect::<Vec<_>>();
         let roots = self.document.filter_selection_for_transform(&selected);
         if roots.is_empty() {
@@ -5357,6 +5378,7 @@ impl Editor {
 
     /// Align selected nodes along an axis.
     pub fn align_selection(&mut self, axis: crate::snap::AlignAxis) {
+        self.cancel_active_numeric_property_scrub();
         let selected: Vec<_> = self.selection.iter().collect();
         let nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 2 {
@@ -5411,6 +5433,7 @@ impl Editor {
 
     /// Distribute selected nodes evenly along an axis.
     pub fn distribute_selection(&mut self, axis: crate::snap::DistributeAxis) {
+        self.cancel_active_numeric_property_scrub();
         let selected: Vec<_> = self.selection.iter().collect();
         let nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 3 {
@@ -5504,6 +5527,7 @@ impl Editor {
         description: &str,
         mut reorder: impl FnMut(&mut Vec<NodeId>, &HashSet<NodeId>),
     ) {
+        self.cancel_active_numeric_property_scrub();
         if self.selection.is_empty() {
             return;
         }
@@ -7007,6 +7031,7 @@ impl Editor {
         description: &'static str,
         update: impl FnOnce(&mut TextData),
     ) -> bool {
+        self.cancel_active_numeric_property_scrub();
         let Some(id) = self.selection.primary() else {
             return false;
         };
@@ -7049,6 +7074,7 @@ impl Editor {
 
     /// Toggle the selected frame between its default white artboard and transparent.
     pub fn toggle_selected_frame_background(&mut self) -> bool {
+        self.cancel_active_numeric_property_scrub();
         let Some(id) = self.selection.primary() else {
             return false;
         };
@@ -10783,5 +10809,92 @@ mod tests {
         assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
         assert_eq!(editor.history.undo_count(), 0);
         assert!(editor.cancel_numeric_property_scrub(scrub));
+    }
+
+    #[test]
+    fn numeric_scrub_consumes_undo_and_redo_before_document_history() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Shape"]);
+        editor.selection.select(ids[0]);
+        assert!(editor.set_selected_opacity(0.8));
+        assert_eq!(editor.history.undo_count(), 1);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&scrub, -0.3));
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 0.5);
+        assert!(editor.can_undo_in_context());
+        assert!(editor.undo_in_context());
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 0.8);
+        assert_eq!(editor.history.undo_count(), 1);
+
+        assert!(editor.undo_in_context());
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 1.0);
+        assert_eq!(editor.history.redo_count(), 1);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&scrub, -0.4));
+        assert!(editor.can_redo_in_context());
+        assert!(editor.redo_in_context());
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 1.0);
+        assert_eq!(editor.history.redo_count(), 1);
+
+        assert!(editor.redo_in_context());
+        assert_eq!(editor.document.get(ids[0]).unwrap().style.opacity, 0.8);
+        assert_eq!(editor.history.redo_count(), 0);
+    }
+
+    #[test]
+    fn clipboard_and_delete_never_capture_a_numeric_preview() {
+        let (mut editor, ids) = editor_with_named_shapes(&["Shape"]);
+        editor.selection.select(ids[0]);
+
+        let copy_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&copy_scrub, -0.4));
+        let clipboard = editor.copy_selection().unwrap();
+        assert_eq!(clipboard.roots[0].node.node.style.opacity, 1.0);
+        assert!(!editor.commit_numeric_property_scrub(copy_scrub));
+
+        let delete_scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&delete_scrub, -0.4));
+        editor.delete_selection();
+        assert!(editor.document.get(ids[0]).unwrap().deleted);
+        assert!(!editor.commit_numeric_property_scrub(delete_scrub));
+
+        assert!(editor.undo_in_context());
+        let restored = editor.document.get(ids[0]).unwrap();
+        assert!(!restored.deleted);
+        assert_eq!(restored.style.opacity, 1.0);
+    }
+
+    #[test]
+    fn direct_text_property_edit_restores_numeric_preview_before_history() {
+        let mut editor = Editor::new();
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Text", "Hello"))
+            .unwrap();
+        editor.selection.select(text);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::TextSize)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub(&scrub, 4.0));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 20.0);
+        assert!(editor.set_selected_text_font_family("serif"));
+        let current = editor.selected_text_data().unwrap();
+        assert_eq!(current.font_size, 16.0);
+        assert_eq!(current.font.family, "serif");
+
+        assert!(editor.undo_in_context());
+        let restored = editor.selected_text_data().unwrap();
+        assert_eq!(restored.font_size, 16.0);
+        assert_eq!(restored.font.family, "sans-serif");
     }
 }
