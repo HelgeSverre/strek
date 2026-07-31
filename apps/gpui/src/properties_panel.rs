@@ -1,8 +1,8 @@
 //! Figma-style design inspector for the current selection.
 
 use editor_core::{
-    Direction, Editor, FrameData, Layout, NodeKind, NumericPropertyTarget, Paint, Rect, Style,
-    TextAlign, TextData, TransformComponents,
+    Direction, Editor, FrameData, Layout, NodeKind, NumericPropertyTarget, Paint, Rect, TextAlign,
+    TextData, TransformComponents,
 };
 use gpui::{
     div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, MouseButton, SharedString,
@@ -45,9 +45,31 @@ pub(crate) struct PropertiesSnapshot {
 }
 
 #[derive(Clone)]
-enum SelectionStyle {
-    Uniform(Style),
+struct SelectionStyle {
+    fill: SelectionValue<Option<Paint>>,
+    stroke_enabled: SelectionValue<bool>,
+    stroke_paint: SelectionValue<Option<Paint>>,
+    stroke_width: SelectionValue<Option<f32>>,
+    opacity: SelectionValue<f32>,
+}
+
+#[derive(Clone)]
+enum SelectionValue<T> {
+    Uniform(T),
     Mixed,
+}
+
+impl<T> SelectionValue<T> {
+    fn uniform(&self) -> Option<&T> {
+        match self {
+            Self::Uniform(value) => Some(value),
+            Self::Mixed => None,
+        }
+    }
+
+    fn is_mixed(&self) -> bool {
+        matches!(self, Self::Mixed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,20 +140,28 @@ pub(crate) fn snapshot(
     } else {
         "Multiple selection".to_owned()
     };
-    let style = selected.first().and_then(|first| {
-        let style = editor.document().get(*first)?.style.clone();
-        Some(
-            if selected.iter().skip(1).all(|id| {
-                editor
-                    .document()
-                    .get(*id)
-                    .is_some_and(|node| node.style == style)
-            }) {
-                SelectionStyle::Uniform(style)
-            } else {
-                SelectionStyle::Mixed
-            },
-        )
+    let style = selected.first().and_then(|_| {
+        let styles = selected
+            .iter()
+            .filter_map(|id| editor.document().get(*id).map(|node| &node.style))
+            .collect::<Vec<_>>();
+        Some(SelectionStyle {
+            fill: uniform_selection_value(styles.iter().map(|style| style.fill.clone()))?,
+            stroke_enabled: uniform_selection_value(
+                styles.iter().map(|style| style.stroke.is_some()),
+            )?,
+            stroke_paint: uniform_selection_value(
+                styles
+                    .iter()
+                    .map(|style| style.stroke.as_ref().map(|stroke| stroke.paint.clone())),
+            )?,
+            stroke_width: uniform_selection_value(
+                styles
+                    .iter()
+                    .map(|style| style.stroke.as_ref().map(|stroke| stroke.width)),
+            )?,
+            opacity: uniform_selection_value(styles.iter().map(|style| style.opacity))?,
+        })
     });
     let text = (selection_count == 1)
         .then(|| editor.selected_text_data())
@@ -160,6 +190,17 @@ pub(crate) fn snapshot(
     }
 }
 
+fn uniform_selection_value<T: Clone + PartialEq>(
+    mut values: impl Iterator<Item = T>,
+) -> Option<SelectionValue<T>> {
+    let first = values.next()?;
+    Some(if values.all(|value| value == first) {
+        SelectionValue::Uniform(first)
+    } else {
+        SelectionValue::Mixed
+    })
+}
+
 pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Strek>) -> AnyElement {
     if snapshot.selection_count == 0 {
         return div()
@@ -183,21 +224,27 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
             .into_any_element();
     }
 
-    let (style, mixed_style) = match snapshot.style.clone() {
-        Some(SelectionStyle::Uniform(style)) => (Some(style), false),
-        Some(SelectionStyle::Mixed) => (None, true),
-        None => (None, false),
-    };
-    let fill = style.as_ref().and_then(|style| style.fill.as_ref());
+    let style = snapshot.style.as_ref();
+    let fill = style
+        .and_then(|style| style.fill.uniform())
+        .and_then(Option::as_ref);
+    let fill_mixed = style.is_some_and(|style| style.fill.is_mixed());
+    let stroke_enabled = style
+        .and_then(|style| style.stroke_enabled.uniform())
+        .copied();
+    let stroke_presence_mixed = style.is_some_and(|style| style.stroke_enabled.is_mixed());
     let stroke_paint = style
-        .as_ref()
-        .and_then(|style| style.stroke.as_ref())
-        .map(|stroke| &stroke.paint);
+        .and_then(|style| style.stroke_paint.uniform())
+        .and_then(Option::as_ref);
+    let stroke_color_mixed =
+        stroke_presence_mixed || style.is_some_and(|style| style.stroke_paint.is_mixed());
     let stroke_width = style
-        .as_ref()
-        .and_then(|style| style.stroke.as_ref())
-        .map(|stroke| stroke.width);
-    let opacity = style.as_ref().map(|style| style.opacity);
+        .and_then(|style| style.stroke_width.uniform())
+        .copied()
+        .flatten();
+    let stroke_width_mixed =
+        stroke_presence_mixed || style.is_some_and(|style| style.stroke_width.is_mixed());
+    let opacity = style.and_then(|style| style.opacity.uniform()).copied();
     let transform = snapshot.transform;
     let group_layout = snapshot.group_layout.clone();
 
@@ -303,7 +350,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                 .child(color_value_editor(
                     "fill-color",
                     fill,
-                    mixed_style,
+                    fill_mixed,
                     snapshot
                         .color_input
                         .as_ref()
@@ -322,7 +369,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         .child(color_swatch(
                             "fill-none",
                             None,
-                            !mixed_style && fill.is_none(),
+                            !fill_mixed && fill.is_none(),
                             "Remove fill",
                             PropertyFillNone,
                         ))
@@ -373,9 +420,9 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         .child(row_label("Stroke"))
                         .child(property_button(
                             "stroke-toggle",
-                            if mixed_style {
+                            if stroke_presence_mixed {
                                 "Mixed"
-                            } else if stroke_width.is_some() {
+                            } else if stroke_enabled == Some(true) {
                                 "On"
                             } else {
                                 "Off"
@@ -391,10 +438,16 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                             PropertyStrokeDown,
                         ))
                         .child(numeric_value(
-                            stroke_width.map(format_number).unwrap_or_else(|| {
-                                if mixed_style { "Mixed" } else { "—" }.to_owned()
-                            }),
-                            stroke_width
+                            if stroke_width_mixed {
+                                "Mixed".to_owned()
+                            } else {
+                                stroke_width
+                                    .map(format_number)
+                                    .unwrap_or_else(|| "—".to_owned())
+                            },
+                            (!stroke_width_mixed)
+                                .then_some(stroke_width)
+                                .flatten()
                                 .map(|_| (NumericPropertyTarget::StrokeWidth, &editor_entity)),
                         ))
                         .child(property_button(
@@ -404,19 +457,22 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                             PropertyStrokeUp,
                         )),
                 )
-                .when(mixed_style || stroke_width.is_some(), |appearance| {
-                    appearance.child(color_value_editor(
-                        "stroke-color",
-                        stroke_paint,
-                        mixed_style,
-                        snapshot
-                            .color_input
-                            .as_ref()
-                            .filter(|input| input.target == ColorTarget::Stroke),
-                        "Edit stroke color",
-                        StartStrokeColorInput,
-                    ))
-                }),
+                .when(
+                    stroke_presence_mixed || stroke_enabled == Some(true),
+                    |appearance| {
+                        appearance.child(color_value_editor(
+                            "stroke-color",
+                            stroke_paint,
+                            stroke_color_mixed,
+                            snapshot
+                                .color_input
+                                .as_ref()
+                                .filter(|input| input.target == ColorTarget::Stroke),
+                            "Edit stroke color",
+                            StartStrokeColorInput,
+                        ))
+                    },
+                ),
         )
         .when_some(snapshot.text, |panel, text| {
             panel.child(
@@ -1041,7 +1097,7 @@ fn format_percent(scale: f32) -> String {
 mod tests {
     use super::{
         format_degrees, format_paint, format_percent, numeric_property_delta, parse_hex_paint,
-        snapshot, uniform_padding, SelectionStyle,
+        snapshot, uniform_padding, SelectionValue,
     };
     use editor_core::{
         AlignCross, AlignMain, AutoLayout, Direction, Editor, Layout, Node, NumericPropertyTarget,
@@ -1132,17 +1188,48 @@ mod tests {
         editor.selection.select(red);
         editor.selection.add(blue);
 
-        assert!(matches!(
-            snapshot(&mut editor, None).style,
-            Some(SelectionStyle::Mixed)
-        ));
+        assert!(snapshot(&mut editor, None).style.unwrap().fill.is_mixed());
 
         editor.document.get_mut(blue).unwrap().style =
             editor.document.get(red).unwrap().style.clone();
         assert!(matches!(
-            snapshot(&mut editor, None).style,
-            Some(SelectionStyle::Uniform(_))
+            snapshot(&mut editor, None).style.unwrap().fill,
+            SelectionValue::Uniform(Some(_))
         ));
+    }
+
+    #[test]
+    fn snapshot_tracks_mixed_state_per_appearance_property() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let first = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("First", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(editor_core::Style::fill(Paint::rgb(1.0, 0.0, 0.0))),
+            )
+            .unwrap();
+        let second = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Second", PathData::rect(20.0, 0.0, 10.0, 10.0))
+                    .with_style(editor_core::Style::fill(Paint::rgb(1.0, 0.0, 0.0))),
+            )
+            .unwrap();
+        editor.document.get_mut(second).unwrap().style.opacity = 0.5;
+        editor.selection.select(first);
+        editor.selection.add(second);
+
+        let style = snapshot(&mut editor, None).style.unwrap();
+        assert!(matches!(style.fill, SelectionValue::Uniform(Some(_))));
+        assert!(matches!(
+            style.stroke_enabled,
+            SelectionValue::Uniform(false)
+        ));
+        assert!(matches!(style.stroke_width, SelectionValue::Uniform(None)));
+        assert!(style.opacity.is_mixed());
     }
 
     #[test]
