@@ -8,7 +8,7 @@ use editor_render::DisplayList;
 use glam::{Affine2, Vec2};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::action::EditorAction;
+use crate::action::{EditorAction, NudgeDirection, NudgeDistance};
 use crate::command::{Command, Patch};
 use crate::history::History;
 use crate::input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
@@ -17,8 +17,8 @@ use crate::layout::{AlignCross, AlignMain, AutoLayout, Direction};
 use crate::node::{Layout, Node, NodeId, NodeKind, TextData, TextSizing};
 use crate::path::{HandleMode, PathAnchor, PathContour, PathData, Rect};
 use crate::property_scrub::{
-    NumericPropertyScrubSession, NumericPropertyScrubState, NumericPropertySnapshot,
-    NumericPropertyTarget, StyleSnapshot, TransformSnapshot,
+    NumericAdjustmentMode, NumericPropertyScrubSession, NumericPropertyScrubState,
+    NumericPropertySnapshot, NumericPropertyTarget, StyleSnapshot, TransformSnapshot,
 };
 use crate::selection::{Selection, SelectionAction};
 use crate::snap::{SnapEngine, SnapKind, SnapPoint, SnapResult};
@@ -487,9 +487,18 @@ fn canonical_font_weight(weight: u16) -> u16 {
     ((weight.clamp(100, 900) + 50) / 100) * 100
 }
 
-fn bounded_numeric_sum(value: f32, delta: f32, minimum: f32, maximum: f32) -> Option<f32> {
-    let sum = value + delta;
-    sum.is_finite().then(|| sum.clamp(minimum, maximum))
+fn bounded_numeric_adjustment(
+    target: NumericPropertyTarget,
+    value: f32,
+    delta: f32,
+    mode: NumericAdjustmentMode,
+    minimum: f32,
+    maximum: f32,
+) -> Option<f32> {
+    let adjusted = target.apply_delta(value, delta, mode);
+    adjusted
+        .is_finite()
+        .then(|| adjusted.clamp(minimum, maximum))
 }
 
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
@@ -861,29 +870,17 @@ impl Editor {
             }
 
             // Nudge
-            EditorAction::NudgeUp => {
-                self.nudge_selection(Vec2::new(0.0, -1.0));
-            }
-            EditorAction::NudgeDown => {
-                self.nudge_selection(Vec2::new(0.0, 1.0));
-            }
-            EditorAction::NudgeLeft => {
-                self.nudge_selection(Vec2::new(-1.0, 0.0));
-            }
-            EditorAction::NudgeRight => {
-                self.nudge_selection(Vec2::new(1.0, 0.0));
-            }
-            EditorAction::NudgeUpLarge => {
-                self.nudge_selection(Vec2::new(0.0, -10.0));
-            }
-            EditorAction::NudgeDownLarge => {
-                self.nudge_selection(Vec2::new(0.0, 10.0));
-            }
-            EditorAction::NudgeLeftLarge => {
-                self.nudge_selection(Vec2::new(-10.0, 0.0));
-            }
-            EditorAction::NudgeRightLarge => {
-                self.nudge_selection(Vec2::new(10.0, 0.0));
+            EditorAction::NudgeUp
+            | EditorAction::NudgeDown
+            | EditorAction::NudgeLeft
+            | EditorAction::NudgeRight
+            | EditorAction::NudgeUpLarge
+            | EditorAction::NudgeDownLarge
+            | EditorAction::NudgeLeftLarge
+            | EditorAction::NudgeRightLarge => {
+                if let Some((direction, distance)) = action.nudge_spec() {
+                    self.nudge_selection(Self::nudge_delta(direction, distance));
+                }
             }
 
             // View
@@ -4829,6 +4826,16 @@ impl Editor {
         self.needs_redraw = true;
     }
 
+    fn nudge_delta(direction: NudgeDirection, distance: NudgeDistance) -> Vec2 {
+        let amount = distance.document_units();
+        match direction {
+            NudgeDirection::Up => Vec2::new(0.0, -amount),
+            NudgeDirection::Down => Vec2::new(0.0, amount),
+            NudgeDirection::Left => Vec2::new(-amount, 0.0),
+            NudgeDirection::Right => Vec2::new(amount, 0.0),
+        }
+    }
+
     /// Nudge the selection by a world-space delta.
     fn nudge_selection(&mut self, delta: Vec2) {
         self.translate_selection(delta, "Nudge");
@@ -6236,6 +6243,16 @@ impl Editor {
         session: &NumericPropertyScrubSession,
         delta: f32,
     ) -> bool {
+        self.preview_numeric_property_scrub_with_mode(session, delta, NumericAdjustmentMode::Fine)
+    }
+
+    /// Preview an absolute delta using the requested numeric precision mode.
+    pub fn preview_numeric_property_scrub_with_mode(
+        &mut self,
+        session: &NumericPropertyScrubSession,
+        delta: f32,
+        mode: NumericAdjustmentMode,
+    ) -> bool {
         if !session.belongs_to(&self.numeric_property_scrub_owner)
             || !delta.is_finite()
             || self
@@ -6255,7 +6272,7 @@ impl Editor {
             .take()
             .expect("the scrub was validated above");
         let changed = self
-            .apply_numeric_property_preview(&state, delta)
+            .apply_numeric_property_preview(&state, delta, mode)
             .unwrap_or(false);
         self.numeric_property_scrub = Some(state);
         if changed {
@@ -6454,23 +6471,24 @@ impl Editor {
         &mut self,
         state: &NumericPropertyScrubState,
         delta: f32,
+        mode: NumericAdjustmentMode,
     ) -> Option<bool> {
         match (&state.target, &state.snapshot) {
             (
                 NumericPropertyTarget::WorldX | NumericPropertyTarget::WorldY,
                 NumericPropertySnapshot::Transforms(snapshots),
-            ) => self.preview_numeric_world_position(state.target, snapshots, delta),
+            ) => self.preview_numeric_world_position(state.target, snapshots, delta, mode),
             (
                 NumericPropertyTarget::Opacity | NumericPropertyTarget::StrokeWidth,
                 NumericPropertySnapshot::Styles(snapshots),
-            ) => self.preview_numeric_style(state.target, snapshots, delta),
+            ) => self.preview_numeric_style(state.target, snapshots, delta, mode),
             (NumericPropertyTarget::TextSize, NumericPropertySnapshot::Text { id, before }) => {
-                self.preview_numeric_text(*id, before, delta)
+                self.preview_numeric_text(*id, before, delta, mode)
             }
             (
                 NumericPropertyTarget::AutoLayoutSpacing | NumericPropertyTarget::AutoLayoutPadding,
                 NumericPropertySnapshot::Layout { id, before },
-            ) => self.preview_numeric_layout(state.target, *id, before, delta),
+            ) => self.preview_numeric_layout(state.target, *id, before, delta, mode),
             _ => None,
         }
     }
@@ -6480,19 +6498,28 @@ impl Editor {
         target: NumericPropertyTarget,
         snapshots: &[TransformSnapshot],
         delta: f32,
+        mode: NumericAdjustmentMode,
     ) -> Option<bool> {
-        let translation = match target {
-            NumericPropertyTarget::WorldX => Vec2::new(delta, 0.0),
-            NumericPropertyTarget::WorldY => Vec2::new(0.0, delta),
-            NumericPropertyTarget::Opacity
-            | NumericPropertyTarget::StrokeWidth
-            | NumericPropertyTarget::TextSize
-            | NumericPropertyTarget::AutoLayoutSpacing
-            | NumericPropertyTarget::AutoLayoutPadding => return None,
-        };
         let desired = snapshots
             .iter()
             .map(|snapshot| {
+                let translation = match target {
+                    NumericPropertyTarget::WorldX => Vec2::new(
+                        target.apply_delta(snapshot.world.translation.x, delta, mode)
+                            - snapshot.world.translation.x,
+                        0.0,
+                    ),
+                    NumericPropertyTarget::WorldY => Vec2::new(
+                        0.0,
+                        target.apply_delta(snapshot.world.translation.y, delta, mode)
+                            - snapshot.world.translation.y,
+                    ),
+                    NumericPropertyTarget::Opacity
+                    | NumericPropertyTarget::StrokeWidth
+                    | NumericPropertyTarget::TextSize
+                    | NumericPropertyTarget::AutoLayoutSpacing
+                    | NumericPropertyTarget::AutoLayoutPadding => return None,
+                };
                 let world = Affine2::from_translation(translation) * snapshot.world;
                 (world.translation.is_finite() && world.matrix2.is_finite())
                     .then_some((snapshot.id, world))
@@ -6520,6 +6547,7 @@ impl Editor {
         target: NumericPropertyTarget,
         snapshots: &[StyleSnapshot],
         delta: f32,
+        mode: NumericAdjustmentMode,
     ) -> Option<bool> {
         let after = snapshots
             .iter()
@@ -6527,11 +6555,25 @@ impl Editor {
                 let mut style = snapshot.before.clone();
                 match target {
                     NumericPropertyTarget::Opacity => {
-                        style.opacity = bounded_numeric_sum(style.opacity, delta, 0.0, 1.0)?;
+                        style.opacity = bounded_numeric_adjustment(
+                            target,
+                            style.opacity,
+                            delta,
+                            mode,
+                            0.0,
+                            1.0,
+                        )?;
                     }
                     NumericPropertyTarget::StrokeWidth => {
                         let stroke = style.stroke.as_mut()?;
-                        stroke.width = bounded_numeric_sum(stroke.width, delta, 0.1, 1000.0)?;
+                        stroke.width = bounded_numeric_adjustment(
+                            target,
+                            stroke.width,
+                            delta,
+                            mode,
+                            0.1,
+                            1000.0,
+                        )?;
                     }
                     NumericPropertyTarget::WorldX
                     | NumericPropertyTarget::WorldY
@@ -6555,11 +6597,19 @@ impl Editor {
         Some(changed)
     }
 
-    fn preview_numeric_text(&mut self, id: NodeId, before: &TextData, delta: f32) -> Option<bool> {
+    fn preview_numeric_text(
+        &mut self,
+        id: NodeId,
+        before: &TextData,
+        delta: f32,
+        mode: NumericAdjustmentMode,
+    ) -> Option<bool> {
         let mut after = before.clone();
-        after.font_size = bounded_numeric_sum(
+        after.font_size = bounded_numeric_adjustment(
+            NumericPropertyTarget::TextSize,
             before.font_size,
             delta,
+            mode,
             MIN_TEXT_DIMENSION,
             MAX_TEXT_FONT_SIZE,
         )?;
@@ -6582,21 +6632,31 @@ impl Editor {
         id: NodeId,
         before: &Layout,
         delta: f32,
+        mode: NumericAdjustmentMode,
     ) -> Option<bool> {
         let Layout::Auto(mut after) = before.clone() else {
             return None;
         };
         match target {
             NumericPropertyTarget::AutoLayoutSpacing => {
-                after.spacing = bounded_numeric_sum(after.spacing, delta, 0.0, f32::MAX)?;
+                let spacing = target.apply_delta(after.spacing, delta, mode);
+                after.spacing = spacing.is_finite().then(|| spacing.max(0.0))?;
             }
             NumericPropertyTarget::AutoLayoutPadding => {
-                after.padding.left = bounded_numeric_sum(after.padding.left, delta, 0.0, f32::MAX)?;
-                after.padding.top = bounded_numeric_sum(after.padding.top, delta, 0.0, f32::MAX)?;
-                after.padding.right =
-                    bounded_numeric_sum(after.padding.right, delta, 0.0, f32::MAX)?;
-                after.padding.bottom =
-                    bounded_numeric_sum(after.padding.bottom, delta, 0.0, f32::MAX)?;
+                let padding = [
+                    after.padding.left,
+                    after.padding.top,
+                    after.padding.right,
+                    after.padding.bottom,
+                ]
+                .map(|value| target.apply_delta(value, delta, mode));
+                if padding.iter().any(|value| !value.is_finite()) {
+                    return None;
+                }
+                after.padding.left = padding[0].max(0.0);
+                after.padding.top = padding[1].max(0.0);
+                after.padding.right = padding[2].max(0.0);
+                after.padding.bottom = padding[3].max(0.0);
             }
             NumericPropertyTarget::WorldX
             | NumericPropertyTarget::WorldY
@@ -8867,6 +8927,49 @@ mod tests {
 
         assert!(editor.execute_action(EditorAction::Undo));
         assert_affine_approx_eq(editor.document.world_transform(child), before);
+
+        assert!(editor.execute_action(EditorAction::NudgeRightLarge));
+        let after_large = editor.document.world_transform(child);
+        assert_affine_approx_eq(
+            after_large,
+            Affine2::from_translation(Vec2::new(10.0, 0.0)) * before,
+        );
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_affine_approx_eq(editor.document.world_transform(child), before);
+    }
+
+    #[test]
+    fn nudge_actions_apply_each_direction_and_distance() {
+        let expected = [
+            (EditorAction::NudgeUp, Vec2::new(0.0, -1.0)),
+            (EditorAction::NudgeDown, Vec2::new(0.0, 1.0)),
+            (EditorAction::NudgeLeft, Vec2::new(-1.0, 0.0)),
+            (EditorAction::NudgeRight, Vec2::new(1.0, 0.0)),
+            (EditorAction::NudgeUpLarge, Vec2::new(0.0, -10.0)),
+            (EditorAction::NudgeDownLarge, Vec2::new(0.0, 10.0)),
+            (EditorAction::NudgeLeftLarge, Vec2::new(-10.0, 0.0)),
+            (EditorAction::NudgeRightLarge, Vec2::new(10.0, 0.0)),
+        ];
+
+        for (action, expected_delta) in expected {
+            let mut editor = Editor::new();
+            let shape = editor
+                .document
+                .add_child(
+                    editor.document.root,
+                    Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                        .with_transform(Affine2::from_translation(Vec2::new(20.0, 30.0))),
+                )
+                .unwrap();
+            editor.selection.select(shape);
+            let before = editor.document.world_transform(shape).translation;
+
+            assert!(editor.execute_action(action));
+
+            let after = editor.document.world_transform(shape).translation;
+            assert!((after - before - expected_delta).length() < 0.0001);
+        }
     }
 
     #[test]
@@ -10944,6 +11047,206 @@ mod tests {
             editor.document.get(shape).unwrap().style.stroke,
             Some(Stroke::black(2.0))
         );
+    }
+
+    #[test]
+    fn coarse_numeric_scrub_rounds_before_commit() {
+        let mut editor = Editor::new();
+        let shape = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(Style::fill_and_stroke(Paint::white(), Stroke::black(2.4))),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::StrokeWidth)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &scrub,
+            1.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(3.0))
+        );
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &scrub,
+            0.1,
+            NumericAdjustmentMode::Fine,
+        ));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(2.5))
+        );
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &scrub,
+            1.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(3.0))
+        );
+        assert!(editor.commit_numeric_property_scrub(scrub));
+        assert_eq!(editor.history.undo_count(), 1);
+    }
+
+    #[test]
+    fn coarse_numeric_scrub_clamps_after_rounding() {
+        let mut editor = Editor::new();
+        let shape = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(Style::fill_and_stroke(Paint::white(), Stroke::black(1.4))),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+
+        let scrub = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::StrokeWidth)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &scrub,
+            -1.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(0.1))
+        );
+    }
+
+    #[test]
+    fn coarse_numeric_scrubs_round_each_property_family() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let shape = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(Style::fill_and_stroke(Paint::white(), Stroke::black(2.4)))
+                    .with_transform(Affine2::from_translation(Vec2::new(13.7, 22.4))),
+            )
+            .unwrap();
+        editor.document.get_mut(shape).unwrap().style.opacity = 0.57;
+        let text = editor
+            .document
+            .add_child(root, Node::text("Text", "Hello"))
+            .unwrap();
+        if let NodeKind::Text(text_data) = &mut editor.document.get_mut(text).unwrap().kind {
+            text_data.font_size = 16.3;
+        }
+        let group = editor
+            .document
+            .add_child(
+                root,
+                Node::group("Stack").with_layout(Layout::Auto(
+                    AutoLayout::horizontal()
+                        .with_spacing(10.4)
+                        .with_padding(crate::Edges {
+                            left: 1.2,
+                            top: 2.8,
+                            right: 3.1,
+                            bottom: 4.9,
+                        }),
+                )),
+            )
+            .unwrap();
+
+        editor.selection.select(shape);
+        let opacity = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::Opacity)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &opacity,
+            0.1,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert!((editor.document.get(shape).unwrap().style.opacity - 0.67).abs() < 0.0001);
+        assert!(editor.commit_numeric_property_scrub(opacity));
+
+        let stroke = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::StrokeWidth)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &stroke,
+            1.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.stroke,
+            Some(Stroke::black(3.0))
+        );
+        assert!(editor.commit_numeric_property_scrub(stroke));
+
+        let world_x = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::WorldX)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &world_x,
+            10.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(editor.document.world_transform(shape).translation.x, 24.0);
+        assert!(editor.commit_numeric_property_scrub(world_x));
+
+        editor.selection.select(text);
+        let text_size = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::TextSize)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &text_size,
+            10.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        assert_eq!(editor.selected_text_data().unwrap().font_size, 26.0);
+        assert!(editor.commit_numeric_property_scrub(text_size));
+
+        editor.selection.select(group);
+        let spacing = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::AutoLayoutSpacing)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &spacing,
+            10.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        let Layout::Auto(layout) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(layout.spacing, 20.0);
+        assert!(editor.commit_numeric_property_scrub(spacing));
+
+        let padding = editor
+            .begin_numeric_property_scrub(NumericPropertyTarget::AutoLayoutPadding)
+            .unwrap();
+        assert!(editor.preview_numeric_property_scrub_with_mode(
+            &padding,
+            10.0,
+            NumericAdjustmentMode::Coarse,
+        ));
+        let Layout::Auto(layout) = editor.selected_group_layout().unwrap() else {
+            panic!("expected auto layout");
+        };
+        assert_eq!(
+            layout.padding,
+            crate::Edges {
+                left: 11.0,
+                top: 13.0,
+                right: 13.0,
+                bottom: 15.0,
+            }
+        );
+        assert!(editor.commit_numeric_property_scrub(padding));
+        assert_eq!(editor.history.undo_count(), 6);
     }
 
     #[test]

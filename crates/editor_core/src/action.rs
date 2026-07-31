@@ -57,21 +57,21 @@ pub enum EditorAction {
     DistributeVertical,
 
     // === Nudge ===
-    /// Move selection up by 1 pixel
+    /// Move selection up by 1 document unit
     NudgeUp,
-    /// Move selection down by 1 pixel
+    /// Move selection down by 1 document unit
     NudgeDown,
-    /// Move selection left by 1 pixel
+    /// Move selection left by 1 document unit
     NudgeLeft,
-    /// Move selection right by 1 pixel
+    /// Move selection right by 1 document unit
     NudgeRight,
-    /// Move selection up by 10 pixels
+    /// Move selection up by 10 document units
     NudgeUpLarge,
-    /// Move selection down by 10 pixels
+    /// Move selection down by 10 document units
     NudgeDownLarge,
-    /// Move selection left by 10 pixels
+    /// Move selection left by 10 document units
     NudgeLeftLarge,
-    /// Move selection right by 10 pixels
+    /// Move selection right by 10 document units
     NudgeRightLarge,
 
     // === View ===
@@ -194,7 +194,48 @@ pub struct ActionMeta {
     pub default_shortcut: Option<Shortcut>,
 }
 
+/// Direction of a keyboard nudge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Distance of a keyboard nudge in document units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeDistance {
+    Fine,
+    Coarse,
+}
+
+impl NudgeDistance {
+    /// Return the distance in document units.
+    pub const fn document_units(self) -> f32 {
+        match self {
+            Self::Fine => 1.0,
+            Self::Coarse => 10.0,
+        }
+    }
+}
+
 impl EditorAction {
+    /// Return the direction and distance for keyboard nudge actions.
+    pub const fn nudge_spec(self) -> Option<(NudgeDirection, NudgeDistance)> {
+        match self {
+            Self::NudgeUp => Some((NudgeDirection::Up, NudgeDistance::Fine)),
+            Self::NudgeDown => Some((NudgeDirection::Down, NudgeDistance::Fine)),
+            Self::NudgeLeft => Some((NudgeDirection::Left, NudgeDistance::Fine)),
+            Self::NudgeRight => Some((NudgeDirection::Right, NudgeDistance::Fine)),
+            Self::NudgeUpLarge => Some((NudgeDirection::Up, NudgeDistance::Coarse)),
+            Self::NudgeDownLarge => Some((NudgeDirection::Down, NudgeDistance::Coarse)),
+            Self::NudgeLeftLarge => Some((NudgeDirection::Left, NudgeDistance::Coarse)),
+            Self::NudgeRightLarge => Some((NudgeDirection::Right, NudgeDistance::Coarse)),
+            _ => None,
+        }
+    }
+
     /// Get metadata for this action.
     pub fn meta(&self) -> ActionMeta {
         match self {
@@ -333,49 +374,49 @@ impl EditorAction {
             // Nudge
             EditorAction::NudgeUp => ActionMeta {
                 name: "Nudge Up",
-                description: "Move selection up by 1 pixel",
+                description: "Move selection up by 1 document unit",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::key(Key::ArrowUp)),
             },
             EditorAction::NudgeDown => ActionMeta {
                 name: "Nudge Down",
-                description: "Move selection down by 1 pixel",
+                description: "Move selection down by 1 document unit",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::key(Key::ArrowDown)),
             },
             EditorAction::NudgeLeft => ActionMeta {
                 name: "Nudge Left",
-                description: "Move selection left by 1 pixel",
+                description: "Move selection left by 1 document unit",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::key(Key::ArrowLeft)),
             },
             EditorAction::NudgeRight => ActionMeta {
                 name: "Nudge Right",
-                description: "Move selection right by 1 pixel",
+                description: "Move selection right by 1 document unit",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::key(Key::ArrowRight)),
             },
             EditorAction::NudgeUpLarge => ActionMeta {
                 name: "Nudge Up (Large)",
-                description: "Move selection up by 10 pixels",
+                description: "Move selection up by 10 document units",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::shift(Key::ArrowUp)),
             },
             EditorAction::NudgeDownLarge => ActionMeta {
                 name: "Nudge Down (Large)",
-                description: "Move selection down by 10 pixels",
+                description: "Move selection down by 10 document units",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::shift(Key::ArrowDown)),
             },
             EditorAction::NudgeLeftLarge => ActionMeta {
                 name: "Nudge Left (Large)",
-                description: "Move selection left by 10 pixels",
+                description: "Move selection left by 10 document units",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::shift(Key::ArrowLeft)),
             },
             EditorAction::NudgeRightLarge => ActionMeta {
                 name: "Nudge Right (Large)",
-                description: "Move selection right by 10 pixels",
+                description: "Move selection right by 10 document units",
                 category: ActionCategory::Edit,
                 default_shortcut: Some(Shortcut::shift(Key::ArrowRight)),
             },
@@ -602,5 +643,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nudge_specs_centralize_direction_and_distance() {
+        let expected = [
+            (
+                EditorAction::NudgeUp,
+                NudgeDirection::Up,
+                NudgeDistance::Fine,
+            ),
+            (
+                EditorAction::NudgeDown,
+                NudgeDirection::Down,
+                NudgeDistance::Fine,
+            ),
+            (
+                EditorAction::NudgeLeft,
+                NudgeDirection::Left,
+                NudgeDistance::Fine,
+            ),
+            (
+                EditorAction::NudgeRight,
+                NudgeDirection::Right,
+                NudgeDistance::Fine,
+            ),
+            (
+                EditorAction::NudgeUpLarge,
+                NudgeDirection::Up,
+                NudgeDistance::Coarse,
+            ),
+            (
+                EditorAction::NudgeDownLarge,
+                NudgeDirection::Down,
+                NudgeDistance::Coarse,
+            ),
+            (
+                EditorAction::NudgeLeftLarge,
+                NudgeDirection::Left,
+                NudgeDistance::Coarse,
+            ),
+            (
+                EditorAction::NudgeRightLarge,
+                NudgeDirection::Right,
+                NudgeDistance::Coarse,
+            ),
+        ];
+
+        for (action, direction, distance) in expected {
+            assert_eq!(action.nudge_spec(), Some((direction, distance)));
+        }
+        assert_eq!(NudgeDistance::Fine.document_units(), 1.0);
+        assert_eq!(NudgeDistance::Coarse.document_units(), 10.0);
+        assert_eq!(EditorAction::Undo.nudge_spec(), None);
     }
 }

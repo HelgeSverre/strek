@@ -30,7 +30,9 @@ pub mod text;
 pub mod transaction;
 pub mod transform;
 
-pub use action::{ActionCategory, ActionMeta, EditorAction, Shortcut};
+pub use action::{
+    ActionCategory, ActionMeta, EditorAction, NudgeDirection, NudgeDistance, Shortcut,
+};
 pub use cache::{Cache, DirtyFlags};
 pub use command::{Command, Patch};
 pub use editor::{
@@ -45,7 +47,10 @@ pub use node::{
     FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData, TextSizing,
 };
 pub use path::{HandleMode, PathAnchor, PathCmd, PathContour, PathData, Rect};
-pub use property_scrub::{NumericPropertyScrubSession, NumericPropertyTarget};
+pub use property_scrub::{
+    NumericAdjustmentDirection, NumericAdjustmentMode, NumericPropertyScrubSession,
+    NumericPropertyTarget,
+};
 pub use selection::{Selection, SelectionAction};
 pub use snap::{
     AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult,

@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use editor_core::{
-    Editor, EditorAction, NodeId, NumericPropertyScrubSession, NumericPropertyTarget,
+    Editor, EditorAction, NodeId, NumericAdjustmentDirection, NumericAdjustmentMode,
+    NumericPropertyScrubSession, NumericPropertyTarget,
 };
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
@@ -120,18 +121,8 @@ actions!(
         SetLayoutFree,
         SetLayoutHorizontal,
         SetLayoutVertical,
-        StepLayoutSpacingDown,
-        StepLayoutSpacingUp,
-        StepLayoutPaddingDown,
-        StepLayoutPaddingUp,
-        PropertyMoveLeft,
-        PropertyMoveRight,
-        PropertyMoveUp,
-        PropertyMoveDown,
         PropertyRotateLeft,
         PropertyRotateRight,
-        PropertyOpacityDown,
-        PropertyOpacityUp,
         PropertyFillNone,
         PropertyFillWhite,
         PropertyFillBlack,
@@ -141,8 +132,6 @@ actions!(
         StartFillColorInput,
         StartStrokeColorInput,
         PropertyToggleStroke,
-        PropertyStrokeDown,
-        PropertyStrokeUp,
         ToggleCreationFill,
         StartCreationFillColorInput,
         ToggleCreationStroke,
@@ -1783,6 +1772,7 @@ impl Strek {
     fn preview_numeric_property_scrub_at(
         &mut self,
         pointer_x: f32,
+        mode: NumericAdjustmentMode,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(scrub) = self.numeric_property_scrub.as_ref() else {
@@ -1792,10 +1782,10 @@ impl Strek {
             return false;
         }
         let pointer_delta = pointer_x - scrub.pointer_origin_x;
-        let delta = properties_panel::numeric_property_delta(scrub.target, pointer_delta);
-        let changed = self
-            .editor
-            .preview_numeric_property_scrub(&scrub.session, delta);
+        let delta = properties_panel::numeric_property_delta(scrub.target, pointer_delta, mode);
+        let changed =
+            self.editor
+                .preview_numeric_property_scrub_with_mode(&scrub.session, delta, mode);
         cx.notify();
         changed
     }
@@ -1807,7 +1797,12 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         if event.pressed_button == Some(MouseButton::Left) {
-            self.preview_numeric_property_scrub_at(event.position.x.0, cx);
+            let mode = if event.modifiers.shift {
+                NumericAdjustmentMode::Coarse
+            } else {
+                NumericAdjustmentMode::Fine
+            };
+            self.preview_numeric_property_scrub_at(event.position.x.0, mode, cx);
         }
     }
 
@@ -1820,12 +1815,42 @@ impl Strek {
         if event.button != MouseButton::Left {
             return;
         }
-        self.preview_numeric_property_scrub_at(event.position.x.0, cx);
+        let mode = if event.modifiers.shift {
+            NumericAdjustmentMode::Coarse
+        } else {
+            NumericAdjustmentMode::Fine
+        };
+        self.preview_numeric_property_scrub_at(event.position.x.0, mode, cx);
         let Some(scrub) = self.numeric_property_scrub.take() else {
             return;
         };
         self.editor.commit_numeric_property_scrub(scrub.session);
         cx.notify();
+    }
+
+    fn adjust_numeric_property(
+        &mut self,
+        target: NumericPropertyTarget,
+        direction: NumericAdjustmentDirection,
+        mode: NumericAdjustmentMode,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
+        self.cancel_numeric_property_scrub();
+        self.finish_layer_rename(true, cx);
+        let Some(session) = self.editor.begin_numeric_property_scrub(target) else {
+            return;
+        };
+        let delta = target.step(mode) * direction.multiplier();
+        let changed = self
+            .editor
+            .preview_numeric_property_scrub_with_mode(&session, delta, mode);
+        let committed = self.editor.commit_numeric_property_scrub(session);
+        if changed || committed {
+            cx.notify();
+        }
     }
 
     fn cancel_numeric_property_scrub(&mut self) -> bool {
@@ -2065,117 +2090,6 @@ impl Strek {
         }
     }
 
-    fn selected_auto_layout(&self) -> Option<editor_core::AutoLayout> {
-        match self.editor.selected_group_layout()? {
-            editor_core::Layout::Auto(layout) => Some(layout),
-            editor_core::Layout::Free => None,
-        }
-    }
-
-    fn step_layout_spacing(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let Some(layout) = self.selected_auto_layout() else {
-            return;
-        };
-        let spacing = (layout.spacing + delta).max(0.0);
-        if self.editor.set_selected_group_spacing(spacing) {
-            cx.notify();
-        }
-    }
-
-    fn step_layout_spacing_down(
-        &mut self,
-        _: &StepLayoutSpacingDown,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.step_layout_spacing(-1.0, cx);
-    }
-
-    fn step_layout_spacing_up(
-        &mut self,
-        _: &StepLayoutSpacingUp,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.step_layout_spacing(1.0, cx);
-    }
-
-    fn step_layout_padding(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let Some(layout) = self.selected_auto_layout() else {
-            return;
-        };
-        let padding = layout.padding;
-        let current = (padding.left + padding.top + padding.right + padding.bottom) / 4.0;
-        if self
-            .editor
-            .set_selected_group_uniform_padding((current + delta).max(0.0))
-        {
-            cx.notify();
-        }
-    }
-
-    fn step_layout_padding_down(
-        &mut self,
-        _: &StepLayoutPaddingDown,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.step_layout_padding(-1.0, cx);
-    }
-
-    fn step_layout_padding_up(
-        &mut self,
-        _: &StepLayoutPaddingUp,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.step_layout_padding(1.0, cx);
-    }
-
-    fn property_move_left(
-        &mut self,
-        _: &PropertyMoveLeft,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.move_selection_by(glam::Vec2::new(-1.0, 0.0)) {
-            cx.notify();
-        }
-    }
-
-    fn property_move_right(
-        &mut self,
-        _: &PropertyMoveRight,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.move_selection_by(glam::Vec2::new(1.0, 0.0)) {
-            cx.notify();
-        }
-    }
-
-    fn property_move_up(
-        &mut self,
-        _: &PropertyMoveUp,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.move_selection_by(glam::Vec2::new(0.0, -1.0)) {
-            cx.notify();
-        }
-    }
-
-    fn property_move_down(
-        &mut self,
-        _: &PropertyMoveDown,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.move_selection_by(glam::Vec2::new(0.0, 1.0)) {
-            cx.notify();
-        }
-    }
-
     fn property_rotate_left(
         &mut self,
         _: &PropertyRotateLeft,
@@ -2197,39 +2111,6 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         if self.editor.rotate_selection_by(std::f32::consts::PI / 12.0) {
-            cx.notify();
-        }
-    }
-
-    fn selected_opacity(&self) -> f32 {
-        self.editor
-            .selection()
-            .primary()
-            .and_then(|id| self.editor.document().get(id))
-            .map(|node| node.style.opacity)
-            .unwrap_or(1.0)
-    }
-
-    fn property_opacity_down(
-        &mut self,
-        _: &PropertyOpacityDown,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let opacity = self.selected_opacity() - 0.1;
-        if self.editor.set_selected_opacity(opacity) {
-            cx.notify();
-        }
-    }
-
-    fn property_opacity_up(
-        &mut self,
-        _: &PropertyOpacityUp,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let opacity = self.selected_opacity() + 0.1;
-        if self.editor.set_selected_opacity(opacity) {
             cx.notify();
         }
     }
@@ -2438,28 +2319,6 @@ impl Strek {
     ) {
         self.property_color_input = None;
         if self.editor.toggle_selected_stroke() {
-            cx.notify();
-        }
-    }
-
-    fn property_stroke_down(
-        &mut self,
-        _: &PropertyStrokeDown,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.adjust_selected_stroke_width(-1.0) {
-            cx.notify();
-        }
-    }
-
-    fn property_stroke_up(
-        &mut self,
-        _: &PropertyStrokeUp,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.editor.adjust_selected_stroke_width(1.0) {
             cx.notify();
         }
     }
@@ -3262,18 +3121,8 @@ impl Render for Strek {
             .on_action(cx.listener(Self::set_layout_free))
             .on_action(cx.listener(Self::set_layout_horizontal))
             .on_action(cx.listener(Self::set_layout_vertical))
-            .on_action(cx.listener(Self::step_layout_spacing_down))
-            .on_action(cx.listener(Self::step_layout_spacing_up))
-            .on_action(cx.listener(Self::step_layout_padding_down))
-            .on_action(cx.listener(Self::step_layout_padding_up))
-            .on_action(cx.listener(Self::property_move_left))
-            .on_action(cx.listener(Self::property_move_right))
-            .on_action(cx.listener(Self::property_move_up))
-            .on_action(cx.listener(Self::property_move_down))
             .on_action(cx.listener(Self::property_rotate_left))
             .on_action(cx.listener(Self::property_rotate_right))
-            .on_action(cx.listener(Self::property_opacity_down))
-            .on_action(cx.listener(Self::property_opacity_up))
             .on_action(cx.listener(Self::property_fill_none))
             .on_action(cx.listener(Self::property_fill_white))
             .on_action(cx.listener(Self::property_fill_black))
@@ -3283,8 +3132,6 @@ impl Render for Strek {
             .on_action(cx.listener(Self::start_fill_color_input))
             .on_action(cx.listener(Self::start_stroke_color_input))
             .on_action(cx.listener(Self::property_toggle_stroke))
-            .on_action(cx.listener(Self::property_stroke_down))
-            .on_action(cx.listener(Self::property_stroke_up))
             .on_action(cx.listener(Self::toggle_creation_fill))
             .on_action(cx.listener(Self::start_creation_fill_color_input))
             .on_action(cx.listener(Self::toggle_creation_stroke))

@@ -1207,6 +1207,41 @@ impl Editor {
 }
 ```
 
+### 12.4 Numeric Property Adjustment
+
+Numeric property steppers and horizontal scrubs MUST use the same adjustment policy.
+
+The unmodified mode uses these steps:
+
+| Property | Fine step |
+|---|---:|
+| X and Y position | 1 |
+| Opacity | 1 percentage point (`0.01` internally) |
+| Stroke width | `0.1` |
+| Text size | 1 |
+| Auto-layout spacing and padding | 1 |
+
+Holding `Shift` MUST select coarse mode. Coarse mode uses these steps:
+
+| Property | Coarse step | Clean quantum |
+|---|---:|---:|
+| X and Y position | 10 | 1 |
+| Opacity | 10 percentage points (`0.1` internally) | 1 percentage point |
+| Stroke width | 1 | 1 |
+| Text size | 10 | 1 |
+| Auto-layout spacing and padding | 10 | 1 |
+
+Coarse mode MUST round the resulting value to its clean quantum before applying the property bounds.
+Fine mode MUST preserve fractional results.
+
+The modifier MUST be evaluated for each button click and pointer-move event. Changing `Shift` during a scrub changes the active mode without changing the scrub origin.
+
+A `+` or `−` click and a scrub MUST produce the same property adjustment for the same target, direction, mode, and starting value.
+
+Each completed scrub produces at most one undo entry. Escape cancels the scrub without an undo entry.
+
+Rotation controls retain their dedicated 15-degree step and do not use this policy.
+
 ---
 
 ## 13. Platform Frontends
@@ -1440,6 +1475,7 @@ intentional product backlog.
 - [x] Font family, weight, and italic controls
 - [x] Live preview during value scrubbing with one undo entry on commit
 - [x] Numeric values with horizontal drag-to-adjust and Escape cancellation
+- [x] Shift-aware fine/coarse steps shared by numeric steppers and scrubs
 
 ### Milestone 12: Drawing Tools
 - [x] Rectangle tool with constrained and centered drawing
