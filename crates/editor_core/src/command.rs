@@ -129,6 +129,7 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.style = after.clone();
                 }
+                doc.mark_bounds_dirty(*id);
             }
 
             Patch::SetPath { id, after, .. } => {
@@ -277,6 +278,7 @@ impl Patch {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.style = before.clone();
                 }
+                doc.mark_bounds_dirty(*id);
             }
 
             Patch::SetPath { id, before, .. } => {

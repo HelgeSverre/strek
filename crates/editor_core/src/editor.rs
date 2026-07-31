@@ -1448,6 +1448,126 @@ impl Editor {
         }
     }
 
+    /// Resolve a painted leaf to the object users expect to manipulate.
+    ///
+    /// The common parent of the current selection is the active selection
+    /// scope. A normal click selects the direct child of that scope, while the
+    /// primary modifier deliberately bypasses the scope for deep selection.
+    /// With no scoped selection, the document root is used, so groups and
+    /// frames behave as single objects on first click.
+    fn selection_target_for_hit(&self, hit: NodeId, deep_select: bool) -> NodeId {
+        if deep_select {
+            return hit;
+        }
+
+        let scope = self.selection_scope();
+        self.direct_child_on_path(scope, hit)
+            .or_else(|| self.direct_child_on_path(self.document.root, hit))
+            .unwrap_or(hit)
+    }
+
+    fn selection_scope(&self) -> NodeId {
+        let mut parents = self
+            .selection
+            .iter()
+            .filter_map(|id| self.document.get(id).and_then(|node| node.parent));
+        let Some(parent) = parents.next() else {
+            return self.document.root;
+        };
+        if parents.all(|candidate| candidate == parent) {
+            parent
+        } else {
+            self.document.root
+        }
+    }
+
+    fn direct_child_on_path(&self, ancestor: NodeId, descendant: NodeId) -> Option<NodeId> {
+        let mut current = descendant;
+        while let Some(parent) = self.document.get(current).and_then(|node| node.parent) {
+            if parent == ancestor {
+                return Some(current);
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn select_one_level_toward(&mut self, descendant: NodeId) -> bool {
+        if self.selection.len() != 1 {
+            return false;
+        }
+        let Some(selected) = self.selection.primary() else {
+            return false;
+        };
+        let Some(child) = self.direct_child_on_path(selected, descendant) else {
+            return false;
+        };
+        self.selection.select(child);
+        self.layer_panel.expand(selected);
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Descend one selection level, or begin editing an already-selected leaf.
+    pub fn enter_selection(&mut self) -> bool {
+        if self.selection.len() != 1 || !matches!(self.drag, DragState::None) {
+            return false;
+        }
+        let Some(selected) = self.selection.primary() else {
+            return false;
+        };
+        let child = self.document.get(selected).and_then(|node| {
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .find(|child| self.document.is_effectively_editable(*child))
+        });
+        if let Some(child) = child {
+            self.selection.select(child);
+            self.layer_panel.expand(selected);
+            self.needs_redraw = true;
+            return true;
+        }
+
+        if self
+            .document
+            .get(selected)
+            .is_some_and(|node| matches!(node.kind, NodeKind::Shape(_)))
+        {
+            self.enter_vector_edit();
+            return true;
+        }
+        if self
+            .document
+            .get(selected)
+            .is_some_and(|node| matches!(node.kind, NodeKind::Text(_)))
+        {
+            self.begin_existing_text_edit(selected);
+            return true;
+        }
+        false
+    }
+
+    /// Move the current selection one level toward the document root.
+    pub fn select_parent(&mut self) -> bool {
+        if self.selection.is_empty() || !matches!(self.drag, DragState::None) {
+            return false;
+        }
+        let parents = self
+            .selection
+            .iter()
+            .filter_map(|id| self.document.get(id).and_then(|node| node.parent))
+            .filter(|parent| *parent != self.document.root)
+            .collect::<Vec<_>>();
+        if parents.is_empty() {
+            return false;
+        }
+        self.selection.set(parents);
+        self.needs_redraw = true;
+        true
+    }
+
     fn handle_pointer_down(
         &mut self,
         screen_pos: Vec2,
@@ -1516,28 +1636,14 @@ impl Editor {
                                 cursor: Some(self.cursor_for_state()),
                             };
                         }
-                        // Hit test
-                        // Ctrl/Cmd+click allows selecting groups directly
-                        let mut hit = self.document.hit_test_with_tolerance(
-                            world_pos,
-                            false,
-                            4.0 / self.view.zoom.abs().max(f32::EPSILON),
-                        );
-                        if modifiers.ctrl || modifiers.meta {
-                            if let Some(node) = hit {
-                                hit = self
-                                    .document
-                                    .ancestors(node)
-                                    .find(|ancestor| {
-                                        *ancestor != self.document.root
-                                            && self
-                                                .document
-                                                .get(*ancestor)
-                                                .is_some_and(Node::is_group)
-                                    })
-                                    .or(Some(node));
-                            }
-                        }
+                        let hit = self
+                            .document
+                            .hit_test_with_tolerance(
+                                world_pos,
+                                false,
+                                4.0 / self.view.zoom.abs().max(f32::EPSILON),
+                            )
+                            .map(|node| self.selection_target_for_hit(node, modifiers.primary()));
                         let action = self.selection.action_for_click(hit, modifiers.shift);
 
                         match action {
@@ -1922,13 +2028,8 @@ impl Editor {
                     let selected =
                         self.compute_marquee_selection(start_pos, current_pos, deep_select);
 
-                    if modifiers.shift && (modifiers.ctrl || modifiers.meta) {
-                        // Shift+Ctrl/Cmd: Remove from selection
-                        for id in selected {
-                            self.selection.remove(id);
-                        }
-                    } else if modifiers.shift {
-                        // Shift: Add to existing selection
+                    if modifiers.shift {
+                        // Selection depth and additive selection are independent.
                         for id in selected {
                             self.selection.add(id);
                         }
@@ -1991,9 +2092,9 @@ impl Editor {
 
     /// Compute which nodes are within the marquee rectangle.
     ///
-    /// When `deep_select` is false (default), groups are included in the selection.
-    /// When `deep_select` is true (Ctrl/Cmd held), groups are skipped and their
-    /// children can be selected directly.
+    /// The default marquee selects direct children of the active selection
+    /// scope. Deep-select marquee traverses the scope and selects editable
+    /// leaves, never a container together with its descendants.
     fn compute_marquee_selection(
         &mut self,
         start: Vec2,
@@ -2009,48 +2110,34 @@ impl Editor {
         let max_y = start.y.max(end.y);
         let marquee = Rect::new(Vec2::new(min_x, min_y), Vec2::new(max_x, max_y));
 
+        let scope = self.selection_scope();
+        let candidates = if deep_select {
+            self.document.descendants(scope).collect::<Vec<_>>()
+        } else {
+            self.document
+                .get(scope)
+                .map(|node| node.children.clone())
+                .unwrap_or_default()
+        };
+
         let mut selected = Vec::new();
-        let mut selected_ancestors: std::collections::HashSet<NodeId> =
-            std::collections::HashSet::new();
-
-        // Check all nodes
-        for id in self
-            .document
-            .descendants(self.document.root)
-            .collect::<Vec<_>>()
-        {
-            if self.document.is_effectively_editable(id) {
-                let Some(node) = self.document.get(id) else {
-                    continue;
-                };
-                // In deep_select mode (Ctrl held), skip groups to select children
-                // In normal mode, include groups in selection
-                if deep_select && node.is_group() {
-                    continue;
-                }
-
-                // Skip if an ancestor is already selected (avoid selecting both group and children)
-                if !deep_select {
-                    let dominated = self
-                        .document
-                        .ancestors(id)
-                        .any(|ancestor| selected_ancestors.contains(&ancestor));
-                    if dominated {
-                        continue;
-                    }
-                }
-
-                // Get world bounds
-                if let Some(bounds) = self.document.world_bounds(id) {
-                    // Check intersection with marquee
-                    if marquee.intersects(&bounds) {
-                        selected.push(id);
-                        // Track this node so children aren't also selected
-                        if !deep_select {
-                            selected_ancestors.insert(id);
-                        }
-                    }
-                }
+        for id in candidates {
+            if !self.document.is_effectively_editable(id) {
+                continue;
+            }
+            let is_container = self
+                .document
+                .get(id)
+                .is_some_and(|node| !node.children.is_empty());
+            if deep_select && is_container {
+                continue;
+            }
+            if self
+                .document
+                .world_bounds(id)
+                .is_some_and(|bounds| marquee.intersects(&bounds))
+            {
+                selected.push(id);
             }
         }
 
@@ -2137,6 +2224,18 @@ impl Editor {
                 }
             } else if matches!(key, Key::Backspace | Key::Delete) && !modifiers.any() {
                 self.delete_selected_vector_anchors();
+            }
+            return Effects {
+                redraw: self.needs_redraw,
+                cursor: Some(self.cursor_for_state()),
+            };
+        }
+
+        if key == Key::Enter && !modifiers.primary() && !modifiers.alt {
+            if modifiers.shift {
+                self.select_parent();
+            } else {
+                self.enter_selection();
             }
             return Effects {
                 redraw: self.needs_redraw,
@@ -2498,12 +2597,20 @@ impl Editor {
                 false,
                 4.0 / self.view.zoom.abs().max(f32::EPSILON),
             ) {
+                if self.select_one_level_toward(id) {
+                    return Effects {
+                        redraw: true,
+                        cursor: Some(self.cursor_for_state()),
+                    };
+                }
+                let hit_is_selected =
+                    self.selection.len() == 1 && self.selection.primary() == Some(id);
                 if self
                     .document
                     .get(id)
                     .is_some_and(|node| matches!(node.kind, NodeKind::Shape(_)))
+                    && hit_is_selected
                 {
-                    self.selection.select(id);
                     self.enter_vector_edit();
                     return Effects {
                         redraw: true,
@@ -2514,6 +2621,7 @@ impl Editor {
                     .document
                     .get(id)
                     .is_some_and(|node| matches!(node.kind, NodeKind::Text(_)))
+                    && hit_is_selected
                 {
                     self.begin_existing_text_edit(id);
                     return Effects {
@@ -4319,8 +4427,15 @@ impl Editor {
 
     /// Nudge the selection by a world-space delta.
     fn nudge_selection(&mut self, delta: Vec2) {
+        self.translate_selection(delta, "Nudge");
+    }
+
+    fn translate_selection(&mut self, delta: Vec2, description: &'static str) -> bool {
+        if !delta.is_finite() || delta.length_squared() <= f32::EPSILON {
+            return false;
+        }
         if self.selection.is_empty() {
-            return;
+            return false;
         }
 
         // Filter selection to exclude children of selected parents
@@ -4347,14 +4462,15 @@ impl Editor {
             }
 
             // Record in history
-            self.history.push(Command {
-                description: "Nudge".into(),
-                patches,
-            });
+            self.history
+                .push(Command::new(description).with_patches(patches));
 
             self.document.dirty.transforms = true;
             self.document.dirty.bounds = true;
             self.needs_redraw = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -5528,6 +5644,114 @@ impl Editor {
         })
     }
 
+    /// Move the current selection by a world-space delta.
+    pub fn move_selection_by(&mut self, delta: Vec2) -> bool {
+        self.settle_interaction();
+        self.translate_selection(delta, "Move")
+    }
+
+    /// Rotate the current selection around its world-space center.
+    pub fn rotate_selection_by(&mut self, angle_radians: f32) -> bool {
+        if !angle_radians.is_finite() || angle_radians.abs() <= f32::EPSILON {
+            return false;
+        }
+        self.settle_interaction();
+        let Some(bounds) = self.selection_world_bounds() else {
+            return false;
+        };
+        let selected = self
+            .document
+            .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+        let center = bounds.center();
+        let delta = Affine2::from_translation(center)
+            * Affine2::from_angle(angle_radians)
+            * Affine2::from_translation(-center);
+        let mut patches = Vec::new();
+        for id in selected {
+            let Some(before) = self.document.get(id).map(|node| node.transform) else {
+                continue;
+            };
+            let world = self.document.world_transform(id);
+            let after = self.document.author_transform_from_world(id, delta * world);
+            if before != after {
+                patches.push(Patch::SetTransform { id, before, after });
+            }
+        }
+        if patches.is_empty() {
+            return false;
+        }
+
+        let command = Command::new("Rotate").with_patches(patches);
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Set opacity for every independently selected layer.
+    pub fn set_selected_opacity(&mut self, opacity: f32) -> bool {
+        let opacity = opacity.clamp(0.0, 1.0);
+        self.update_selected_styles("Change Opacity", |style| style.opacity = opacity)
+    }
+
+    /// Set or remove the fill for every independently selected layer.
+    pub fn set_selected_fill(&mut self, fill: Option<Paint>) -> bool {
+        self.update_selected_styles("Change Fill", move |style| style.fill = fill.clone())
+    }
+
+    /// Toggle a default stroke for every independently selected layer.
+    pub fn toggle_selected_stroke(&mut self) -> bool {
+        self.update_selected_styles("Toggle Stroke", |style| {
+            style.stroke = if style.stroke.is_some() {
+                None
+            } else {
+                Some(Stroke::black(1.0))
+            };
+        })
+    }
+
+    /// Adjust selected stroke widths, creating a default stroke when absent.
+    pub fn adjust_selected_stroke_width(&mut self, delta: f32) -> bool {
+        if !delta.is_finite() {
+            return false;
+        }
+        self.update_selected_styles("Change Stroke Width", |style| {
+            let stroke = style.stroke.get_or_insert_with(|| Stroke::black(1.0));
+            stroke.width = (stroke.width + delta).clamp(0.1, 1000.0);
+        })
+    }
+
+    fn update_selected_styles(
+        &mut self,
+        description: &'static str,
+        mut update: impl FnMut(&mut Style),
+    ) -> bool {
+        self.settle_interaction();
+        let selected = self
+            .document
+            .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+        let mut patches = Vec::new();
+        for id in selected {
+            let Some(before) = self.document.get(id).map(|node| node.style.clone()) else {
+                continue;
+            };
+            let mut after = before.clone();
+            update(&mut after);
+            if before != after {
+                patches.push(Patch::SetStyle { id, before, after });
+            }
+        }
+        if patches.is_empty() {
+            return false;
+        }
+
+        let command = Command::new(description).with_patches(patches);
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.needs_redraw = true;
+        true
+    }
+
     /// Adjust the selected text size as one undoable property edit.
     pub fn adjust_selected_text_size(&mut self, delta: f32) -> bool {
         self.update_selected_text("Change Text Size", |text| {
@@ -5696,14 +5920,14 @@ mod tests {
     }
 
     #[test]
-    fn primary_modifier_click_promotes_a_leaf_hit_to_its_group() {
+    fn canvas_click_selects_group_while_primary_modifier_deep_selects_child() {
         let mut editor = Editor::new();
         let root = editor.document.root;
         let group = editor
             .document
             .add_child(root, Node::group("Group"))
             .unwrap();
-        editor
+        let child = editor
             .document
             .add_child(
                 group,
@@ -5715,13 +5939,26 @@ mod tests {
         editor.handle_event(InputEvent::PointerDown {
             position: Vec2::splat(10.0),
             button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        assert_eq!(editor.selection.primary(), Some(group));
+
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
             modifiers: Modifiers {
                 meta: true,
                 ..Modifiers::default()
             },
         });
 
-        assert_eq!(editor.selection.primary(), Some(group));
+        assert_eq!(editor.selection.primary(), Some(child));
     }
 
     #[test]
@@ -6054,6 +6291,58 @@ mod tests {
         assert!(editor.execute_action(EditorAction::Undo));
         assert_affine_approx_eq(editor.document.world_transform(child), child_before);
         assert_affine_approx_eq(editor.document.world_transform(sibling), sibling_before);
+    }
+
+    #[test]
+    fn inspector_style_and_transform_edits_are_undoable() {
+        let (mut editor, ids) = editor_with_named_shapes(&["First", "Second"]);
+        editor.selection.set(ids.iter().copied());
+        let before = ids
+            .iter()
+            .map(|id| editor.document.world_transform(*id))
+            .collect::<Vec<_>>();
+
+        assert!(editor.move_selection_by(Vec2::new(12.0, -4.0)));
+        for (&id, &before) in ids.iter().zip(&before) {
+            assert_affine_approx_eq(
+                editor.document.world_transform(id),
+                Affine2::from_translation(Vec2::new(12.0, -4.0)) * before,
+            );
+        }
+        assert!(editor.execute_action(EditorAction::Undo));
+        for (&id, &before) in ids.iter().zip(&before) {
+            assert_affine_approx_eq(editor.document.world_transform(id), before);
+        }
+
+        assert!(editor.set_selected_opacity(0.4));
+        assert!(ids
+            .iter()
+            .all(|id| editor.document.get(*id).unwrap().style.opacity == 0.4));
+        assert!(editor.set_selected_fill(Some(Paint::rgb(0.2, 0.4, 0.8))));
+        assert!(editor.toggle_selected_stroke());
+        assert!(editor.adjust_selected_stroke_width(2.0));
+        assert!(ids.iter().all(|id| {
+            let style = &editor.document.get(*id).unwrap().style;
+            style.fill == Some(Paint::rgb(0.2, 0.4, 0.8))
+                && style
+                    .stroke
+                    .as_ref()
+                    .is_some_and(|stroke| stroke.width == 3.0)
+        }));
+
+        let transform_before_rotation = ids
+            .iter()
+            .map(|id| editor.document.world_transform(*id))
+            .collect::<Vec<_>>();
+        assert!(editor.rotate_selection_by(std::f32::consts::FRAC_PI_2));
+        assert!(ids
+            .iter()
+            .zip(&transform_before_rotation)
+            .any(|(id, before)| editor.document.world_transform(*id) != *before));
+        assert!(editor.execute_action(EditorAction::Undo));
+        for (&id, &before) in ids.iter().zip(&transform_before_rotation) {
+            assert_affine_approx_eq(editor.document.world_transform(id), before);
+        }
     }
 
     #[test]
