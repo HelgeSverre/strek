@@ -107,6 +107,11 @@ pub enum DocumentValidationError {
         count: usize,
         limit: usize,
     },
+    TooManyPathContours {
+        node: NodeId,
+        count: usize,
+        limit: usize,
+    },
     TextTooLong {
         node: NodeId,
         bytes: usize,
@@ -167,6 +172,10 @@ impl fmt::Display for DocumentValidationError {
                 formatter,
                 "path {node:?} contains {count} anchors; limit is {limit}"
             ),
+            Self::TooManyPathContours { node, count, limit } => write!(
+                formatter,
+                "path {node:?} contains {count} contours; limit is {limit}"
+            ),
             Self::TextTooLong { node, bytes, limit } => write!(
                 formatter,
                 "text node {node:?} contains {bytes} bytes; limit is {limit}"
@@ -213,6 +222,7 @@ impl std::error::Error for DocumentValidationError {}
 struct DocumentComplexityLimits {
     nodes: usize,
     children_per_node: usize,
+    path_contours_per_node: usize,
     path_anchors_per_node: usize,
     text_bytes_per_node: usize,
 }
@@ -221,6 +231,7 @@ impl DocumentComplexityLimits {
     const DEFAULT: Self = Self {
         nodes: 100_000,
         children_per_node: 100_000,
+        path_contours_per_node: 10_000,
         path_anchors_per_node: 1_000_000,
         text_bytes_per_node: 4 * 1024 * 1024,
     };
@@ -1580,6 +1591,13 @@ impl Document {
 
             match &node.kind {
                 NodeKind::Shape(path) => {
+                    if path.contours.len() > limits.path_contours_per_node {
+                        return Err(DocumentValidationError::TooManyPathContours {
+                            node: node_id,
+                            count: path.contours.len(),
+                            limit: limits.path_contours_per_node,
+                        });
+                    }
                     let anchor_count = path.contours.iter().fold(0_usize, |count, contour| {
                         count.saturating_add(contour.anchors.len())
                     });
@@ -2624,10 +2642,22 @@ mod tests {
         let child = doc
             .add_child(doc.root, Node::text("Label", "too long"))
             .expect("root exists");
+        let shape = doc
+            .add_child(
+                doc.root,
+                Node::shape(
+                    "Empty contours",
+                    PathData {
+                        contours: vec![PathContour::default(), PathContour::default()],
+                    },
+                ),
+            )
+            .expect("root exists");
         let saved = doc.to_saved();
         let limits = DocumentComplexityLimits {
             nodes: saved.nodes.len(),
             children_per_node: 0,
+            path_contours_per_node: usize::MAX,
             path_anchors_per_node: usize::MAX,
             text_bytes_per_node: usize::MAX,
         };
@@ -2639,12 +2669,25 @@ mod tests {
         let limits = DocumentComplexityLimits {
             nodes: saved.nodes.len(),
             children_per_node: usize::MAX,
+            path_contours_per_node: usize::MAX,
             path_anchors_per_node: usize::MAX,
             text_bytes_per_node: 3,
         };
         assert!(matches!(
             Document::validate_saved_complexity(&saved, limits),
             Err(DocumentValidationError::TextTooLong { node, .. }) if node == child
+        ));
+
+        let limits = DocumentComplexityLimits {
+            nodes: saved.nodes.len(),
+            children_per_node: usize::MAX,
+            path_contours_per_node: 1,
+            path_anchors_per_node: usize::MAX,
+            text_bytes_per_node: usize::MAX,
+        };
+        assert!(matches!(
+            Document::validate_saved_complexity(&saved, limits),
+            Err(DocumentValidationError::TooManyPathContours { node, .. }) if node == shape
         ));
     }
 
