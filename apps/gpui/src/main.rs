@@ -5,6 +5,7 @@
 mod assets;
 mod canvas;
 mod document_io;
+mod export;
 mod layer_name_input;
 mod layer_panel;
 mod properties_panel;
@@ -30,6 +31,8 @@ actions!(
         OpenDocument,
         SaveDocument,
         SaveDocumentAs,
+        ExportSvg,
+        ExportPng,
         QuitApplication,
         Undo,
         Redo,
@@ -389,6 +392,14 @@ impl VectorEditor {
         }
     }
 
+    fn export_svg(&mut self, _: &ExportSvg, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_export_dialog(export::ExportFormat::Svg, window, cx);
+    }
+
+    fn export_png(&mut self, _: &ExportPng, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_export_dialog(export::ExportFormat::Png, window, cx);
+    }
+
     fn quit_application(
         &mut self,
         _: &QuitApplication,
@@ -567,6 +578,109 @@ impl VectorEditor {
                         Ok(Ok(None)) | Err(_) => cx.notify(),
                         Ok(Err(error)) => editor.show_error(
                             "Could not open save dialog",
+                            error.to_string(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        self.update_window_title(window);
+        cx.notify();
+    }
+
+    fn begin_export_dialog(
+        &mut self,
+        format: export::ExportFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_layer_rename(true, cx);
+        self.open_menu = None;
+        if self.file_operation != FileOperation::Idle {
+            return;
+        }
+        self.editor.settle_for_document_io();
+        if self.editor.artwork_bounds().is_none() {
+            self.show_error(
+                "Nothing to export",
+                "Add at least one visible layer before exporting.".to_owned(),
+                window,
+                cx,
+            );
+            return;
+        }
+
+        self.file_operation = FileOperation::Prompting;
+        let directory = self
+            .document_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&directory);
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = prompt.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(Ok(Some(path))) => editor.begin_export_to_path(
+                            export::normalize_path(path, format),
+                            format,
+                            window,
+                            cx,
+                        ),
+                        Ok(Ok(None)) | Err(_) => cx.notify(),
+                        Ok(Err(error)) => editor.show_error(
+                            "Could not open export dialog",
+                            error.to_string(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+        self.update_window_title(window);
+        cx.notify();
+    }
+
+    fn begin_export_to_path(
+        &mut self,
+        path: PathBuf,
+        format: export::ExportFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.settle_for_document_io();
+        let Some(snapshot) = self.editor.artwork_snapshot() else {
+            self.show_error(
+                "Nothing to export",
+                "The document no longer contains visible artwork.".to_owned(),
+                window,
+                cx,
+            );
+            return;
+        };
+
+        self.file_operation = FileOperation::Exporting;
+        let task = cx
+            .background_executor()
+            .spawn(async move { export::write_export(&path, format, &snapshot) });
+        cx.spawn_in(window, async move |editor, cx| {
+            let result = task.await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.file_operation = FileOperation::Idle;
+                    match result {
+                        Ok(()) => cx.notify(),
+                        Err(error) => editor.show_error(
+                            "Could not export artwork",
                             error.to_string(),
                             window,
                             cx,
@@ -1665,6 +1779,8 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::open_document))
             .on_action(cx.listener(Self::save_document))
             .on_action(cx.listener(Self::save_document_as))
+            .on_action(cx.listener(Self::export_svg))
+            .on_action(cx.listener(Self::export_png))
             .on_action(cx.listener(Self::quit_application))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
@@ -2016,6 +2132,9 @@ fn main() {
                         MenuItem::separator(),
                         MenuItem::action("Save", SaveDocument),
                         MenuItem::action("Save As…", SaveDocumentAs),
+                        MenuItem::separator(),
+                        MenuItem::action("Export SVG…", ExportSvg),
+                        MenuItem::action("Export PNG…", ExportPng),
                     ],
                 },
             ]);

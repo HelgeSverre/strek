@@ -13,12 +13,12 @@ use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
     BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
-    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
-    InvertSelection, JoinPaths, NewDocument, OpenDocument, Paste, PenTool, RectangleTool, Redo,
-    ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
-    SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground, ToggleLayerPanel,
-    ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup, VectorEditor, ZoomIn, ZoomOut,
-    ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, ExportPng, ExportSvg,
+    FinishEditing, FrameTool, Group, InvertSelection, JoinPaths, NewDocument, OpenDocument, Paste,
+    PenTool, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool,
+    SendBackward, SendToBack, SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground,
+    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu, Undo, Ungroup,
+    VectorEditor, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -744,6 +744,8 @@ fn render_main_menu(
         .child(menu_item("Open…", "⌘O", !file_busy, OpenDocument))
         .child(menu_item("Save", "⌘S", !file_busy, SaveDocument))
         .child(menu_item("Save as…", "⇧⌘S", !file_busy, SaveDocumentAs))
+        .child(menu_item("Export SVG…", "", !file_busy, ExportSvg))
+        .child(menu_item("Export PNG…", "", !file_busy, ExportPng))
         .when(!recent_items.is_empty(), |menu| {
             menu.child(menu_section("Recent")).children(recent_items)
         })

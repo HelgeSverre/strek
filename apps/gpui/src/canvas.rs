@@ -598,7 +598,11 @@ fn premultiplied_rgba_to_unpremultiplied_bgra(pixels: &mut [u8]) {
     }
 }
 
-fn render_svg_pixmap(bytes: &[u8], width: u32, height: u32) -> Option<resvg::tiny_skia::Pixmap> {
+pub(crate) fn render_svg_pixmap(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<resvg::tiny_skia::Pixmap> {
     let tree = parse_svg_tree(bytes)?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
     let scale = resvg::tiny_skia::Transform::from_scale(

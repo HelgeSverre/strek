@@ -188,7 +188,7 @@ fn config_root() -> Option<PathBuf> {
         })
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

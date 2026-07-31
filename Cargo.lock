@@ -5387,6 +5387,7 @@ dependencies = [
  "image",
  "log",
  "lyon",
+ "render_svg",
  "resvg",
  "serde_json",
  "smallvec",
