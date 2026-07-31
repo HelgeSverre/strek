@@ -24,6 +24,8 @@ the file format and UI should not yet be treated as stable.
 ## What works
 
 - Selection, marquee selection, grouping, ordering, alignment, and distribution
+- Layer tree editing: rename, visibility and lock state, reordering, and
+  reparenting
 - Frames, rectangles, ellipses, lines, Bézier paths, and editable text
 - Direct vector editing for anchors and handles, including join, split, reverse,
   and open/close operations
@@ -31,13 +33,19 @@ the file format and UI should not yet be treated as stable.
 - Native Layers and Design panels, including layer context actions, transform
   decomposition readouts, and auto-layout mode, direction, spacing, and padding
   controls
-- Text family, weight, italic, size, and alignment controls
-- Live horizontal scrubbing for position, opacity, stroke width, text size, and
-  auto-layout spacing/padding, committed as one undo step
-- Per-tool fill and stroke defaults for new shapes and paths in the context bar
+- Text editing with selection, IME composition, family, weight, italic, size,
+  and alignment controls
+- Live horizontal scrubbing and fine/coarse steppers for position, opacity,
+  stroke width, text size, and auto-layout spacing/padding; each completed scrub
+  is committed as one undo step and `Escape` cancels it
+- Frame background toggling and per-tool fill/stroke defaults for new shapes and
+  paths
 - Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files
+- Editable SVG import for paths and basic shape primitives, with explicit errors
+  for unsupported features
 - SVG, outlined-text SVG, PNG, JPEG, and WebP export
+- Copy visible artwork to the clipboard as SVG, PNG, or WebP
 
 ## Run the GPUI app
 
@@ -125,13 +133,41 @@ transparent PNG, JPEG, or lossless WebP. Export bounds are derived from the
 artwork rather than the current viewport. JPEG output composites transparent
 pixels over white; PNG and WebP preserve transparency.
 
+The same visible-artwork snapshot can be copied to the system clipboard as SVG,
+PNG, or WebP from the File menu or command palette. Clipboard format support in
+the receiving application may vary by platform.
+
 Standard SVG keeps text as editable text and relies on compatible fonts being
 available when the file is opened. Outlined-text SVG converts glyphs to paths
 for portable appearance. Strek does not automatically embed fonts in SVG files.
 
+### SVG import
+
+Opening an `.svg` file imports its supported contents as editable native layers.
+The supported subset includes groups, paths, rectangles, circles, ellipses,
+lines, polylines, and polygons; affine transforms; solid fills and strokes;
+opacity; and visibility. Quadratic curves and SVG shape primitives are converted
+to the editor's path representation.
+
+Strek rejects the whole import with a descriptive error when the SVG uses a
+feature that cannot be represented faithfully. This includes text, images,
+gradients, patterns, clipping, masks, filters, markers, nested SVG documents,
+CSS style blocks, even-odd fills, dashed strokes, and advanced stroke caps,
+joins, or paint order. Convert those features to ordinary paths and solid paints
+before importing.
+
+An imported SVG is treated as an unsaved native document. Saving opens a Save As
+dialog and writes `.strek.json`; Strek never overwrites the source SVG.
+
+Exports use the bounds of all visible artwork rather than a selected frame or a
+custom export preset. In the Design panel, width/height and transform
+decomposition values are currently readouts; numeric adjustment is available for
+the properties listed above through stepping and scrubbing, but direct text entry
+is not yet available.
+
 ## Development
 
-Run the same checks used by CI:
+Run the repository checks locally:
 
 ```sh
 cargo fmt --all -- --check

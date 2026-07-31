@@ -259,6 +259,9 @@ pub struct Node {
 
     /// Lock flag (prevent editing)
     pub locked: bool,
+
+    /// Soft-delete flag used by undo/redo to preserve node identity
+    pub deleted: bool,
 }
 ```
 
@@ -283,7 +286,7 @@ pub enum NodeKind {
 
 ### 4.3 Frame Data
 
-Frames are containers with explicit dimensions, useful for defining artboards and export viewports:
+Frames are containers with explicit dimensions, useful for defining artboards and fixed-size layouts:
 
 ```rust
 #[derive(Debug, Clone)]
@@ -311,7 +314,7 @@ impl Default for FrameData {
 
 **Frame vs Group:**
 - **Group**: Bounds derived from children; no clipping
-- **Frame**: Explicit width/height; optional clipping and background
+- **Frame**: Explicit width/height; optional background, but no clipping
 
 ### 4.4 Path Data
 
@@ -587,6 +590,18 @@ pub struct TextData {
 
     /// Text alignment within bounds
     pub align: TextAlign,
+
+    /// Auto-width or fixed-width wrapping behavior
+    pub sizing: TextSizing,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TextSizing {
+    /// The text box grows to the measured line width.
+    AutoWidth,
+
+    /// Text wraps to an explicit local-space width.
+    FixedWidth { width: f32 },
 }
 
 #[derive(Debug, Clone)]
@@ -963,7 +978,7 @@ impl Document {
                             opacity,
                         });
                     }
-                    // Frames are unclipped artboards by default.
+                    // Frames are unclipped artboards.
                 }
                 NodeKind::Shape(path) => {
                     if let Some(fill) = &node.style.fill {
@@ -1324,69 +1339,42 @@ Simple JSON serialization of the document:
 
 ### 14.2 SVG Export
 
-Generate standard SVG for interchange. Optionally export a specific Frame for precise viewport control:
+The native frontend exports a settled snapshot of all effectively visible
+artwork. The view box is derived from the artwork bounds, including frame
+dimensions and enough stroke margin to avoid clipping visible strokes; viewport
+pan, zoom, selections, guides, and tool previews are excluded.
 
-```rust
-/// Export document or a specific frame to SVG
-/// If frame_id is provided, uses the frame's dimensions as the viewBox
-pub fn export_svg(doc: &Document, frame_id: Option<NodeId>) -> String {
-    let (bounds, root_id) = match frame_id {
-        Some(id) => {
-            // Export specific frame with its explicit dimensions
-            let frame = doc.nodes[id].kind.as_frame().unwrap();
-            (Rect::new(Vec2::ZERO, Vec2::new(frame.width, frame.height)), id)
-        }
-        None => {
-            // Fall back to root bounds
-            (doc.world_bounds(doc.root), doc.root)
-        }
-    };
+The supported formats are:
 
-    let mut svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{} {} {} {}">"#,
-        bounds.min.x, bounds.min.y,
-        bounds.width(), bounds.height()
-    );
+- Standard SVG, preserving editable text elements.
+- Outlined-text SVG, converting text to paths with the system font database.
+- Transparent PNG and lossless WebP raster exports.
+- Opaque JPEG export, compositing transparent pixels over white.
 
-    fn export_node(doc: &Document, id: NodeId, svg: &mut String) {
-        let node = &doc.nodes[id];
-        if !node.visible { return; }
+The same snapshot and encoders back Copy as SVG, PNG, and WebP. The current
+product does not export a selected frame or provide custom export presets. Those
+are product-level features rather than part of the backend-neutral display-list
+contract.
 
-        match &node.kind {
-            NodeKind::Group => {
-                svg.push_str(&format!(r#"<g transform="{}">"#,
-                    transform_to_svg(&node.transform)));
-                for &child in &node.children {
-                    export_node(doc, child, svg);
-                }
-                svg.push_str("</g>");
-            }
-            NodeKind::Frame(frame) => {
-                // Render background rect if present
-                if let Some(bg) = &frame.background {
-                    svg.push_str(&format!(
-                        r#"<rect width="{}" height="{}" fill="{}"/>"#,
-                        frame.width, frame.height, paint_to_css(bg)
-                    ));
-                }
-                for &child in &node.children {
-                    export_node(doc, child, svg);
-                }
-            }
-            NodeKind::Shape(path) => {
-                // <path d="..." fill="..." stroke="..." transform="..."/>
-            }
-            NodeKind::Text(text) => {
-                // <text ...>content</text>
-            }
-        }
-    }
+### 14.3 SVG Import
 
-    export_node(doc, root_id, &mut svg);
-    svg.push_str("</svg>");
-    svg
-}
-```
+The native frontend can open `.svg` files by converting a deliberately limited
+subset into editable document nodes. Supported source elements are groups,
+paths, rectangles, circles, ellipses, lines, polylines, and polygons. The
+conversion preserves affine transforms, visibility, opacity, solid fills, and
+solid strokes. Shape primitives and quadratic path segments become native path
+commands.
+
+Import is strict: the entire operation fails with a descriptive error when the
+source contains a feature Strek cannot represent faithfully. Unsupported
+features include text, images, gradients, patterns, clipping, masks, filters,
+markers, nested SVG documents, CSS style blocks, even-odd fills, dashed strokes,
+and advanced stroke caps, joins, or paint order. This avoids silently producing
+artwork that differs from the source.
+
+SVG is an interchange format, not a native save format. A successful import is
+treated as an unsaved native document: Save prompts for a `.strek.json`
+destination and never writes back to the SVG source.
 
 ---
 
@@ -1501,9 +1489,38 @@ intentional product backlog.
 - [x] Outlined-text SVG export
 - [x] Transparent PNG export
 - [x] Opaque JPEG and lossless WebP export
+- [x] Copy visible artwork as SVG, PNG, or WebP
+- [x] Strict editable SVG subset import
 - [x] Recent files
 - [x] Dirty-state tracking and unsaved-change prompts
 - [ ] Automatic SVG font embedding (outlined text is the portable alternative)
+
+### Product backlog
+
+The following candidates are intentionally not marked complete. They are
+ordered roughly by how much they improve the core logo/icon workflow and file
+interoperability.
+
+Important next candidates:
+
+- Direct numeric entry for position, dimensions, rotation, scale, skew, and
+  other inspector values; scrubbing and steppers should remain available
+- Exporting a selected frame or selection, with explicit dimensions and reusable
+  export presets
+- Autosave and crash recovery for dirty documents
+- Coalescing repeated keyboard nudges into a single undoable movement when
+  appropriate
+- Boolean path operations and a more complete path/stroke editing workflow
+
+Nice-to-have candidates:
+
+- Gradients, richer color management, and advanced stroke controls such as caps,
+  joins, and dash patterns
+- Actual cross-axis stretch and size constraints in auto layout
+- Grid, ruler, guide, and persistent snapping controls beyond the current
+  contextual snap guides
+- Automation commands for opening, saving, exporting, and addressing layers by
+  stable identifiers instead of driving those workflows through UI gestures
 
 ---
 
