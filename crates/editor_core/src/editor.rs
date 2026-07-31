@@ -605,7 +605,11 @@ impl Editor {
             }
             EditorAction::InvertSelection => {
                 let scope = self.selection_scope();
-                let selected: HashSet<_> = self.selection.iter().collect();
+                let selected: HashSet<_> = self
+                    .selection
+                    .iter()
+                    .filter_map(|id| self.direct_child_on_path(scope, id))
+                    .collect();
                 let inverted = self
                     .document
                     .get(scope)
@@ -1024,6 +1028,25 @@ impl Editor {
             DragState::VectorEditing(_) => InteractionKind::VectorEditing,
             DragState::Panning { .. } => InteractionKind::Panning,
         }
+    }
+
+    /// Cancel pointer-driven work before a viewport layout change.
+    ///
+    /// Text and vector editing sessions remain active. If panning temporarily
+    /// suspended another pointer interaction, both transient layers are
+    /// cancelled; a suspended text or vector edit is restored.
+    pub fn cancel_pointer_interaction(&mut self) -> bool {
+        let mut cancelled = false;
+        while !matches!(
+            self.drag,
+            DragState::None | DragState::TextEditing(_) | DragState::VectorEditing(_)
+        ) {
+            if !self.cancel_interaction() {
+                break;
+            }
+            cancelled = true;
+        }
+        cancelled
     }
 
     /// Settle transient editing state before saving, loading, or exporting.
@@ -1500,18 +1523,33 @@ impl Editor {
     }
 
     fn selection_scope(&self) -> NodeId {
-        let mut parents = self
-            .selection
-            .iter()
-            .filter_map(|id| self.document.get(id).and_then(|node| node.parent));
-        let Some(parent) = parents.next() else {
+        let mut selected = self.selection.iter();
+        let Some(first) = selected.next() else {
             return self.document.root;
         };
-        if parents.all(|candidate| candidate == parent) {
-            parent
-        } else {
-            self.document.root
+        let Some(mut scope) = self.document.get(first).and_then(|node| node.parent) else {
+            return self.document.root;
+        };
+
+        for id in selected {
+            let Some(parent) = self.document.get(id).and_then(|node| node.parent) else {
+                return self.document.root;
+            };
+            scope = self
+                .lowest_common_ancestor(scope, parent)
+                .unwrap_or(self.document.root);
         }
+
+        scope
+    }
+
+    fn lowest_common_ancestor(&self, first: NodeId, second: NodeId) -> Option<NodeId> {
+        let first_lineage = std::iter::once(first)
+            .chain(self.document.ancestors(first))
+            .collect::<HashSet<_>>();
+        std::iter::once(second)
+            .chain(self.document.ancestors(second))
+            .find(|candidate| first_lineage.contains(candidate))
     }
 
     fn direct_child_on_path(&self, ancestor: NodeId, descendant: NodeId) -> Option<NodeId> {
@@ -1605,20 +1643,27 @@ impl Editor {
         false
     }
 
-    /// Move the current selection one level toward the document root.
+    /// Move the entire selection one level toward the document root.
+    ///
+    /// The operation is atomic when any selected node is already top-level.
+    /// Overlapping parents collapse to their outermost selected ancestor.
     pub fn select_parent(&mut self) -> bool {
         if self.selection.is_empty() || !matches!(self.drag, DragState::None) {
             return false;
         }
-        let parents = self
-            .selection
-            .iter()
-            .filter_map(|id| self.document.get(id).and_then(|node| node.parent))
-            .filter(|parent| *parent != self.document.root)
-            .collect::<Vec<_>>();
-        if parents.is_empty() {
-            return false;
+
+        let mut parents = Vec::with_capacity(self.selection.len());
+        for id in self.selection.iter() {
+            let Some(parent) = self.document.get(id).and_then(|node| node.parent) else {
+                return false;
+            };
+            if parent == self.document.root {
+                return false;
+            }
+            parents.push(parent);
         }
+
+        let parents = self.document.filter_selection_for_transform(&parents);
         self.selection.set(parents);
         self.needs_redraw = true;
         true
@@ -6013,6 +6058,43 @@ mod tests {
         (editor, group, first, second)
     }
 
+    fn editor_with_nested_branches() -> (Editor, NodeId, [NodeId; 3], [NodeId; 3]) {
+        let mut editor = Editor::new();
+        let outer = editor
+            .document
+            .add_child(editor.document.root, Node::group("Outer"))
+            .unwrap();
+        let mut branches = Vec::new();
+        let mut leaves = Vec::new();
+
+        for (index, name) in ["Left", "Middle", "Right"].into_iter().enumerate() {
+            let branch = editor
+                .document
+                .add_child(outer, Node::group(format!("{name} branch")))
+                .unwrap();
+            let leaf = editor
+                .document
+                .add_child(
+                    branch,
+                    Node::shape(
+                        format!("{name} leaf"),
+                        PathData::rect(index as f32 * 40.0, 0.0, 20.0, 20.0),
+                    )
+                    .with_style(Style::fill(Paint::black())),
+                )
+                .unwrap();
+            branches.push(branch);
+            leaves.push(leaf);
+        }
+
+        (
+            editor,
+            outer,
+            branches.try_into().unwrap(),
+            leaves.try_into().unwrap(),
+        )
+    }
+
     fn child_names(editor: &Editor, parent: NodeId) -> Vec<&str> {
         editor
             .document
@@ -6190,6 +6272,104 @@ mod tests {
         editor.selection.select(first);
         assert!(editor.execute_action(EditorAction::InvertSelection));
         assert_eq!(editor.selection.to_vec(), vec![second]);
+    }
+
+    #[test]
+    fn nested_branch_selection_uses_its_lowest_common_scope() {
+        let (mut editor, outer, branches, leaves) = editor_with_nested_branches();
+        let root_sibling = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Root sibling", PathData::rect(200.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+
+        editor.selection.set([leaves[0], leaves[1]]);
+        assert_eq!(editor.selection_scope(), outer);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(90.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.selection.to_vec(), vec![branches[2]]);
+        assert!(editor.cancel_pointer_interaction());
+
+        editor.selection.set([leaves[0], leaves[1]]);
+        assert!(editor.execute_action(EditorAction::SelectAll));
+        assert_eq!(editor.selection.to_vec(), branches);
+        assert!(!editor.selection.contains(root_sibling));
+
+        editor.selection.set([leaves[0], leaves[1]]);
+        assert!(editor.execute_action(EditorAction::InvertSelection));
+        assert_eq!(editor.selection.to_vec(), vec![branches[2]]);
+
+        editor.selection.set([leaves[0], leaves[1]]);
+        assert_eq!(
+            editor.compute_marquee_selection(Vec2::new(1.0, 1.0), Vec2::new(99.0, 19.0), false,),
+            branches
+        );
+    }
+
+    #[test]
+    fn select_parent_normalizes_overlaps_and_is_atomic_at_the_root() {
+        let (mut editor, outer, branches, leaves) = editor_with_nested_branches();
+        let direct_leaf = editor
+            .document
+            .add_child(
+                outer,
+                Node::shape("Direct leaf", PathData::rect(120.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+        let root_leaf = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Root leaf", PathData::rect(160.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+
+        editor.selection.set([leaves[0], direct_leaf]);
+        assert!(editor.select_parent());
+        assert_eq!(editor.selection.to_vec(), vec![outer]);
+        assert!(!editor.selection.contains(branches[0]));
+
+        editor.selection.set([leaves[0], root_leaf]);
+        let before = editor.selection.to_vec();
+        assert!(!editor.select_parent());
+        assert_eq!(editor.selection.to_vec(), before);
+    }
+
+    #[test]
+    fn cancelling_pointer_work_restores_moves_but_preserves_text_editing() {
+        let (mut editor, group, _, _) = editor_with_grouped_shapes();
+        let group_before = editor.document.world_transform(group);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(14.0, 15.0),
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.interaction_kind(), InteractionKind::Moving);
+        assert_ne!(editor.document.world_transform(group), group_before);
+
+        assert!(editor.cancel_pointer_interaction());
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_affine_approx_eq(editor.document.world_transform(group), group_before);
+
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Text", "Editing"))
+            .unwrap();
+        editor.begin_existing_text_edit(text);
+        assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
+        assert!(!editor.cancel_pointer_interaction());
+        assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
     }
 
     #[test]
