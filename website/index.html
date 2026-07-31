@@ -1,0 +1,1678 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="A native vector editor for logos and icons. Eight tools, two panels, remappable shortcuts, and SVG or PNG export cropped to your artwork. Written in Rust."
+    >
+    <title>Strek — a small native editor for logos and icons</title>
+    <link rel="icon" href="./app-icon.png" type="image/png">
+    <link rel="apple-touch-icon" href="./app-icon.png">
+    <style>
+      @layer reset, tokens, base, layout, components, responsive, motion;
+
+      @layer reset {
+        *,
+        *::before,
+        *::after {
+          box-sizing: border-box;
+        }
+
+        html {
+          margin: 0;
+        }
+
+        body,
+        h1,
+        h2,
+        h3,
+        p,
+        pre,
+        figure,
+        ul,
+        ol {
+          margin: 0;
+        }
+
+        ul,
+        ol {
+          padding: 0;
+          list-style: none;
+        }
+
+        img {
+          display: block;
+          max-inline-size: 100%;
+        }
+
+        a {
+          color: inherit;
+        }
+
+        button {
+          font: inherit;
+        }
+      }
+
+      @layer tokens {
+        :root {
+          color-scheme: dark;
+          --bg: oklch(14% 0.012 240deg);
+          --bg-deep: oklch(10% 0.012 240deg);
+          --surface: oklch(19% 0.012 240deg);
+          --surface-raised: oklch(23% 0.014 240deg);
+          --surface-soft: oklch(27% 0.016 240deg);
+          --line: oklch(34% 0.016 240deg);
+          --line-soft: oklch(27% 0.014 240deg);
+          --text: oklch(95% 0.008 225deg);
+          --muted: oklch(72% 0.018 225deg);
+          --quiet: oklch(57% 0.018 225deg);
+          --cyan: oklch(80% 0.16 210deg);
+          --cyan-bright: oklch(87% 0.13 205deg);
+          --cyan-soft: oklch(80% 0.16 210deg / 0.14);
+          --cyan-faint: oklch(80% 0.16 210deg / 0.06);
+          --shadow: oklch(2% 0.01 240deg / 0.5);
+          --sans:
+            ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+            system-ui, sans-serif;
+          --mono:
+            ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono",
+            monospace;
+          --page: min(72rem, calc(100% - clamp(2rem, 7vi, 6rem)));
+          --hairline: 0.0625rem;
+          --radius-xs: 0.4rem;
+          --radius-sm: 0.65rem;
+          --radius-md: 1rem;
+          --radius-lg: 1.5rem;
+        }
+      }
+
+      @layer base {
+        html {
+          background: var(--bg-deep);
+          scroll-padding-block-start: 6rem;
+        }
+
+        body {
+          min-block-size: 100dvb;
+          overflow-x: clip;
+          font-family: var(--sans);
+          color: var(--text);
+          background:
+            radial-gradient(
+              circle at 75% 12%,
+              oklch(59% 0.17 220deg / 0.09),
+              oklch(59% 0.17 220deg / 0) 30rem
+            ),
+            radial-gradient(
+              circle at 15% 42%,
+              oklch(71% 0.14 200deg / 0.04),
+              oklch(71% 0.14 200deg / 0) 24rem
+            ),
+            var(--bg);
+          font-size: 1rem;
+          line-height: 1.65;
+          text-rendering: optimizeLegibility;
+          -webkit-font-smoothing: antialiased;
+        }
+
+        h1,
+        h2,
+        h3 {
+          line-height: 1.05;
+          letter-spacing: -0.035em;
+          text-wrap: balance;
+        }
+
+        h1 {
+          max-inline-size: 14ch;
+          font-size: clamp(2.6rem, 1.8rem + 2.5vi, 3.7rem);
+          font-weight: 650;
+        }
+
+        h2 {
+          max-inline-size: 16ch;
+          font-size: clamp(2.25rem, 1.72rem + 2.2vi, 3.5rem);
+          font-weight: 620;
+        }
+
+        h3 {
+          font-size: clamp(1.28rem, 1.18rem + 0.42vi, 1.5rem);
+          font-weight: 610;
+        }
+
+        p {
+          text-wrap: pretty;
+        }
+
+        a {
+          text-decoration-thickness: 0.08em;
+          text-underline-offset: 0.2em;
+        }
+
+        :focus-visible {
+          outline: 0.15rem solid var(--cyan-bright);
+          outline-offset: 0.25rem;
+        }
+
+        ::selection {
+          color: var(--bg-deep);
+          background: var(--cyan);
+        }
+      }
+
+      @layer layout {
+        .page-width {
+          inline-size: var(--page);
+          margin-inline: auto;
+        }
+
+        .site-header {
+          position: relative;
+          z-index: 10;
+          border-block-end: var(--hairline) solid var(--line-soft);
+          background: oklch(14% 0.012 240deg / 0.82);
+          backdrop-filter: blur(1.25rem);
+        }
+
+        .site-nav {
+          display: flex;
+          min-block-size: 4.75rem;
+          align-items: center;
+          justify-content: space-between;
+          gap: 1.5rem;
+        }
+
+        .site-nav ul {
+          display: flex;
+          align-items: center;
+          gap: clamp(1rem, 2.6vi, 2rem);
+        }
+
+        main {
+          isolation: isolate;
+        }
+
+        section {
+          scroll-margin-block-start: 6rem;
+        }
+
+        .hero {
+          display: grid;
+          min-block-size: min(53rem, calc(100dvb - 4.75rem));
+          grid-template-columns: minmax(20rem, 0.85fr) minmax(26rem, 1.15fr);
+          align-items: center;
+          gap: clamp(2.5rem, 5vi, 4.5rem);
+          padding-block: clamp(5rem, 10vi, 8.5rem);
+        }
+
+        .hero-copy {
+          position: relative;
+          z-index: 2;
+        }
+
+        .hero-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.75rem;
+          margin-block-start: 2rem;
+        }
+
+        .hero-visual {
+          position: relative;
+          z-index: 1;
+          inline-size: 100%;
+        }
+
+        .signal-strip {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          border-block: var(--hairline) solid var(--line-soft);
+        }
+
+        .features,
+        .workflow {
+          padding-block: clamp(4.5rem, 8vi, 7rem);
+        }
+
+        .section-heading {
+          display: grid;
+          grid-template-columns: minmax(0, 0.75fr) minmax(20rem, 0.7fr);
+          align-items: end;
+          justify-content: space-between;
+          gap: 3rem;
+          margin-block-end: clamp(2.75rem, 6vi, 5rem);
+        }
+
+        .feature-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 1rem;
+        }
+
+        .workflow {
+          display: grid;
+          grid-template-columns: minmax(0, 0.78fr) minmax(26rem, 1.22fr);
+          align-items: center;
+          gap: clamp(3rem, 9vi, 8rem);
+        }
+
+        .workflow-list {
+          display: grid;
+          gap: 0.65rem;
+        }
+
+        .closing {
+          display: grid;
+          place-items: center;
+          padding-block: clamp(5rem, 10vi, 7rem);
+          text-align: center;
+        }
+
+        .closing-copy {
+          display: grid;
+          justify-items: center;
+          gap: 1.5rem;
+        }
+
+        .site-footer {
+          border-block-start: var(--hairline) solid var(--line-soft);
+        }
+
+        .footer-content {
+          display: flex;
+          min-block-size: 6rem;
+          align-items: center;
+          justify-content: space-between;
+          gap: 2rem;
+        }
+      }
+
+      @layer components {
+        .skip-link {
+          position: fixed;
+          z-index: 100;
+          inset-block-start: 0.75rem;
+          inset-inline-start: 0.75rem;
+          padding: 0.6rem 0.85rem;
+          border-radius: var(--radius-sm);
+          color: var(--bg-deep);
+          background: var(--cyan);
+          font-weight: 700;
+          transform: translateY(-180%);
+        }
+
+        .skip-link:focus {
+          transform: translateY(0);
+        }
+
+        .brand {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.75rem;
+          color: var(--text);
+          font-size: 0.95rem;
+          font-weight: 650;
+          letter-spacing: -0.015em;
+          text-decoration: none;
+        }
+
+        .brand img {
+          inline-size: 2.4rem;
+          block-size: 2.4rem;
+          border-radius: 0.6rem;
+          box-shadow: 0 0.5rem 1.5rem var(--shadow);
+        }
+
+        .nav-link {
+          color: var(--muted);
+          font-size: 0.84rem;
+          font-weight: 550;
+          text-decoration: none;
+        }
+
+        .nav-link:hover {
+          color: var(--text);
+        }
+
+        .nav-link-strong {
+          padding: 0.55rem 0.8rem;
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-sm);
+          color: var(--text);
+          background: var(--surface);
+        }
+
+        .nav-link-strong:hover {
+          border-color: var(--cyan);
+        }
+
+        .kicker {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.55rem;
+          margin-block-end: 1.15rem;
+          color: var(--cyan-bright);
+          font-family: var(--mono);
+          font-size: 0.72rem;
+          font-weight: 650;
+          letter-spacing: 0.12em;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+
+        .kicker::before {
+          inline-size: 1.35rem;
+          block-size: var(--hairline);
+          flex: 0 0 auto;
+          background: currentColor;
+          content: "";
+        }
+
+        .hero-copy h1 strong {
+          color: var(--cyan-bright);
+          font-weight: inherit;
+        }
+
+        .lede {
+          max-inline-size: 34rem;
+          margin-block-start: 1.7rem;
+          color: var(--muted);
+          font-size: clamp(1.06rem, 0.98rem + 0.35vi, 1.24rem);
+          line-height: 1.65;
+        }
+
+        .button {
+          display: inline-flex;
+          min-block-size: 3rem;
+          align-items: center;
+          justify-content: center;
+          gap: 0.65rem;
+          padding-inline: 1.1rem;
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-sm);
+          color: var(--text);
+          background: var(--surface);
+          font-size: 0.88rem;
+          font-weight: 650;
+          text-decoration: none;
+        }
+
+        .button-primary {
+          border-color: var(--cyan);
+          color: var(--bg-deep);
+          background: var(--cyan);
+          box-shadow: 0 0.8rem 2.8rem var(--cyan-soft);
+        }
+
+        .button:hover {
+          border-color: var(--cyan);
+          background: var(--surface-raised);
+        }
+
+        .button-primary:hover {
+          color: var(--bg-deep);
+          background: var(--cyan-bright);
+        }
+
+        .hero-visual::before {
+          position: absolute;
+          z-index: -1;
+          inset: 8% -4% -9% 13%;
+          border-radius: 50%;
+          background: var(--cyan-soft);
+          filter: blur(5.5rem);
+          content: "";
+        }
+
+        .editor-shell {
+          container: editor / inline-size;
+          overflow: hidden;
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-lg);
+          background: var(--surface);
+          box-shadow:
+            0 2.2rem 6rem var(--shadow),
+            inset 0 var(--hairline) oklch(100% 0 0deg / 0.035);
+        }
+
+        @scope (.editor-shell) {
+          .window-bar {
+            display: grid;
+            min-block-size: 2.7rem;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            padding-inline: 0.85rem;
+            border-block-end: var(--hairline) solid var(--line-soft);
+            background: var(--surface-raised);
+          }
+
+          .window-controls {
+            display: flex;
+            gap: 0.38rem;
+          }
+
+          .window-controls i {
+            inline-size: 0.58rem;
+            block-size: 0.58rem;
+            border: var(--hairline) solid var(--line);
+            border-radius: 50%;
+            background: var(--surface-soft);
+          }
+
+          .window-title {
+            color: var(--muted);
+            font-size: 0.65rem;
+            font-style: normal;
+            font-weight: 600;
+          }
+
+          .window-status {
+            justify-self: end;
+            color: var(--quiet);
+            font-family: var(--mono);
+            font-size: 0.56rem;
+          }
+
+          .tool-bar {
+            display: flex;
+            min-block-size: 2.85rem;
+            align-items: center;
+            justify-content: space-between;
+            padding-inline: 0.75rem;
+            border-block-end: var(--hairline) solid var(--line-soft);
+            background: oklch(20% 0.012 240deg);
+          }
+
+          .tool-group {
+            display: flex;
+            align-items: center;
+            gap: 0.28rem;
+          }
+
+          .tool {
+            display: grid;
+            inline-size: 1.65rem;
+            block-size: 1.65rem;
+            place-items: center;
+            border: 0;
+            border-radius: var(--radius-xs);
+            color: var(--quiet);
+            background: oklch(0% 0 0deg / 0);
+          }
+
+          .tool.active {
+            color: var(--cyan-bright);
+            background: var(--cyan-soft);
+          }
+
+          .tool-shape {
+            inline-size: 0.55rem;
+            block-size: 0.55rem;
+            border: 0.075rem solid currentColor;
+          }
+
+          .tool-circle {
+            border-radius: 50%;
+          }
+
+          .tool-line {
+            inline-size: 0.7rem;
+            block-size: 0.075rem;
+            background: currentColor;
+            transform: rotate(-45deg);
+          }
+
+          .tool-letter {
+            font-family: var(--mono);
+            font-size: 0.62rem;
+            font-weight: 700;
+            line-height: 1;
+          }
+
+          .tool-cursor {
+            inline-size: 0;
+            block-size: 0;
+            border-block-start: 0.75rem solid currentColor;
+            border-inline-end: 0.42rem solid oklch(0% 0 0deg / 0);
+            transform: rotate(-28deg);
+          }
+
+          .zoom-pill {
+            padding: 0.28rem 0.48rem;
+            border: var(--hairline) solid var(--line-soft);
+            border-radius: var(--radius-xs);
+            color: var(--quiet);
+            font-family: var(--mono);
+            font-size: 0.55rem;
+          }
+
+          .editor-workspace {
+            display: grid;
+            min-block-size: clamp(19rem, 39vi, 27rem);
+            grid-template-columns: minmax(6.5rem, 0.7fr) minmax(
+                12rem,
+                2.2fr
+              ) minmax(7rem, 0.82fr);
+          }
+
+          .mock-panel {
+            min-inline-size: 0;
+            background: oklch(18% 0.012 240deg);
+          }
+
+          .layers-panel {
+            border-inline-end: var(--hairline) solid var(--line-soft);
+          }
+
+          .design-panel {
+            border-inline-start: var(--hairline) solid var(--line-soft);
+          }
+
+          .panel-heading {
+            display: flex;
+            min-block-size: 2.6rem;
+            align-items: center;
+            justify-content: space-between;
+            padding-inline: 0.65rem;
+            border-block-end: var(--hairline) solid var(--line-soft);
+            color: var(--muted);
+            font-size: 0.6rem;
+            font-weight: 680;
+            letter-spacing: 0.03em;
+          }
+
+          .panel-heading i {
+            color: var(--quiet);
+            font-family: var(--mono);
+            font-size: 0.58rem;
+            font-style: normal;
+          }
+
+          .layer-list {
+            display: grid;
+            gap: 0.12rem;
+            padding: 0.45rem;
+          }
+
+          .layer {
+            display: flex;
+            min-block-size: 1.65rem;
+            align-items: center;
+            gap: 0.4rem;
+            padding-inline: 0.45rem;
+            border-radius: 0.35rem;
+            color: var(--quiet);
+            font-size: 0.55rem;
+            white-space: nowrap;
+          }
+
+          .layer.selected {
+            color: var(--cyan-bright);
+            background: var(--cyan-soft);
+          }
+
+          .layer.indent {
+            padding-inline-start: 1.2rem;
+          }
+
+          .layer-icon {
+            inline-size: 0.46rem;
+            block-size: 0.46rem;
+            flex: 0 0 auto;
+            border: var(--hairline) solid currentColor;
+          }
+
+          .layer-icon.round {
+            border-radius: 50%;
+          }
+
+          .canvas-stage {
+            position: relative;
+            overflow: hidden;
+            background-color: oklch(15.5% 0.01 240deg);
+            background-image:
+              linear-gradient(
+                var(--line-soft) var(--hairline),
+                transparent var(--hairline)
+              ),
+              linear-gradient(
+                90deg,
+                var(--line-soft) var(--hairline),
+                transparent var(--hairline)
+              );
+            background-size: 1.5rem 1.5rem;
+          }
+
+          .canvas-stage::before {
+            position: absolute;
+            inset: 12% 10% 10%;
+            border: var(--hairline) solid var(--line);
+            background: oklch(20.5% 0.01 240deg);
+            box-shadow: 0 1rem 3rem var(--shadow);
+            content: "";
+          }
+
+          .mark {
+            position: absolute;
+            inset-block-start: 23%;
+            inset-inline-start: 25%;
+            inline-size: 52%;
+            block-size: 58%;
+            filter: drop-shadow(0 1rem 1.2rem oklch(3% 0.02 240deg / 0.45));
+          }
+
+          .selection-box {
+            position: absolute;
+            inset: 4% 5% 7%;
+            border: var(--hairline) solid var(--cyan);
+          }
+
+          .selection-box::before,
+          .selection-box::after {
+            position: absolute;
+            inline-size: 0.38rem;
+            block-size: 0.38rem;
+            border: var(--hairline) solid var(--cyan);
+            background: var(--surface);
+            box-shadow: 0 0 0 0.15rem oklch(80% 0.16 210deg / 0.13);
+            content: "";
+          }
+
+          .selection-box::before {
+            inset-block-start: -0.24rem;
+            inset-inline-start: -0.24rem;
+          }
+
+          .selection-box::after {
+            inset-block-end: -0.24rem;
+            inset-inline-end: -0.24rem;
+          }
+
+          .path-arc {
+            position: absolute;
+            inset: 12% 17% 5% 8%;
+            border: 0.12rem solid var(--cyan);
+            border-block-start-color: oklch(0% 0 0deg / 0);
+            border-radius: 50%;
+            transform: rotate(-24deg);
+          }
+
+          .mark-wing {
+            position: absolute;
+            inset-block-start: 11%;
+            inset-inline-start: 25%;
+            inline-size: 66%;
+            block-size: 55%;
+            clip-path: polygon(0 0, 100% 50%, 51% 72%);
+            background: linear-gradient(
+              135deg,
+              var(--cyan-bright),
+              oklch(67% 0.2 230deg)
+            );
+          }
+
+          .mark-tail {
+            position: absolute;
+            inset-block-start: 12%;
+            inset-inline-start: 25%;
+            inline-size: 50%;
+            block-size: 78%;
+            clip-path: polygon(0 0, 75% 55%, 57% 100%);
+            background: linear-gradient(
+              145deg,
+              oklch(79% 0.16 205deg),
+              oklch(50% 0.17 240deg)
+            );
+          }
+
+          .node {
+            position: absolute;
+            inline-size: 0.72rem;
+            block-size: 0.72rem;
+            border: 0.14rem solid var(--cyan);
+            border-radius: 50%;
+            background: var(--surface);
+            box-shadow: 0 0 0 0.2rem oklch(80% 0.16 210deg / 0.2);
+          }
+
+          .node-a {
+            inset-block-start: 6%;
+            inset-inline-start: 22%;
+          }
+
+          .node-b {
+            inset-block-start: 42%;
+            inset-inline-end: 4%;
+          }
+
+          .node-c {
+            inset-block-end: 3%;
+            inset-inline-start: 49%;
+          }
+
+          .property-stack {
+            display: grid;
+            gap: 0.7rem;
+            padding: 0.7rem;
+          }
+
+          .property-section {
+            display: grid;
+            gap: 0.45rem;
+            padding-block-end: 0.65rem;
+            border-block-end: var(--hairline) solid var(--line-soft);
+          }
+
+          .property-label {
+            color: var(--quiet);
+            font-size: 0.52rem;
+            font-weight: 650;
+          }
+
+          .property-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.35rem;
+          }
+
+          .field {
+            display: flex;
+            min-block-size: 1.45rem;
+            align-items: center;
+            justify-content: space-between;
+            padding-inline: 0.35rem;
+            border: var(--hairline) solid var(--line-soft);
+            border-radius: 0.3rem;
+            color: var(--quiet);
+            background: var(--surface);
+            font-family: var(--mono);
+            font-size: 0.46rem;
+          }
+
+          .swatch {
+            inline-size: 100%;
+            block-size: 1.45rem;
+            border: var(--hairline) solid var(--line);
+            border-radius: 0.35rem;
+            background: linear-gradient(
+              90deg,
+              var(--cyan),
+              oklch(65% 0.19 235deg)
+            );
+          }
+        }
+
+        .mockup-caption {
+          margin-block-start: 0.9rem;
+          color: var(--quiet);
+          font-family: var(--mono);
+          font-size: 0.65rem;
+          text-align: center;
+        }
+
+        .signal-strip li {
+          min-inline-size: 0;
+          padding: 1.25rem clamp(0.75rem, 2vi, 1.5rem);
+          color: var(--muted);
+          font-size: 0.76rem;
+          font-weight: 560;
+          text-align: center;
+        }
+
+        .signal-strip li:not(:last-child) {
+          border-inline-end: var(--hairline) solid var(--line-soft);
+        }
+
+        .signal-strip span {
+          display: block;
+          margin-block-end: 0.15rem;
+          color: var(--text);
+          font-family: var(--mono);
+          font-size: 0.88rem;
+          font-weight: 650;
+        }
+
+        .section-intro {
+          max-inline-size: 32rem;
+          color: var(--muted);
+          font-size: clamp(1.02rem, 0.96rem + 0.26vi, 1.15rem);
+        }
+
+        .feature-card {
+          position: relative;
+          display: grid;
+          grid-template-rows: auto 1fr auto auto;
+          overflow: hidden;
+          min-block-size: 20rem;
+          padding: clamp(1.4rem, 3vi, 2rem);
+          border: var(--hairline) solid var(--line-soft);
+          border-radius: var(--radius-md);
+          background: linear-gradient(
+            145deg,
+            var(--surface-raised),
+            var(--surface)
+          );
+        }
+
+        .feature-card::after {
+          position: absolute;
+          inset-inline-end: -2rem;
+          inset-block-end: -4rem;
+          inline-size: 11rem;
+          block-size: 11rem;
+          border-radius: 50%;
+          background: var(--cyan-faint);
+          filter: blur(2rem);
+          content: "";
+        }
+
+        .feature-number {
+          color: var(--cyan);
+          font-family: var(--mono);
+          font-size: 0.7rem;
+        }
+
+        .feature-card h3 {
+          margin-block-start: 1.5rem;
+        }
+
+        .feature-card p {
+          max-inline-size: 26rem;
+          margin-block-start: 0.9rem;
+          color: var(--muted);
+          font-size: 0.92rem;
+        }
+
+        .feature-glyph {
+          position: relative;
+          inline-size: 3.2rem;
+          block-size: 3.2rem;
+          align-self: start;
+          margin-block-start: 1.9rem;
+          color: var(--cyan);
+        }
+
+        .glyph-draw {
+          border: 0.1rem solid currentColor;
+          border-radius: 50%;
+        }
+
+        .glyph-draw::before,
+        .glyph-draw::after {
+          position: absolute;
+          inline-size: 0.6rem;
+          block-size: 0.6rem;
+          border: 0.12rem solid currentColor;
+          border-radius: 50%;
+          background: var(--surface);
+          content: "";
+        }
+
+        .glyph-draw::before {
+          inset-block-start: -0.3rem;
+          inset-inline-start: 0.45rem;
+        }
+
+        .glyph-draw::after {
+          inset-inline-end: -0.3rem;
+          inset-block-end: 0.35rem;
+        }
+
+        .glyph-panels {
+          border: 0.1rem solid currentColor;
+          border-radius: 0.35rem;
+        }
+
+        .glyph-panels::before,
+        .glyph-panels::after {
+          position: absolute;
+          inset-block: 0;
+          inline-size: 0.85rem;
+          border-color: currentColor;
+          content: "";
+        }
+
+        .glyph-panels::before {
+          inset-inline-start: 0;
+          border-inline-end: 0.1rem solid;
+        }
+
+        .glyph-panels::after {
+          inset-inline-end: 0;
+          border-inline-start: 0.1rem solid;
+        }
+
+        .glyph-export {
+          border: 0.1rem solid currentColor;
+          border-radius: 0.35rem;
+        }
+
+        .glyph-export::before {
+          position: absolute;
+          inset-block-start: 0.55rem;
+          inset-inline-start: 0.9rem;
+          inline-size: 1.2rem;
+          block-size: 1.2rem;
+          border-block-start: 0.12rem solid currentColor;
+          border-inline-end: 0.12rem solid currentColor;
+          content: "";
+          transform: rotate(45deg);
+        }
+
+        .workflow-copy h2 {
+          margin-block-end: 1.5rem;
+        }
+
+        .workflow-copy p {
+          max-inline-size: 32rem;
+          color: var(--muted);
+        }
+
+        .workflow-note {
+          display: flex;
+          align-items: center;
+          gap: 0.7rem;
+          max-inline-size: 32rem;
+          margin-block-start: 1.5rem;
+          color: var(--quiet);
+          font-family: var(--mono);
+          font-size: 0.68rem;
+          line-height: 1.5;
+        }
+
+        .workflow-note::before {
+          inline-size: 0.45rem;
+          block-size: 0.45rem;
+          flex: 0 0 auto;
+          border-radius: 50%;
+          background: var(--cyan);
+          box-shadow: 0 0 1rem var(--cyan);
+          content: "";
+        }
+
+        .workflow-list {
+          padding: 0.75rem;
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-lg);
+          background: linear-gradient(
+            145deg,
+            var(--surface-raised),
+            var(--surface)
+          );
+          box-shadow: 0 1.5rem 4rem var(--shadow);
+        }
+
+        .workflow-step {
+          display: grid;
+          grid-template-columns: minmax(8.5rem, auto) 1fr;
+          align-items: center;
+          gap: 1.25rem;
+          padding: 1.15rem;
+          border: var(--hairline) solid oklch(0% 0 0deg / 0);
+          border-radius: var(--radius-sm);
+        }
+
+        .workflow-step:not(:first-child) {
+          border-block-start-color: var(--line-soft);
+          border-start-start-radius: 0;
+          border-start-end-radius: 0;
+        }
+
+        .shortcut {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+          color: var(--muted);
+          font-family: var(--mono);
+          font-size: 0.66rem;
+          white-space: nowrap;
+        }
+
+        kbd {
+          display: inline-grid;
+          min-inline-size: 2rem;
+          min-block-size: 2rem;
+          place-items: center;
+          padding-inline: 0.5rem;
+          border: var(--hairline) solid var(--line);
+          border-block-end-width: 0.15rem;
+          border-radius: var(--radius-xs);
+          color: var(--text);
+          background: var(--surface-soft);
+          font-family: inherit;
+          font-size: 0.65rem;
+          line-height: 1;
+        }
+
+        .workflow-step strong {
+          display: block;
+          font-size: 0.9rem;
+          font-weight: 620;
+        }
+
+        .workflow-step p {
+          margin-block-start: 0.15rem;
+          color: var(--quiet);
+          font-size: 0.78rem;
+        }
+
+        .closing {
+          position: relative;
+          overflow: hidden;
+          border-block-start: var(--hairline) solid var(--line-soft);
+        }
+
+        .closing::before {
+          position: absolute;
+          z-index: -1;
+          inset-block-start: 50%;
+          inset-inline-start: 50%;
+          inline-size: min(42rem, 90vi);
+          aspect-ratio: 1;
+          border: var(--hairline) solid var(--cyan-soft);
+          border-radius: 50%;
+          box-shadow:
+            0 0 0 6rem oklch(80% 0.16 210deg / 0.02),
+            0 0 0 12rem oklch(80% 0.16 210deg / 0.012);
+          content: "";
+          transform: translate(-50%, -50%);
+        }
+
+        .closing p {
+          max-inline-size: 36rem;
+          color: var(--muted);
+        }
+
+        .install {
+          overflow: hidden;
+          inline-size: min(36rem, 100%);
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-md);
+          background: var(--surface);
+          text-align: start;
+        }
+
+        .install-head {
+          display: flex;
+          min-block-size: 2.5rem;
+          align-items: center;
+          justify-content: space-between;
+          gap: 1rem;
+          padding-inline: 0.85rem;
+          border-block-end: var(--hairline) solid var(--line-soft);
+          color: var(--quiet);
+          font-family: var(--mono);
+          font-size: 0.66rem;
+        }
+
+        .copy-button {
+          padding: 0.3rem 0.55rem;
+          border: var(--hairline) solid var(--line);
+          border-radius: var(--radius-xs);
+          color: var(--muted);
+          background: var(--surface-raised);
+          font-family: var(--mono);
+          font-size: 0.62rem;
+          cursor: pointer;
+        }
+
+        .copy-button:hover {
+          border-color: var(--cyan);
+          color: var(--text);
+        }
+
+        .install pre {
+          overflow-x: auto;
+          padding: 0.9rem;
+        }
+
+        .install code {
+          color: var(--text);
+          font-family: var(--mono);
+          font-size: 0.76rem;
+          line-height: 1.9;
+        }
+
+        :not(pre) > code {
+          color: var(--text);
+          font-family: var(--mono);
+          font-size: 0.88em;
+        }
+
+        .fine-print {
+          color: var(--quiet);
+          font-family: var(--mono);
+          font-size: 0.68rem;
+        }
+
+        .text-link {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.55rem;
+          color: var(--cyan-bright);
+          font-size: 0.85rem;
+          font-weight: 650;
+          text-decoration: none;
+        }
+
+        .text-link::after {
+          content: "→";
+        }
+
+        .footer-content p,
+        .footer-content a {
+          color: var(--quiet);
+          font-size: 0.72rem;
+          text-decoration: none;
+        }
+
+        .footer-content a:hover {
+          color: var(--text);
+        }
+      }
+
+      @layer responsive {
+        @media (width <= 64rem) {
+          .hero {
+            min-block-size: auto;
+            grid-template-columns: 1fr;
+          }
+
+          .hero-copy {
+            max-inline-size: 42rem;
+          }
+
+          .hero-visual {
+            max-inline-size: 42rem;
+          }
+
+          .feature-grid {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .feature-card:last-child {
+            grid-column: 1 / -1;
+            min-block-size: 16rem;
+          }
+        }
+
+        @media (width <= 48rem) {
+          :root {
+            --page: min(100% - 2rem, 40rem);
+          }
+
+          .site-nav ul li:not(:last-child) {
+            display: none;
+          }
+
+          .hero {
+            padding-block: 4.5rem 5rem;
+          }
+
+          .signal-strip {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .signal-strip li:nth-child(2) {
+            border-inline-end: 0;
+          }
+
+          .signal-strip li:nth-child(-n + 2) {
+            border-block-end: var(--hairline) solid var(--line-soft);
+          }
+
+          .section-heading,
+          .workflow {
+            grid-template-columns: 1fr;
+          }
+
+          .section-heading {
+            align-items: start;
+            gap: 1.5rem;
+          }
+
+          .feature-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .feature-card:last-child {
+            grid-column: auto;
+            min-block-size: 20rem;
+          }
+
+          .workflow {
+            gap: 3rem;
+          }
+
+          .footer-content {
+            align-items: flex-start;
+            flex-direction: column;
+            justify-content: center;
+            gap: 0.35rem;
+          }
+        }
+
+        @container editor (width <= 34rem) {
+          .window-status,
+          .tool:nth-child(n + 5) {
+            display: none;
+          }
+
+          .editor-workspace {
+            grid-template-columns: minmax(4.8rem, 0.68fr) minmax(
+                7rem,
+                1.9fr
+              ) minmax(4.9rem, 0.72fr);
+          }
+
+          .panel-heading,
+          .property-stack {
+            padding-inline: 0.45rem;
+          }
+
+          .layer {
+            gap: 0.25rem;
+            padding-inline: 0.25rem;
+          }
+
+          .layer.indent {
+            padding-inline-start: 0.65rem;
+          }
+
+          .mark {
+            inset-inline-start: 18%;
+            inline-size: 65%;
+          }
+
+          .property-row {
+            grid-template-columns: 1fr;
+          }
+        }
+
+        @media (width <= 34rem) {
+          .workflow-step {
+            grid-template-columns: 1fr;
+            gap: 0.7rem;
+          }
+
+          .shortcut {
+            white-space: normal;
+          }
+        }
+
+        @media (forced-colors: active) {
+          .button,
+          .editor-shell,
+          .feature-card,
+          .install,
+          .workflow-list,
+          kbd {
+            border-color: CanvasText;
+          }
+
+          .mark-wing,
+          .mark-tail,
+          .swatch {
+            background: Highlight;
+          }
+        }
+      }
+
+      @layer motion {
+        @media (prefers-reduced-motion: no-preference) {
+          html {
+            scroll-behavior: smooth;
+          }
+
+          .button,
+          .copy-button,
+          .nav-link,
+          .text-link {
+            transition:
+              color 160ms ease,
+              background-color 160ms ease,
+              border-color 160ms ease,
+              transform 160ms ease;
+          }
+
+          .button:hover {
+            transform: translateY(-0.1rem);
+          }
+
+          .editor-shell {
+            animation: settle 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+          }
+
+          .node {
+            animation: node-pulse 3s ease-in-out infinite;
+          }
+
+          @keyframes settle {
+            from {
+              opacity: 0;
+              transform: translateY(1rem) scale(0.98);
+            }
+
+            to {
+              opacity: 1;
+              transform: translateY(0) scale(1);
+            }
+          }
+
+          @keyframes node-pulse {
+            50% {
+              box-shadow: 0 0 0 0.32rem oklch(80% 0.16 210deg / 0.12);
+            }
+          }
+        }
+      }
+    </style>
+  </head>
+  <body id="top">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="site-nav page-width" aria-label="Primary navigation">
+        <a class="brand" href="#top" aria-label="Strek — home">
+          <img
+            src="./app-icon.png"
+            width="512"
+            height="512"
+            fetchpriority="high"
+            decoding="sync"
+            alt="Strek app icon"
+          >
+          <span>Strek</span>
+        </a>
+        <ul>
+          <li><a class="nav-link" href="#tools">Tools</a></li>
+          <li><a class="nav-link" href="#selection">Selection</a></li>
+          <li>
+            <a
+              class="nav-link nav-link-strong"
+              href="https://github.com/HelgeSverre/strek"
+              >GitHub</a
+            >
+          </li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero page-width" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="kicker">Rust · Native · v0.1.0</p>
+          <h1 id="hero-title">
+            A vector editor for <strong>logos and icons</strong>.
+          </h1>
+          <p class="lede">
+            You shouldn't need a full design suite to draw a 24-pixel icon.
+            Strek is a native app with eight tools, two panels, and an
+            export that crops to your artwork instead of the canvas. It's
+            written in Rust.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#install">Install Strek</a>
+            <a class="button" href="#tools">What it does</a>
+          </div>
+        </div>
+
+        <figure class="hero-visual" aria-labelledby="mockup-caption">
+          <div class="editor-shell" aria-hidden="true">
+            <div class="window-bar">
+              <span class="window-controls">
+                <i></i>
+                <i></i>
+                <i></i>
+              </span>
+              <i class="window-title">logo.strek.json</i>
+              <span class="window-status">Saved</span>
+            </div>
+
+            <div class="tool-bar">
+              <span class="tool-group">
+                <i class="tool active"><span class="tool-cursor"></span></i>
+                <i class="tool"><span class="tool-shape"></span></i>
+                <i class="tool"><span class="tool-shape tool-circle"></span></i>
+                <i class="tool"><span class="tool-line"></span></i>
+                <i class="tool"><span class="tool-letter">T</span></i>
+              </span>
+              <span class="zoom-pill">118%</span>
+            </div>
+
+            <div class="editor-workspace">
+              <div class="mock-panel layers-panel">
+                <div class="panel-heading"><span>Layers</span><i>＋</i></div>
+                <div class="layer-list">
+                  <div class="layer">
+                    <i class="layer-icon"></i><span>Icon 24</span>
+                  </div>
+                  <div class="layer indent selected">
+                    <i class="layer-icon"></i><span>Mark</span>
+                  </div>
+                  <div class="layer indent">
+                    <i class="layer-icon"></i><span>Body</span>
+                  </div>
+                  <div class="layer indent">
+                    <i class="layer-icon round"></i><span>Arc</span>
+                  </div>
+                  <div class="layer">
+                    <i class="layer-icon"></i><span>Grid</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="canvas-stage">
+                <div class="mark">
+                  <i class="path-arc"></i>
+                  <i class="mark-tail"></i>
+                  <i class="mark-wing"></i>
+                  <i class="selection-box"></i>
+                  <i class="node node-a"></i>
+                  <i class="node node-b"></i>
+                  <i class="node node-c"></i>
+                </div>
+              </div>
+
+              <div class="mock-panel design-panel">
+                <div class="panel-heading"><span>Design</span><i>•••</i></div>
+                <div class="property-stack">
+                  <div class="property-section">
+                    <span class="property-label">Transform</span>
+                    <div class="property-row">
+                      <span class="field">X <b>128</b></span>
+                      <span class="field">Y <b>96</b></span>
+                    </div>
+                    <div class="property-row">
+                      <span class="field">W <b>240</b></span>
+                      <span class="field">H <b>208</b></span>
+                    </div>
+                    <span class="field">Rotate <b>0°</b></span>
+                  </div>
+                  <div class="property-section">
+                    <span class="property-label">Appearance</span>
+                    <span class="field">Opacity <b>100%</b></span>
+                    <i class="swatch"></i>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <figcaption id="mockup-caption" class="mockup-caption">
+            Layers left, canvas centre, Design right. All three stay open.
+          </figcaption>
+        </figure>
+      </section>
+
+      <ul class="signal-strip" aria-label="At a glance">
+        <li><span>8 tools</span>Select, frame, rect, ellipse, line, pen, text, node edit</li>
+        <li><span>2 panels</span>Layers and Design, both always reachable</li>
+        <li><span>1 keymap</span>Every command remappable in a JSON file</li>
+        <li><span>2 formats</span>SVG and PNG, cropped to the artwork</li>
+      </ul>
+
+      <section
+        id="tools"
+        class="features page-width"
+        aria-labelledby="features-title"
+      >
+        <header class="section-heading">
+          <div>
+            <p class="kicker">What it does</p>
+            <h2 id="features-title">Draw, arrange, export.</h2>
+          </div>
+          <p class="section-intro">
+            Three jobs. Everything in the app serves one of them, which is why
+            there are no submenus to dig through and nothing hidden behind a
+            mode you have to remember.
+          </p>
+        </header>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-number">01 / Draw</span>
+            <i class="feature-glyph glyph-draw" aria-hidden="true"></i>
+            <h3>Eight tools, one key each.</h3>
+            <p>
+              Frames, rectangles, ellipses, lines, Bézier paths, and text sit on
+              F, R, O, L, P and T. Shift constrains, Alt draws from the centre,
+              and snapping catches edges, centres, corners and text baselines
+              while you drag.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">02 / Arrange</span>
+            <i class="feature-glyph glyph-panels" aria-hidden="true"></i>
+            <h3>Structure you can see.</h3>
+            <p>
+              Group, ungroup and reorder in the Layers panel. Align six ways,
+              distribute in either direction, nudge one unit with an arrow key
+              or ten with Shift. The Design panel holds position, size,
+              rotation, opacity, fill and stroke.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <span class="feature-number">03 / Export</span>
+            <i class="feature-glyph glyph-export" aria-hidden="true"></i>
+            <h3>Files you can hand over.</h3>
+            <p>
+              SVG and PNG both crop to the visible artwork, so there's no dead
+              margin around the mark and PNGs come out transparent. Documents
+              save as plain <code>.strek.json</code>, which reviews in a pull
+              request like any other text file.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="selection"
+        class="workflow page-width"
+        aria-labelledby="workflow-title"
+      >
+        <div class="workflow-copy">
+          <p class="kicker">Selection</p>
+          <h2 id="workflow-title">Click the group, reach inside on purpose.</h2>
+          <p>
+            A plain click takes the outermost container, so dragging a logo
+            moves the whole logo rather than one stray path out of it. Getting
+            at a nested shape is a deliberate act: hold the modifier to grab
+            what's under the cursor, or walk the hierarchy with Enter and
+            Shift+Enter. The layer tree is there when you want it, not a
+            prerequisite for every edit.
+          </p>
+          <p class="workflow-note">
+            These are defaults. Every binding lives in a keybindings.json you
+            can edit.
+          </p>
+        </div>
+
+        <ol class="workflow-list">
+          <li class="workflow-step">
+            <span class="shortcut"><kbd>Click</kbd></span>
+            <div>
+              <strong>Take the container</strong>
+              <p>The group moves as one unit.</p>
+            </div>
+          </li>
+          <li class="workflow-step">
+            <span class="shortcut"><kbd>⌘ / Ctrl</kbd> + <kbd>Click</kbd></span>
+            <div>
+              <strong>Reach inside</strong>
+              <p>Select the exact shape under the cursor.</p>
+            </div>
+          </li>
+          <li class="workflow-step">
+            <span class="shortcut"><kbd>Enter</kbd></span>
+            <div>
+              <strong>Step down</strong>
+              <p>Move one level into the current group.</p>
+            </div>
+          </li>
+          <li class="workflow-step">
+            <span class="shortcut"><kbd>Shift</kbd> + <kbd>Enter</kbd></span>
+            <div>
+              <strong>Step back up</strong>
+              <p>Return to the parent without leaving the canvas.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section id="install" class="closing" aria-labelledby="closing-title">
+        <div class="closing-copy page-width">
+          <p class="kicker">Under the hood</p>
+          <h2 id="closing-title">Rust core, thin shell.</h2>
+          <p>
+            The editor core is a plain Rust crate: scene graph, transactional
+            edits, patch-based undo, and a display list. The desktop app draws
+            that display list with GPUI; the SVG renderer writes the same one to
+            a file, so an export matches what was on screen.
+          </p>
+          <p>
+            Install the latest Strek release with the generated shell installer:
+          </p>
+
+          <div class="install">
+            <div class="install-head">
+              <span>install</span>
+              <button class="copy-button" type="button" data-copy>Copy</button>
+            </div>
+            <pre><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HelgeSverre/strek/releases/latest/download/strek-installer.sh | sh</code></pre>
+          </div>
+
+          <p class="fine-print">macOS · Apple Silicon and Intel</p>
+
+          <a class="text-link" href="https://github.com/HelgeSverre/strek"
+            >Read the source</a
+          >
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-content page-width">
+        <p>Strek v0.1.0 by Helge Sverre.</p>
+        <a href="https://github.com/HelgeSverre/strek"
+          >github.com/HelgeSverre/strek</a
+        >
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const code = button.closest(".install").querySelector("code");
+          await navigator.clipboard.writeText(code.textContent);
+          button.textContent = "Copied";
+          setTimeout(() => (button.textContent = "Copy"), 1600);
+        });
+      });
+    </script>
+  </body>
+</html>
