@@ -15,6 +15,19 @@ use std::sync::{mpsc, Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "macos")]
+use core_foundation::base::{CFType, TCFType};
+#[cfg(target_os = "macos")]
+use core_foundation::dictionary::CFDictionary;
+#[cfg(target_os = "macos")]
+use core_foundation::number::CFNumber;
+#[cfg(target_os = "macos")]
+use core_foundation::string::{CFString, CFStringRef};
+#[cfg(target_os = "macos")]
+use core_graphics::window::{
+    copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+    kCGWindowListOptionOnScreenOnly, kCGWindowNumber, kCGWindowOwnerPID,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -172,6 +185,8 @@ impl AutomationResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AutomationState {
+    #[serde(default)]
+    pub process_id: u32,
     pub document: String,
     pub dirty: bool,
     pub tool: String,
@@ -570,12 +585,55 @@ fn parse_number(value: String, name: &str) -> Result<f32, String> {
 
 pub(crate) fn capture_screenshot() -> Result<Vec<u8>, String> {
     let response = request(AutomationRequest::Activate)?.into_result()?;
-    let bounds = response
+    let state = response
         .state
-        .ok_or_else(|| "Strek did not return window bounds".to_owned())?
-        .window;
+        .ok_or_else(|| "Strek did not return window state".to_owned())?;
     std::thread::sleep(Duration::from_millis(75));
-    capture_bounds(bounds)
+    capture_window(state.process_id, state.window)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_window(process_id: u32, legacy_bounds: AutomationBounds) -> Result<Vec<u8>, String> {
+    if process_id == 0 {
+        return capture_bounds(legacy_bounds);
+    }
+    let window_id = window_id_for_process(process_id)
+        .ok_or_else(|| "could not find Strek's visible macOS window".to_owned())?;
+    capture_with_arguments(&["-x".to_owned(), "-o".to_owned(), format!("-l{window_id}")])
+}
+
+#[cfg(target_os = "macos")]
+fn window_id_for_process(process_id: u32) -> Option<u32> {
+    let windows = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    for raw_window in windows.iter() {
+        let Some(window) =
+            unsafe { CFType::wrap_under_get_rule(*raw_window as _) }.downcast::<CFDictionary>()
+        else {
+            continue;
+        };
+        let Some(owner_pid) = dictionary_number(&window, unsafe { kCGWindowOwnerPID }) else {
+            continue;
+        };
+        let Some(layer) = dictionary_number(&window, unsafe { kCGWindowLayer }) else {
+            continue;
+        };
+        if owner_pid == i64::from(process_id) && layer == 0 {
+            return dictionary_number(&window, unsafe { kCGWindowNumber })
+                .and_then(|number| u32::try_from(number).ok());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn dictionary_number(dictionary: &CFDictionary, key: CFStringRef) -> Option<i64> {
+    let key = unsafe { CFString::wrap_under_get_rule(key) };
+    let value = dictionary.find(key.as_CFTypeRef())?;
+    let value = unsafe { CFType::wrap_under_get_rule(*value as _) };
+    value.downcast::<CFNumber>()?.to_i64()
 }
 
 #[cfg(target_os = "macos")]
@@ -585,11 +643,6 @@ fn capture_bounds(bounds: AutomationBounds) -> Result<Vec<u8>, String> {
     {
         return Err("Strek returned invalid window bounds".to_owned());
     }
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let path = env::temp_dir().join(format!("strek-{}-{stamp}.png", std::process::id()));
     let region = format!(
         "{},{},{},{}",
         bounds.x.round() as i32,
@@ -597,22 +650,47 @@ fn capture_bounds(bounds: AutomationBounds) -> Result<Vec<u8>, String> {
         bounds.width.round() as u32,
         bounds.height.round() as u32
     );
+    capture_with_arguments(&["-x".to_owned(), "-R".to_owned(), region])
+}
+
+#[cfg(target_os = "macos")]
+fn capture_with_arguments(arguments: &[String]) -> Result<Vec<u8>, String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let screenshot = TemporaryScreenshot(
+        env::temp_dir().join(format!("strek-{}-{stamp}.png", std::process::id())),
+    );
     let output = Command::new("/usr/sbin/screencapture")
-        .args(["-x", "-R", &region])
-        .arg(&path)
+        .args(arguments)
+        .arg(&screenshot.0)
         .output()
         .map_err(|error| format!("could not run screencapture: {error}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            "macOS could not capture Strek; allow Screen Recording access and try again".to_owned()
+        } else {
+            detail
+        });
     }
-    let png = fs::read(&path).map_err(|error| format!("could not read screenshot: {error}"))?;
-    let _ = fs::remove_file(path);
-    Ok(png)
+    fs::read(&screenshot.0).map_err(|error| format!("could not read screenshot: {error}"))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_bounds(_bounds: AutomationBounds) -> Result<Vec<u8>, String> {
+fn capture_window(_process_id: u32, _bounds: AutomationBounds) -> Result<Vec<u8>, String> {
     Err("window screenshots are currently supported on macOS".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+struct TemporaryScreenshot(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for TemporaryScreenshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn socket_path() -> PathBuf {

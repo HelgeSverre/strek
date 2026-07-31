@@ -452,6 +452,7 @@ impl Strek {
             .collect();
 
         automation::AutomationState {
+            process_id: std::process::id(),
             document: self.document_name(),
             dirty: self.editor.is_dirty(),
             tool: automation_tool_name(self.editor.tool).to_owned(),

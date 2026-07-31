@@ -29,6 +29,10 @@ smallvec = "1"
 tokio = { version = "1", features = ["io-std", "rt", "sync"] }
 unicode-segmentation = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+
 [[bin]]
 name = "strek"
 path = "src/main.rs"

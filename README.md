@@ -108,7 +108,9 @@ MCP client to launch the same binary in stdio mode:
 
 The server exposes state, editor actions, canvas pointer events, text input,
 panel/overlay visibility, and PNG window screenshots. Strek must already be
-running before those tools are called.
+running before those tools are called. On macOS, the first screenshot may
+prompt for Screen Recording permission; a denied permission is returned as a
+tool error.
 
 ## Keyboard and pointer controls
 

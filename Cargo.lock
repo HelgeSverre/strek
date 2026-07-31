@@ -4832,6 +4832,8 @@ name = "strek"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation 0.10.0",
+ "core-graphics 0.24.0",
  "editor_core",
  "editor_render",
  "env_logger",
