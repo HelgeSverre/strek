@@ -1,5 +1,11 @@
 use glam::{Affine2, Vec2};
 
+/// Smallest supported canvas zoom (1%).
+pub const MIN_ZOOM: f32 = 0.01;
+
+/// Largest supported canvas zoom (6400%).
+pub const MAX_ZOOM: f32 = 64.0;
+
 /// Camera/viewport state for mapping between world and screen coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct View {
@@ -43,15 +49,29 @@ impl View {
 
     /// Zoom the view by a factor around a screen point.
     pub fn zoom_at(&mut self, factor: f32, screen_point: Vec2) {
-        // Get world position before zoom
+        if factor.is_finite() && factor > 0.0 {
+            self.set_zoom_at(self.zoom * factor, screen_point);
+        }
+    }
+
+    /// Set an absolute zoom level while preserving the world point under a screen position.
+    ///
+    /// Returns whether the view changed.
+    pub fn set_zoom_at(&mut self, zoom: f32, screen_point: Vec2) -> bool {
+        if !zoom.is_finite() || !screen_point.is_finite() || self.zoom <= 0.0 {
+            return false;
+        }
+
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (self.zoom - zoom).abs() <= f32::EPSILON {
+            return false;
+        }
+
         let world_pos = self.to_world(screen_point);
-
-        // Apply zoom
-        self.zoom *= factor;
-
-        // Adjust pan so world_pos stays at screen_point
+        self.zoom = zoom;
         let new_screen = self.to_screen(world_pos);
         self.pan += screen_point - new_screen;
+        true
     }
 }
 
@@ -97,5 +117,31 @@ mod tests {
         assert_eq!(view.zoom, 2.0);
         // Zooming at origin with no pan should keep pan at zero
         assert!((view.pan - Vec2::ZERO).length() < 0.001);
+    }
+
+    #[test]
+    fn absolute_zoom_preserves_the_world_point_under_its_anchor() {
+        let mut view = View {
+            pan: Vec2::new(80.0, -30.0),
+            zoom: 2.0,
+        };
+        let anchor = Vec2::new(320.0, 240.0);
+        let world_before = view.to_world(anchor);
+
+        assert!(view.set_zoom_at(4.0, anchor));
+
+        assert!((view.to_world(anchor) - world_before).length() < 0.001);
+    }
+
+    #[test]
+    fn zoom_is_clamped_and_rejects_invalid_values() {
+        let mut view = View::default();
+
+        assert!(view.set_zoom_at(1000.0, Vec2::ZERO));
+        assert_eq!(view.zoom, MAX_ZOOM);
+        assert!(view.set_zoom_at(0.0, Vec2::ZERO));
+        assert_eq!(view.zoom, MIN_ZOOM);
+        assert!(!view.set_zoom_at(f32::NAN, Vec2::ZERO));
+        assert_eq!(view.zoom, MIN_ZOOM);
     }
 }

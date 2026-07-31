@@ -755,16 +755,13 @@ impl Editor {
 
             // View
             EditorAction::ZoomIn => {
-                self.view.zoom *= 1.25;
-                self.needs_redraw = true;
+                self.set_zoom(self.view.zoom * 1.25);
             }
             EditorAction::ZoomOut => {
-                self.view.zoom /= 1.25;
-                self.needs_redraw = true;
+                self.set_zoom(self.view.zoom / 1.25);
             }
             EditorAction::ZoomReset => {
-                self.view.zoom = 1.0;
-                self.needs_redraw = true;
+                self.set_zoom(1.0);
             }
             EditorAction::ZoomResetAll => {
                 self.view.zoom = 1.0;
@@ -5418,6 +5415,16 @@ impl Editor {
         }
     }
 
+    /// Set an absolute canvas zoom around the viewport center.
+    ///
+    /// Zoom is viewport state rather than document state, so this does not create an undo entry.
+    /// Returns whether the view changed.
+    pub fn set_zoom(&mut self, zoom: f32) -> bool {
+        let changed = self.view.set_zoom_at(zoom, self.viewport_size * 0.5);
+        self.needs_redraw |= changed;
+        changed
+    }
+
     /// Return conservative world-space bounds for all effectively visible artwork.
     ///
     /// Shape bounds include enough room for the SVG renderer's default miter limit, so exported
@@ -7322,6 +7329,36 @@ mod tests {
 
         assert_eq!(editor.view.zoom, 4.0);
         assert_eq!(editor.view.pan, Vec2::new(80.0, 50.0));
+    }
+
+    #[test]
+    fn absolute_zoom_preserves_the_viewport_center() {
+        let mut editor = Editor::new();
+        editor.set_viewport_size(Vec2::new(1000.0, 600.0));
+        editor.view.pan = Vec2::new(90.0, -40.0);
+        let center = Vec2::new(500.0, 300.0);
+        let world_before = editor.view.to_world(center);
+
+        assert!(editor.set_zoom(2.5));
+
+        assert_eq!(editor.view.zoom, 2.5);
+        assert!((editor.view.to_world(center) - world_before).length() < 0.001);
+        assert!(editor.take_redraw());
+    }
+
+    #[test]
+    fn repeated_zoom_actions_stop_at_supported_limits() {
+        let mut editor = Editor::new();
+
+        for _ in 0..100 {
+            editor.execute_action(EditorAction::ZoomOut);
+        }
+        assert_eq!(editor.view.zoom, crate::transform::MIN_ZOOM);
+
+        for _ in 0..100 {
+            editor.execute_action(EditorAction::ZoomIn);
+        }
+        assert_eq!(editor.view.zoom, crate::transform::MAX_ZOOM);
     }
 
     #[test]
