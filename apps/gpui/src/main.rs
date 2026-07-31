@@ -114,14 +114,6 @@ actions!(
         StepLayoutSpacingUp,
         StepLayoutPaddingDown,
         StepLayoutPaddingUp,
-        SetLayoutMainStart,
-        SetLayoutMainCenter,
-        SetLayoutMainEnd,
-        SetLayoutMainSpaceBetween,
-        SetLayoutCrossStart,
-        SetLayoutCrossCenter,
-        SetLayoutCrossEnd,
-        SetLayoutCrossStretch,
         PropertyMoveLeft,
         PropertyMoveRight,
         PropertyMoveUp,
@@ -1645,118 +1637,6 @@ impl Strek {
         self.step_layout_padding(1.0, cx);
     }
 
-    fn set_layout_main_start(
-        &mut self,
-        _: &SetLayoutMainStart,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_main_alignment(editor_core::AlignMain::Start)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_main_center(
-        &mut self,
-        _: &SetLayoutMainCenter,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_main_alignment(editor_core::AlignMain::Center)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_main_end(
-        &mut self,
-        _: &SetLayoutMainEnd,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_main_alignment(editor_core::AlignMain::End)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_main_space_between(
-        &mut self,
-        _: &SetLayoutMainSpaceBetween,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_main_alignment(editor_core::AlignMain::SpaceBetween)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_cross_start(
-        &mut self,
-        _: &SetLayoutCrossStart,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_cross_alignment(editor_core::AlignCross::Start)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_cross_center(
-        &mut self,
-        _: &SetLayoutCrossCenter,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_cross_alignment(editor_core::AlignCross::Center)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_cross_end(
-        &mut self,
-        _: &SetLayoutCrossEnd,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_cross_alignment(editor_core::AlignCross::End)
-        {
-            cx.notify();
-        }
-    }
-
-    fn set_layout_cross_stretch(
-        &mut self,
-        _: &SetLayoutCrossStretch,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor
-            .set_selected_group_cross_alignment(editor_core::AlignCross::Stretch)
-        {
-            cx.notify();
-        }
-    }
-
     fn property_move_left(
         &mut self,
         _: &PropertyMoveLeft,
@@ -2734,14 +2614,6 @@ impl Render for Strek {
             .on_action(cx.listener(Self::step_layout_spacing_up))
             .on_action(cx.listener(Self::step_layout_padding_down))
             .on_action(cx.listener(Self::step_layout_padding_up))
-            .on_action(cx.listener(Self::set_layout_main_start))
-            .on_action(cx.listener(Self::set_layout_main_center))
-            .on_action(cx.listener(Self::set_layout_main_end))
-            .on_action(cx.listener(Self::set_layout_main_space_between))
-            .on_action(cx.listener(Self::set_layout_cross_start))
-            .on_action(cx.listener(Self::set_layout_cross_center))
-            .on_action(cx.listener(Self::set_layout_cross_end))
-            .on_action(cx.listener(Self::set_layout_cross_stretch))
             .on_action(cx.listener(Self::property_move_left))
             .on_action(cx.listener(Self::property_move_right))
             .on_action(cx.listener(Self::property_move_up))

@@ -1,8 +1,8 @@
 //! Figma-style design inspector for the current selection.
 
 use editor_core::{
-    AlignCross, AlignMain, Direction, Editor, FrameData, Layout, NodeKind, Paint, Rect, Style,
-    TextAlign, TextData, TransformComponents,
+    Direction, Editor, FrameData, Layout, NodeKind, Paint, Rect, Style, TextAlign, TextData,
+    TransformComponents,
 };
 use gpui::{div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, SharedString, Window};
 
@@ -12,9 +12,7 @@ use crate::{
     PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite, PropertyMoveDown,
     PropertyMoveLeft, PropertyMoveRight, PropertyMoveUp, PropertyOpacityDown, PropertyOpacityUp,
     PropertyRotateLeft, PropertyRotateRight, PropertyStrokeDown, PropertyStrokeUp,
-    PropertyToggleStroke, SetLayoutCrossCenter, SetLayoutCrossEnd, SetLayoutCrossStart,
-    SetLayoutCrossStretch, SetLayoutFree, SetLayoutHorizontal, SetLayoutMainCenter,
-    SetLayoutMainEnd, SetLayoutMainSpaceBetween, SetLayoutMainStart, SetLayoutVertical,
+    PropertyToggleStroke, SetLayoutFree, SetLayoutHorizontal, SetLayoutVertical,
     SetTextFamilyMonospace, SetTextFamilySerif, SetTextFamilySystem, StartFillColorInput,
     StartStrokeColorInput, StepLayoutPaddingDown, StepLayoutPaddingUp, StepLayoutSpacingDown,
     StepLayoutSpacingUp, TextLarger, TextSmaller, TextWeightDown, TextWeightUp,
@@ -526,83 +524,6 @@ fn layout_section(layout: Layout) -> gpui::Div {
                     StepLayoutPaddingDown,
                     StepLayoutPaddingUp,
                 ))
-                .child(
-                    div()
-                        .h(px(36.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(3.0))
-                        .px(px(10.0))
-                        .child(div().w(px(62.0)).text_size(px(10.0)).child("Main"))
-                        .child(property_choice_button(
-                            "layout-main-start",
-                            "Start",
-                            "Align to main-axis start",
-                            layout.align_main == AlignMain::Start,
-                            SetLayoutMainStart,
-                        ))
-                        .child(property_choice_button(
-                            "layout-main-center",
-                            "Mid",
-                            "Center on main axis",
-                            layout.align_main == AlignMain::Center,
-                            SetLayoutMainCenter,
-                        ))
-                        .child(property_choice_button(
-                            "layout-main-end",
-                            "End",
-                            "Align to main-axis end",
-                            layout.align_main == AlignMain::End,
-                            SetLayoutMainEnd,
-                        ))
-                        .child(property_choice_button(
-                            "layout-main-space-between",
-                            "Space",
-                            "Distribute space between children",
-                            layout.align_main == AlignMain::SpaceBetween,
-                            SetLayoutMainSpaceBetween,
-                        )),
-                )
-                .child(
-                    div()
-                        .h(px(36.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(3.0))
-                        .px(px(10.0))
-                        .pb(px(8.0))
-                        .child(div().w(px(62.0)).text_size(px(10.0)).child("Cross"))
-                        .child(property_choice_button(
-                            "layout-cross-start",
-                            "Start",
-                            "Align to cross-axis start",
-                            layout.align_cross == AlignCross::Start,
-                            SetLayoutCrossStart,
-                        ))
-                        .child(property_choice_button(
-                            "layout-cross-center",
-                            "Mid",
-                            "Center on cross axis",
-                            layout.align_cross == AlignCross::Center,
-                            SetLayoutCrossCenter,
-                        ))
-                        .child(property_choice_button(
-                            "layout-cross-end",
-                            "End",
-                            "Align to cross-axis end",
-                            layout.align_cross == AlignCross::End,
-                            SetLayoutCrossEnd,
-                        ))
-                        .child(property_choice_button(
-                            "layout-cross-stretch",
-                            "Fill",
-                            "Stretch on cross axis",
-                            layout.align_cross == AlignCross::Stretch,
-                            SetLayoutCrossStretch,
-                        )),
-                )
         })
 }
 
