@@ -32,7 +32,7 @@ The editor follows a three-layer architecture with strict separation of concerns
 ┌─────────────────────────────────────────────────────────────────┐
 │                         FRONTEND                                │
 │              GPUI product shell + native input                 │
-│              (winit/wgpu kept as a test harness)               │
+│                    + canvas rendering                          │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │ InputEvent / DisplayList
                                 ▼
@@ -50,10 +50,10 @@ The editor follows a three-layer architecture with strict separation of concerns
               │
               ▼ DisplayList
 ┌─────────────────────────────────────────────────────────────────┐
-│                    RENDER BACKENDS                              │
+│                    OUTPUT BACKENDS                              │
 │  ┌─────────────────────┐       ┌─────────────────────┐          │
-│  │    render_wgpu      │       │     render_svg      │          │
-│  │  (GPU triangles)    │       │    (SVG string)     │          │
+│  │     GPUI canvas     │       │     render_svg      │          │
+│  │   (native window)   │       │    (SVG string)     │          │
 │  └─────────────────────┘       └─────────────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -121,37 +121,25 @@ strek/
 │   │   └── src/
 │   │       └── lib.rs            # DisplayList, DisplayItem types
 │   │
-│   ├── render_wgpu/              # Desktop GPU renderer
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs            # wgpu + lyon tessellation
-│   │
 │   ├── render_svg/               # SVG export renderer
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       └── lib.rs            # SVG string generation
 │   │
-│   └── ui/                       # Legacy renderer UI primitives
-│
 └── apps/
-    ├── gpui/                     # Primary product UI
-    │   ├── Cargo.toml
-    │   └── src/
-    │       ├── main.rs           # GPUI shell and event routing
-    │       ├── canvas.rs         # GPUI display-list renderer
-    │       ├── commands.rs       # Command registry and keymap
-    │       ├── command_palette.rs
-    │       ├── document_io.rs
-    │       ├── export.rs
-    │       ├── layer_panel.rs
-    │       ├── properties_panel.rs
-    │       ├── text_input.rs
-    │       └── toolbar.rs
-    │
-    └── desktop/                  # Legacy wgpu renderer harness
-    │   ├── Cargo.toml
-    │   └── src/
-    │       └── main.rs           # Event loop, window management
+    └── gpui/                     # Native product UI
+        ├── Cargo.toml
+        └── src/
+            ├── main.rs           # GPUI shell and event routing
+            ├── canvas.rs         # GPUI display-list renderer
+            ├── commands.rs       # Command registry and keymap
+            ├── command_palette.rs
+            ├── document_io.rs
+            ├── export.rs
+            ├── layer_panel.rs
+            ├── properties_panel.rs
+            ├── text_input.rs
+            └── toolbar.rs
 ```
 
 ### Cargo Workspace Configuration
@@ -163,9 +151,6 @@ members = [
     "crates/editor_core",
     "crates/editor_render",
     "crates/render_svg",
-    "crates/render_wgpu",
-    "crates/ui",
-    "apps/desktop",
     "apps/gpui",
 ]
 resolver = "2"
@@ -654,7 +639,6 @@ pub struct PositionedGlyph {
 - Core: deterministic fallback metrics and line wrapping
 - GPUI: native shaping, caret geometry, IME composition, and rasterization
 - SVG export: resolved line positions serialized as `<text>` elements
-- Legacy wgpu harness: `fontdue` glyph rasterization
 
 ---
 
@@ -1023,29 +1007,7 @@ impl Document {
 }
 ```
 
-### 11.3 wgpu Backend (`render_wgpu`)
-
-For desktop:
-
-1. **Path tessellation**: Use `lyon` to convert paths to triangles
-2. **GPU rendering**: Draw tessellated meshes with wgpu
-3. **Text**: Rasterize glyphs to texture atlas, draw as quads
-
-```rust
-pub struct WgpuRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    // ... pipeline, buffers, etc.
-}
-
-impl WgpuRenderer {
-    pub fn render(&mut self, display_list: &DisplayList, surface: &wgpu::Surface) {
-        // Tessellate paths, build vertex buffers, render
-    }
-}
-```
-
-### 11.4 SVG Backend (`render_svg`)
+### 11.3 SVG Backend (`render_svg`)
 
 For file export and interchange:
 
@@ -1249,54 +1211,11 @@ impl Editor {
 
 ## 13. Platform Frontends
 
-### 13.1 Desktop (winit)
+### 13.1 GPUI
 
-```rust
-// apps/desktop/src/main.rs
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
-use editor_core::{Editor, EditorEvent};
-
-fn main() {
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Strek")
-        .build(&event_loop)
-        .unwrap();
-
-    let mut editor = Editor::new();
-    // let mut renderer = render_wgpu::Renderer::new(&window);
-
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::WindowEvent { event, .. } => {
-                if let Some(editor_event) = translate_event(event) {
-                    let fx = editor.handle_event(editor_event);
-                    if fx.request_redraw {
-                        window.request_redraw();
-                    }
-                }
-            }
-            Event::RedrawRequested(_) => {
-                let display_list = editor.display_list();
-                // renderer.render(&display_list);
-            }
-            _ => {}
-        }
-    });
-}
-```
-
-### 13.2 GPUI
-
-GPUI is the primary product frontend. It owns the Figma/Lunacy-style chrome,
+GPUI is the product frontend. It owns the Figma/Lunacy-style chrome,
 native text input bridge, pointer translation, and painting of the shared
-display list. The winit/wgpu app remains a renderer harness only.
+display list.
 
 ---
 
@@ -1459,7 +1378,6 @@ intentional product backlog.
 ### Milestone 3: Rendering
 - [x] Display-list generation
 - [x] SVG backend
-- [x] wgpu renderer harness
 - [x] GPUI canvas renderer
 
 ### Milestone 4: GPUI Product Frontend
@@ -1469,35 +1387,30 @@ intentional product backlog.
 - [x] Menus, tool rail, command palette, and configurable shortcuts
 - [x] Native open, save, and export dialogs
 
-### Milestone 5: Legacy Desktop Harness
-- [x] winit event loop
-- [x] wgpu renderer integration
-- [x] Cursor management
-
-### Milestone 6: Text Support
+### Milestone 5: Text Support
 - [x] Semantic `TextData` model
 - [x] Deterministic fallback layout
 - [x] GPUI-shaped text, caret, selection, and composition
 - [x] SVG text export
 
-### Milestone 7: Auto-Layout
+### Milestone 6: Auto-Layout
 - [x] Auto-layout configuration
 - [x] Layout computation engine
 - [x] Author transforms plus derived layout offsets
 - [x] GPUI mode, direction, spacing, and padding controls
 
-### Milestone 8: Snapping & Alignment
+### Milestone 7: Snapping & Alignment
 - [x] Snap-point generation
 - [x] Snapping and guides during move and shape creation
 - [x] Align/distribute commands
 
-### Milestone 9: Polish
+### Milestone 8: Polish
 - [x] Validated, versioned JSON save/load
 - [x] SVG and PNG export
 - [x] Configurable keyboard shortcuts
 - [x] Resizable Layers and Design panels
 
-### Milestone 10: Action System & Command Palette
+### Milestone 9: Action System & Command Palette
 - [x] `EditorAction` catalog
 - [x] Unified command metadata and default shortcuts
 - [x] Validated user keymap overrides
@@ -1505,7 +1418,7 @@ intentional product backlog.
 - [x] Context-aware action enablement and execution
 - [x] Recent-command ranking
 
-### Milestone 11: Layer Panel
+### Milestone 10: Layer Panel
 - [x] Layer tree
 - [x] Node names and inline rename
 - [x] Visibility toggle
@@ -1516,7 +1429,7 @@ intentional product backlog.
 - [x] Expand/collapse containers
 - [x] Context menu (duplicate, delete, group, ungroup)
 
-### Milestone 12: Properties Panel
+### Milestone 11: Properties Panel
 - [x] Transform position, bounds, and rotation controls
 - [x] Transform decomposition helpers and translate/rotate/scale/skew readouts
 - [x] Validated hexadecimal fill editing and opacity
@@ -1528,7 +1441,7 @@ intentional product backlog.
 - [x] Live preview during value scrubbing with one undo entry on commit
 - [x] Numeric values with horizontal drag-to-adjust and Escape cancellation
 
-### Milestone 13: Drawing Tools
+### Milestone 12: Drawing Tools
 - [x] Rectangle tool with constrained and centered drawing
 - [x] Ellipse tool with constrained and centered drawing
 - [x] Line tool with 45-degree and centered drawing
@@ -1537,7 +1450,7 @@ intentional product backlog.
 - [x] Context bar with per-tool fill and stroke creation defaults
 - [x] Direct vector editing for existing paths
 
-### Milestone 14: Toolbar & Status Bar
+### Milestone 13: Toolbar & Status Bar
 - [x] Tool buttons with icons and keyboard hints
 - [x] Active-tool state
 - [x] Fill and stroke editors
@@ -1545,7 +1458,7 @@ intentional product backlog.
 - [x] Selection, cursor, interaction, and zoom status
 - [x] Tooltips
 
-### Milestone 15: Export & File Operations
+### Milestone 14: Export & File Operations
 - [x] Native open/save dialogs
 - [x] Validated JSON documents with version migration
 - [x] Artwork-bounded SVG export
@@ -1588,9 +1501,4 @@ serde_json = "1.0"      # JSON format
 
 # Product frontend
 gpui = "0.1"
-
-# Legacy renderer harness
-winit = "0.30"          # Windowing
-wgpu = "23.0"           # GPU rendering
-lyon = "1.0"            # Path tessellation
 ```

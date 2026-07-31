@@ -3,9 +3,6 @@ members = [
     "crates/editor_core",
     "crates/editor_render",
     "crates/render_svg",
-    "crates/render_wgpu",
-    "crates/ui",
-    "apps/desktop",
     "apps/gpui",
 ]
 resolver = "2"

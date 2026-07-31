@@ -1,7 +1,8 @@
 # Strek Architecture
 
 > Historical design transcript. The current implementation and `SPEC.md` are
-> authoritative; the experimental web frontend described below has been retired.
+> authoritative; the experimental web and winit/wgpu frontends described below
+> have been retired.
 
 ## PROMPT 1
 

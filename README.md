@@ -40,13 +40,6 @@ With [just](https://github.com/casey/just) installed, the equivalent command is:
 just run
 ```
 
-The older wgpu application is retained as a legacy renderer shell and is not the
-primary frontend:
-
-```sh
-just run-legacy
-```
-
 ## Install
 
 Tagged releases provide macOS binaries for Apple Silicon and Intel. After the
@@ -202,9 +195,7 @@ The workspace is split by responsibility:
   machines
 - `crates/editor_render` — backend-neutral display-list types
 - `crates/render_svg` — SVG serialization
-- `crates/render_wgpu` and `apps/desktop` — legacy wgpu renderer and shell
-- `crates/ui` — shared UI-facing abstractions used by the legacy shell
 
 `SPEC.md` describes intended editor behavior. `Strek Architecture.md` contains
-the broader architecture notes; when either differs from working code, tests
-and implementation are authoritative.
+broader historical architecture notes; when either differs from working code,
+tests and implementation are authoritative.

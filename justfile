@@ -14,10 +14,6 @@ lint:
 run:
     cargo run -p strek
 
-# Run the legacy wgpu desktop application
-run-legacy:
-    cargo run -p strek-legacy
-
 # Format code
 format:
     cargo fmt
