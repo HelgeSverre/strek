@@ -97,6 +97,20 @@ just lint    # Clippy with warnings denied
 just format  # format the workspace
 ```
 
+## Package for macOS
+
+The GPUI package metadata produces an ad-hoc-signed, architecture-specific
+macOS application bundle for local testing. Install the packager once, then
+build the bundle:
+
+```sh
+cargo install cargo-packager --locked
+cargo packager -p vector-editor-gpui --release --formats app
+```
+
+The bundle is written below `target/release/`. Signing, notarization, and a
+second architecture must be added and tested before distributing it publicly.
+
 The workspace is split by responsibility:
 
 - `apps/gpui` — primary native application and GPUI interface

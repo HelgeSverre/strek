@@ -23,3 +23,14 @@ unicode-segmentation = { workspace = true }
 [[bin]]
 name = "vector-editor-gpui"
 path = "src/main.rs"
+
+[package.metadata.packager]
+before-packaging-command = "cargo build --release --locked -p vector-editor-gpui"
+product-name = "Vector Editor"
+identifier = "io.github.helgesverre.vector-editor"
+icons = ["assets/app-icon.icns"]
+license-file = "../../LICENSE"
+formats = ["app"]
+
+[package.metadata.packager.macos]
+signing-identity = "-"
