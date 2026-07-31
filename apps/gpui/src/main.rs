@@ -30,6 +30,8 @@ use gpui::{
     PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds, WindowOptions,
 };
 
+const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
+
 actions!(
     strek,
     [
@@ -330,7 +332,12 @@ impl Strek {
                 button,
                 modifiers,
             } => {
-                if self.numeric_property_scrub.is_some() {
+                if self.file_operation == FileOperation::Opening {
+                    Err(
+                        "wait for the document to finish opening before sending canvas input"
+                            .to_owned(),
+                    )
+                } else if self.numeric_property_scrub.is_some() {
                     Err(
                         "finish or cancel the numeric property scrub before sending canvas input"
                             .to_owned(),
@@ -381,7 +388,9 @@ impl Strek {
                 }
             }
             AutomationRequest::Text { text } => {
-                if self.command_palette.is_some()
+                if self.file_operation == FileOperation::Opening {
+                    Err("wait for the document to finish opening before sending text".to_owned())
+                } else if self.command_palette.is_some()
                     || self.open_menu.is_some()
                     || self.layer_context_menu.is_some()
                     || self.property_color_input.is_some()
@@ -536,6 +545,31 @@ impl Strek {
             .and_then(Path::parent)
             .map(|parent| parent.display().to_string())
             .unwrap_or_else(|| "Unsaved document".to_owned())
+    }
+
+    fn selected_object_clipboard_text(&self) -> String {
+        let names = self
+            .editor
+            .selection()
+            .iter()
+            .filter_map(|id| self.editor.document().get(id))
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            "Strek vector objects".to_owned()
+        } else {
+            names.join("\n")
+        }
+    }
+
+    fn refresh_canvas_input_bounds(&mut self, window: &Window) {
+        self.canvas_input_bounds = Some(canvas_bounds_for_layout(
+            window.viewport_size(),
+            self.show_layers_panel,
+            self.layers_panel_width,
+            self.show_design_panel,
+            self.design_panel_width,
+        ));
     }
 
     fn update_window_title(&self, window: &mut Window) {
@@ -852,6 +886,21 @@ impl Strek {
     fn command_is_enabled(&self, target: commands::CommandTarget) -> bool {
         use commands::{AppCommand, CommandTarget};
 
+        if self.file_operation == FileOperation::Opening
+            && !matches!(
+                target,
+                CommandTarget::App(
+                    AppCommand::Copy
+                        | AppCommand::OpenKeyboardShortcuts
+                        | AppCommand::ToggleLayerPanel
+                        | AppCommand::ToggleDesignPanel
+                        | AppCommand::ShowCommandPalette
+                )
+            )
+        {
+            return false;
+        }
+
         match target {
             CommandTarget::Editor(action) => self.editor.can_execute(action),
             CommandTarget::App(
@@ -1011,6 +1060,7 @@ impl Strek {
 
     fn begin_open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.file_operation = FileOperation::Opening;
+        let opening_revision = self.editor.current_revision();
         let load_path = path.clone();
         let task = cx
             .background_executor()
@@ -1021,10 +1071,17 @@ impl Strek {
                 .update_in(cx, |editor, window, cx| {
                     editor.file_operation = FileOperation::Idle;
                     match result {
-                        Ok(document) => {
+                        Ok(document) if editor.editor.current_revision() == opening_revision => {
                             editor.replace_document(document, path);
                             cx.notify();
                         }
+                        Ok(_) => editor.show_error(
+                            "Document changed while opening",
+                            "Strek kept your current changes and did not replace them with the loaded document. Open the file again when editing has stopped."
+                                .to_owned(),
+                            window,
+                            cx,
+                        ),
                         Err(error) => {
                             if !path.is_file() {
                                 editor.recent_files.remove(&path);
@@ -1596,7 +1653,7 @@ impl Strek {
     fn toggle_layer_panel(
         &mut self,
         _: &ToggleLayerPanel,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.cancel_numeric_property_scrub();
@@ -1607,7 +1664,7 @@ impl Strek {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.show_layers_panel = !self.show_layers_panel;
-        self.canvas_input_bounds = None;
+        self.refresh_canvas_input_bounds(window);
         self.dismiss_menus();
         cx.notify();
     }
@@ -1615,7 +1672,7 @@ impl Strek {
     fn toggle_design_panel(
         &mut self,
         _: &ToggleDesignPanel,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.cancel_numeric_property_scrub();
@@ -1626,7 +1683,7 @@ impl Strek {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.show_design_panel = !self.show_design_panel;
-        self.canvas_input_bounds = None;
+        self.refresh_canvas_input_bounds(window);
         self.dismiss_menus();
         cx.notify();
     }
@@ -1660,7 +1717,7 @@ impl Strek {
         };
         if (*current_width - width).abs() > f32::EPSILON {
             *current_width = width;
-            self.canvas_input_bounds = None;
+            self.refresh_canvas_input_bounds(window);
             cx.notify();
         }
         cx.stop_propagation();
@@ -1673,7 +1730,7 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !pointer_origin_x.is_finite() {
+        if self.file_operation == FileOperation::Opening || !pointer_origin_x.is_finite() {
             return;
         }
         self.cancel_numeric_property_scrub();
@@ -2452,9 +2509,13 @@ impl Strek {
                 }
             }
         } else {
+            let clipboard_text = self.selected_object_clipboard_text();
             self.object_clipboard = self.editor.copy_selection();
             if self.object_clipboard.is_some() {
-                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
+                    clipboard_text,
+                    OBJECT_CLIPBOARD_METADATA.to_owned(),
+                ));
             }
         }
         if menu_closed || scrub_cancelled {
@@ -2475,11 +2536,17 @@ impl Strek {
                     changed = true;
                 }
             }
-        } else if let Some(clipboard) = self.editor.copy_selection() {
-            self.object_clipboard = Some(clipboard);
-            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-            self.editor.delete_selection();
-            changed = true;
+        } else {
+            let clipboard_text = self.selected_object_clipboard_text();
+            if let Some(clipboard) = self.editor.copy_selection() {
+                self.object_clipboard = Some(clipboard);
+                cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
+                    clipboard_text,
+                    OBJECT_CLIPBOARD_METADATA.to_owned(),
+                ));
+                self.editor.delete_selection();
+                changed = true;
+            }
         }
         if changed || menu_closed || scrub_cancelled {
             cx.notify();
@@ -2496,11 +2563,19 @@ impl Strek {
                     changed = true;
                 }
             }
-        } else if let Some(mut clipboard) = self.object_clipboard.take() {
-            if self.editor.paste_clipboard(&mut clipboard) {
-                changed = true;
+        } else if cx
+            .read_from_clipboard()
+            .as_ref()
+            .is_some_and(is_strek_object_clipboard)
+        {
+            if let Some(mut clipboard) = self.object_clipboard.take() {
+                if self.editor.paste_clipboard(&mut clipboard) {
+                    changed = true;
+                }
+                self.object_clipboard = Some(clipboard);
             }
-            self.object_clipboard = Some(clipboard);
+        } else {
+            self.object_clipboard = None;
         }
         if changed || menu_closed || scrub_cancelled {
             cx.notify();
@@ -2613,6 +2688,9 @@ impl Strek {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         self.property_color_input = None;
         self.zoom_input = None;
         self.focus_handle.focus(window);
@@ -2639,6 +2717,9 @@ impl Strek {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         let position = canvas_position(
             event.position,
             self.canvas_input_bounds,
@@ -2669,6 +2750,9 @@ impl Strek {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         let position = canvas_position(
             event.position,
             self.canvas_input_bounds,
@@ -2692,6 +2776,9 @@ impl Strek {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         let position = canvas_position(
             event.position,
             self.canvas_input_bounds,
@@ -2723,6 +2810,9 @@ impl Strek {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         let effects = self
             .editor
             .handle_event(editor_core::InputEvent::ModifiersChanged {
@@ -2897,6 +2987,9 @@ impl Strek {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         if self.zoom_input.is_some() {
             self.handle_zoom_key(event, cx);
             return;
@@ -2925,6 +3018,9 @@ impl Strek {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
         if event.keystroke.key != "space" {
             return;
         }
@@ -2957,6 +3053,7 @@ impl Render for Strek {
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
         let key_context = editor_key_context(
+            self.file_operation == FileOperation::Opening,
             self.command_palette.is_some()
                 || self.layer_name_input.is_some()
                 || self.property_color_input.is_some()
@@ -2988,7 +3085,13 @@ impl Render for Strek {
                 .read_from_clipboard()
                 .and_then(|item| item.text())
                 .is_some_and(|text| !text.is_empty()),
-            Some(toolbar::MenuKind::Main) => self.object_clipboard.is_some(),
+            Some(toolbar::MenuKind::Main) => {
+                self.object_clipboard.is_some()
+                    && cx
+                        .read_from_clipboard()
+                        .as_ref()
+                        .is_some_and(is_strek_object_clipboard)
+            }
             _ => false,
         };
 
@@ -3318,6 +3421,36 @@ fn visible_panel_width(visible: bool, width: f32) -> f32 {
     }
 }
 
+fn is_strek_object_clipboard(item: &ClipboardItem) -> bool {
+    item.metadata()
+        .is_some_and(|metadata| metadata == OBJECT_CLIPBOARD_METADATA)
+}
+
+fn canvas_bounds_for_layout(
+    window_size: gpui::Size<gpui::Pixels>,
+    show_layers_panel: bool,
+    layers_panel_width: f32,
+    show_design_panel: bool,
+    design_panel_width: f32,
+) -> Bounds<gpui::Pixels> {
+    Bounds::new(
+        gpui::point(
+            px(visible_panel_width(show_layers_panel, layers_panel_width)),
+            px(toolbar::HEADER_HEIGHT),
+        ),
+        size(
+            px(canvas_viewport_width(
+                window_size.width.0,
+                show_layers_panel,
+                layers_panel_width,
+                show_design_panel,
+                design_panel_width,
+            )),
+            px((window_size.height.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT).max(1.0)),
+        ),
+    )
+}
+
 fn canvas_position(
     position: gpui::Point<gpui::Pixels>,
     canvas_bounds: Option<gpui::Bounds<gpui::Pixels>>,
@@ -3330,8 +3463,15 @@ fn canvas_position(
     glam::Vec2::new(position.x.0 - origin.x.0, position.y.0 - origin.y.0)
 }
 
-fn editor_key_context(has_modal: bool, has_menu: bool, editing_text: bool) -> &'static str {
-    if has_modal {
+fn editor_key_context(
+    file_opening: bool,
+    has_modal: bool,
+    has_menu: bool,
+    editing_text: bool,
+) -> &'static str {
+    if file_opening {
+        "StrekFileOpening"
+    } else if has_modal {
         "StrekModal"
     } else if has_menu {
         "StrekMenu"
@@ -3701,6 +3841,19 @@ mod layout_tests {
     }
 
     #[test]
+    fn predicted_canvas_bounds_settle_immediately_after_panel_changes() {
+        let bounds =
+            canvas_bounds_for_layout(gpui::size(px(1280.0), px(800.0)), true, 240.0, false, 300.0);
+
+        assert_eq!(bounds.origin, gpui::point(px(240.0), px(48.0)));
+        assert_eq!(bounds.size.width, px(1040.0));
+        assert_eq!(
+            bounds.size.height,
+            px(800.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT)
+        );
+    }
+
+    #[test]
     fn panel_width_is_bounded_and_preserves_canvas_space() {
         assert_eq!(clamp_panel_width(90.0, 248.0, 1280.0), 180.0);
         assert_eq!(clamp_panel_width(900.0, 248.0, 1280.0), 420.0);
@@ -3709,11 +3862,30 @@ mod layout_tests {
 
     #[test]
     fn modal_context_blocks_canvas_shortcuts_while_typing() {
-        assert_eq!(editor_key_context(true, false, false), "StrekModal");
-        assert_eq!(editor_key_context(true, true, true), "StrekModal");
-        assert_eq!(editor_key_context(false, true, true), "StrekMenu");
-        assert_eq!(editor_key_context(false, false, true), "StrekTextEditor");
-        assert_eq!(editor_key_context(false, false, false), "Strek");
+        assert_eq!(
+            editor_key_context(true, false, false, false),
+            "StrekFileOpening"
+        );
+        assert_eq!(editor_key_context(false, true, false, false), "StrekModal");
+        assert_eq!(editor_key_context(false, true, true, true), "StrekModal");
+        assert_eq!(editor_key_context(false, false, true, true), "StrekMenu");
+        assert_eq!(
+            editor_key_context(false, false, false, true),
+            "StrekTextEditor"
+        );
+        assert_eq!(editor_key_context(false, false, false, false), "Strek");
+    }
+
+    #[test]
+    fn object_clipboard_requires_its_metadata_marker() {
+        let owned = ClipboardItem::new_string_with_metadata(
+            "Layer".to_owned(),
+            OBJECT_CLIPBOARD_METADATA.to_owned(),
+        );
+        let external = ClipboardItem::new_string("Layer".to_owned());
+
+        assert!(is_strek_object_clipboard(&owned));
+        assert!(!is_strek_object_clipboard(&external));
     }
 
     #[test]
