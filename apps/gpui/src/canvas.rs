@@ -26,6 +26,7 @@ use smallvec::smallvec;
 use unicode_segmentation::UnicodeSegmentation;
 
 const TRANSFORMED_TEXT_CACHE_LIMIT: usize = 256;
+const MAX_AFFINE_TEXT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AFFINE_TEXT_RASTER_DIMENSION: u32 = 16_384;
 const MAX_AFFINE_TEXT_RASTER_PIXELS: u64 = 16_000_000;
 
@@ -38,6 +39,7 @@ static SVG_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new
 struct CachedTextImage {
     key: String,
     image: Arc<RenderImage>,
+    byte_len: u64,
     last_used: u64,
 }
 
@@ -45,6 +47,7 @@ struct CachedTextImage {
 struct TextImageCacheState {
     entries: VecDeque<CachedTextImage>,
     generation: u64,
+    total_bytes: u64,
 }
 
 /// Bounded cache for text that must be rasterized with a full affine transform.
@@ -56,7 +59,9 @@ impl TextImageCache {
         let mut state = self.0.borrow_mut();
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
-        while state.entries.len() > TRANSFORMED_TEXT_CACHE_LIMIT {
+        while state.entries.len() > TRANSFORMED_TEXT_CACHE_LIMIT
+            || state.total_bytes > MAX_AFFINE_TEXT_CACHE_BYTES
+        {
             let Some(index) = state
                 .entries
                 .iter()
@@ -65,6 +70,7 @@ impl TextImageCache {
                 break;
             };
             if let Some(entry) = state.entries.remove(index) {
+                state.total_bytes = state.total_bytes.saturating_sub(entry.byte_len);
                 let _ = window.drop_image(entry.image);
             }
         }
@@ -78,14 +84,41 @@ impl TextImageCache {
         Some(entry.image.clone())
     }
 
-    fn insert(&self, key: String, image: Arc<RenderImage>) {
+    fn prepare_insert(&self, byte_len: u64, window: &mut Window) -> bool {
+        if byte_len > MAX_AFFINE_TEXT_CACHE_BYTES {
+            return false;
+        }
+
+        let mut state = self.0.borrow_mut();
+        let generation = state.generation;
+        while state.entries.len() >= TRANSFORMED_TEXT_CACHE_LIMIT
+            || state.total_bytes.saturating_add(byte_len) > MAX_AFFINE_TEXT_CACHE_BYTES
+        {
+            let Some(index) = state
+                .entries
+                .iter()
+                .position(|entry| entry.last_used != generation)
+            else {
+                return false;
+            };
+            if let Some(entry) = state.entries.remove(index) {
+                state.total_bytes = state.total_bytes.saturating_sub(entry.byte_len);
+                let _ = window.drop_image(entry.image);
+            }
+        }
+        true
+    }
+
+    fn insert(&self, key: String, image: Arc<RenderImage>, byte_len: u64) {
         let mut state = self.0.borrow_mut();
         let generation = state.generation;
         state.entries.push_back(CachedTextImage {
             key,
             image,
+            byte_len,
             last_used: generation,
         });
+        state.total_bytes += byte_len;
     }
 }
 
@@ -601,21 +634,22 @@ fn paint_affine_text(
         MAX_AFFINE_TEXT_RASTER_DIMENSION,
         MAX_AFFINE_TEXT_RASTER_PIXELS,
     ) else {
-        log::warn!(
-            "skipping transformed text raster larger than the supported limit: {:?}",
-            rendered.size
-        );
         return;
     };
     let key = format!("{}x{}:{}", raster_width, raster_height, rendered.svg);
 
     let image = text_cache.get(&key).or_else(|| {
+        let byte_len = u64::from(raster_width) * u64::from(raster_height) * 4;
+        if !text_cache.prepare_insert(byte_len, window) {
+            log::warn!("transformed text cache budget exhausted; skipping an uncached raster");
+            return None;
+        }
         let pixmap = render_svg_pixmap(rendered.svg.as_bytes(), raster_width, raster_height)?;
         let mut pixels = pixmap.data().to_vec();
         premultiplied_rgba_to_unpremultiplied_bgra(&mut pixels);
         let buffer = RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
         let image = Arc::new(RenderImage::new(smallvec![Frame::new(buffer)]));
-        text_cache.insert(key, image.clone());
+        text_cache.insert(key, image.clone(), byte_len);
         Some(image)
     });
     let Some(image) = image else {
@@ -634,16 +668,46 @@ fn affine_text_raster_dimensions(
     max_dimension: u32,
     max_pixels: u64,
 ) -> Option<(u32, u32)> {
-    if !size.is_finite() || !scale.is_finite() || size.cmple(Vec2::ZERO).any() || scale <= 0.0 {
+    if !size.is_finite()
+        || !scale.is_finite()
+        || size.cmple(Vec2::ZERO).any()
+        || scale <= 0.0
+        || max_dimension == 0
+        || max_pixels == 0
+    {
         return None;
     }
-    let scaled = (size * scale).ceil().max(Vec2::ONE);
-    if scaled.x > max_dimension as f32 || scaled.y > max_dimension as f32 {
+
+    let desired_width = (f64::from(size.x) * f64::from(scale)).ceil().max(1.0);
+    let desired_height = (f64::from(size.y) * f64::from(scale)).ceil().max(1.0);
+    let max_dimension = f64::from(max_dimension);
+    let dimension_scale = (max_dimension / desired_width)
+        .min(max_dimension / desired_height)
+        .min(1.0);
+    let pixel_scale = ((max_pixels as f64) / (desired_width * desired_height))
+        .sqrt()
+        .min(1.0);
+    let bounded_scale = dimension_scale.min(pixel_scale);
+    if !bounded_scale.is_finite() || bounded_scale <= 0.0 {
         return None;
     }
-    let width = scaled.x as u32;
-    let height = scaled.y as u32;
-    (u64::from(width) * u64::from(height) <= max_pixels).then_some((width, height))
+
+    let mut width = (desired_width * bounded_scale)
+        .floor()
+        .clamp(1.0, max_dimension) as u32;
+    let mut height = (desired_height * bounded_scale)
+        .floor()
+        .clamp(1.0, max_dimension) as u32;
+    while u64::from(width) * u64::from(height) > max_pixels {
+        if width >= height && width > 1 {
+            width -= 1;
+        } else if height > 1 {
+            height -= 1;
+        } else {
+            return None;
+        }
+    }
+    Some((width, height))
 }
 
 fn premultiplied_rgba_to_unpremultiplied_bgra(pixels: &mut [u8]) {
@@ -1241,19 +1305,20 @@ mod tests {
     }
 
     #[test]
-    fn affine_text_raster_dimensions_enforce_dimension_and_pixel_limits() {
+    fn affine_text_raster_dimensions_downsample_to_dimension_and_pixel_limits() {
         assert_eq!(
             affine_text_raster_dimensions(Vec2::new(100.2, 50.1), 2.0, 1_000, 50_000),
             Some((201, 101))
         );
-        assert_eq!(
+        for dimensions in [
             affine_text_raster_dimensions(Vec2::new(600.0, 10.0), 2.0, 1_000, 50_000),
-            None
-        );
-        assert_eq!(
             affine_text_raster_dimensions(Vec2::new(300.0, 300.0), 2.0, 1_000, 50_000),
-            None
-        );
+        ] {
+            let (width, height) = dimensions.expect("valid text should be downsampled");
+            assert!(width <= 1_000);
+            assert!(height <= 1_000);
+            assert!(u64::from(width) * u64::from(height) <= 50_000);
+        }
         assert_eq!(
             affine_text_raster_dimensions(Vec2::new(f32::INFINITY, 10.0), 1.0, 1_000, 50_000),
             None
