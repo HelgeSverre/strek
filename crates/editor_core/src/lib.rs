@@ -59,7 +59,7 @@ pub use transaction::Transaction;
 pub use transform::View;
 
 use glam::{Affine2, Vec2};
-use serde::{Deserialize, Serialize};
+use serde::{de::IgnoredAny, Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -94,6 +94,10 @@ pub enum DocumentLoadError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentValidationError {
     TooManyNodes {
+        count: usize,
+        limit: usize,
+    },
+    TooManyNodeSlots {
         count: usize,
         limit: usize,
     },
@@ -164,6 +168,10 @@ impl fmt::Display for DocumentValidationError {
             Self::TooManyNodes { count, limit } => {
                 write!(formatter, "document contains {count} nodes; limit is {limit}")
             }
+            Self::TooManyNodeSlots { count, limit } => write!(
+                formatter,
+                "document contains {count} serialized node slots; limit is {limit}"
+            ),
             Self::TooManyChildren { node, count, limit } => write!(
                 formatter,
                 "node {node:?} contains {count} children; limit is {limit}"
@@ -1623,6 +1631,16 @@ impl Document {
         Ok(())
     }
 
+    fn validate_serialized_slot_count(
+        count: usize,
+        limit: usize,
+    ) -> Result<(), DocumentValidationError> {
+        if count > limit {
+            return Err(DocumentValidationError::TooManyNodeSlots { count, limit });
+        }
+        Ok(())
+    }
+
     /// Serialize document to JSON string.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(&self.to_saved())
@@ -1631,16 +1649,23 @@ impl Document {
     /// Deserialize document from JSON string.
     pub fn from_json(json: &str) -> Result<Self, DocumentLoadError> {
         #[derive(Deserialize)]
-        struct VersionHeader {
+        struct StorageHeader {
             version: u32,
+            #[serde(default)]
+            nodes: Vec<IgnoredAny>,
         }
-        let header: VersionHeader = serde_json::from_str(json)?;
+        let header: StorageHeader = serde_json::from_str(json)?;
         if header.version > SavedDocument::CURRENT_VERSION {
             return Err(DocumentLoadError::UnsupportedVersion {
                 version: header.version,
                 current: SavedDocument::CURRENT_VERSION,
             });
         }
+        Self::validate_serialized_slot_count(
+            header.nodes.len(),
+            DocumentComplexityLimits::DEFAULT.nodes.saturating_add(1),
+        )
+        .map_err(|reason| DocumentLoadError::InvalidDocument { reason })?;
         let saved: SavedDocument = serde_json::from_str(json)?;
         Self::from_saved(saved)
     }
@@ -2688,6 +2713,11 @@ mod tests {
         assert!(matches!(
             Document::validate_saved_complexity(&saved, limits),
             Err(DocumentValidationError::TooManyPathContours { node, .. }) if node == shape
+        ));
+
+        assert!(matches!(
+            Document::validate_serialized_slot_count(3, 2),
+            Err(DocumentValidationError::TooManyNodeSlots { count: 3, limit: 2 })
         ));
     }
 
