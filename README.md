@@ -87,6 +87,7 @@ Run the same checks used by CI:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
+cargo audit
 ```
 
 Useful `just` recipes:

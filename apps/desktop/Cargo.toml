@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 editor_core = { path = "../../crates/editor_core" }
-editor_render = { path = "../../crates/editor_render" }
 render_wgpu = { path = "../../crates/render_wgpu" }
 ui = { path = "../../crates/ui" }
 glam = { workspace = true }
