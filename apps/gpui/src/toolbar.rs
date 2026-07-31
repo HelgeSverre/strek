@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 
 use editor_core::{Editor, EditorAction, InteractionKind, TextAlign, Tool};
 use gpui::{
-    anchored, div, point, prelude::*, px, rgb, rgba, Action, AnyElement, App, Context, Corner,
-    IntoElement, MouseButton, SharedString, Window,
+    anchored, div, point, prelude::*, px, rgb, rgba, Action, AnyElement, AnyView, App, Context,
+    Corner, IntoElement, MouseButton, Render, SharedString, Window,
 };
 
 use crate::{
     assets::{icon, Icon},
-    AlignTextCenter, AlignTextLeft, AlignTextRight, BringForward, BringToFront, Copy, Cut, Delete,
-    DeselectAll, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
+    AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
+    AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
+    BringForward, BringToFront, Copy, Cut, Delete, DeselectAll, DistributeObjectsHorizontal,
+    DistributeObjectsVertical, Duplicate, EditVector, EllipseTool, FinishEditing, FrameTool, Group,
     InvertSelection, JoinPaths, NewDocument, OpenDocument, Paste, PenTool, RectangleTool, Redo,
     ReversePath, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack,
     SplitPath, TextLarger, TextSmaller, TextTool, ToggleFrameBackground, ToggleLayerPanel,
@@ -48,6 +50,54 @@ pub struct MenuState<'a> {
     pub file_busy: bool,
 }
 
+struct EditorTooltip {
+    label: SharedString,
+    shortcut: Option<SharedString>,
+}
+
+impl Render for EditorTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .bg(rgb(0x17181a))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded(px(5.0))
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(rgb(TEXT))
+            .child(self.label.clone())
+            .when_some(self.shortcut.clone(), |tooltip, shortcut| {
+                tooltip.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(shortcut),
+                )
+            })
+    }
+}
+
+pub(crate) fn editor_tooltip(
+    label: impl Into<SharedString>,
+    shortcut: Option<&'static str>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    let label = label.into();
+    let shortcut = shortcut.map(SharedString::from);
+    move |_, cx| {
+        cx.new(|_| EditorTooltip {
+            label: label.clone(),
+            shortcut: shortcut.clone(),
+        })
+        .into()
+    }
+}
+
 pub fn render_header(
     document: DocumentHeader,
     current_tool: Tool,
@@ -74,6 +124,8 @@ pub fn render_header(
             Icon::Menu,
             open_menu == Some(MenuKind::Main),
             true,
+            "Main menu",
+            None,
             ToggleMainMenu,
         ))
         .child(div().w(px(1.0)).h(px(22.0)).mx(px(2.0)).bg(rgb(BORDER)))
@@ -110,6 +162,8 @@ pub fn render_header(
             Icon::Undo,
             false,
             can_undo,
+            "Undo",
+            Some("⌘Z"),
             Undo,
         ))
         .child(icon_action_button(
@@ -117,6 +171,8 @@ pub fn render_header(
             Icon::Redo,
             false,
             can_redo,
+            "Redo",
+            Some("⇧⌘Z"),
             Redo,
         ))
         .child(div().w(px(1.0)).h(px(22.0)).mx(px(2.0)).bg(rgb(BORDER)))
@@ -126,105 +182,177 @@ pub fn render_header(
             Icon::PanelRight,
             show_layer_panel,
             true,
+            if show_layer_panel {
+                "Hide layers"
+            } else {
+                "Show layers"
+            },
+            Some("⌘\\"),
             ToggleLayerPanel,
         ))
 }
 
 /// Context-sensitive property strip shown over the canvas.
 pub fn render_context_bar(editor: &Editor) -> Option<AnyElement> {
+    if editor.interaction_kind() == InteractionKind::VectorEditing {
+        return Some(
+            context_panel()
+                .child(context_label("Vector editing"))
+                .child(context_separator())
+                .child(context_text_button(
+                    "join",
+                    "Join",
+                    editor.can_execute(EditorAction::JoinPaths),
+                    Some("⌘J"),
+                    JoinPaths,
+                ))
+                .child(context_text_button(
+                    "split",
+                    "Split",
+                    editor.can_execute(EditorAction::SplitPath),
+                    None,
+                    SplitPath,
+                ))
+                .child(context_text_button(
+                    "reverse",
+                    "Reverse",
+                    editor.can_execute(EditorAction::ReversePath),
+                    None,
+                    ReversePath,
+                ))
+                .child(context_text_button(
+                    "close",
+                    "Open / close",
+                    editor.can_execute(EditorAction::TogglePathClosed),
+                    None,
+                    TogglePathClosed,
+                ))
+                .child(context_primary_button("done", "Done", FinishEditing))
+                .into_any_element(),
+        );
+    }
+
+    let selection_count = editor.selection().len();
+    if selection_count == 0 {
+        return None;
+    }
+
     let panel = context_panel();
+    if selection_count > 1 {
+        return Some(
+            with_common_selection_actions(
+                panel.child(context_label(format!("{selection_count} objects selected"))),
+                editor,
+            )
+            .into_any_element(),
+        );
+    }
+
     if let Some(text) = editor.selected_text_data() {
         return Some(
-            panel
-                .child(context_label(text.font.family))
-                .child(context_separator())
-                .child(context_text_button("smaller", "−", TextSmaller))
-                .child(
-                    div()
-                        .min_w(px(38.0))
-                        .text_color(rgb(TEXT))
-                        .text_size(px(11.0))
-                        .text_align(gpui::TextAlign::Center)
-                        .child(format!("{:.0}", text.font_size)),
-                )
-                .child(context_text_button("larger", "+", TextLarger))
-                .child(context_separator())
-                .child(context_icon_button(
-                    "align-left",
-                    Icon::AlignLeft,
-                    text.align == TextAlign::Left,
-                    AlignTextLeft,
-                ))
-                .child(context_icon_button(
-                    "align-center",
-                    Icon::AlignCenter,
-                    text.align == TextAlign::Center,
-                    AlignTextCenter,
-                ))
-                .child(context_icon_button(
-                    "align-right",
-                    Icon::AlignRight,
-                    text.align == TextAlign::Right,
-                    AlignTextRight,
-                ))
-                .into_any_element(),
+            with_common_selection_actions(
+                panel
+                    .child(context_label(text.font.family))
+                    .child(context_separator())
+                    .child(context_text_button(
+                        "smaller",
+                        "−",
+                        text.font_size > 1.0,
+                        None,
+                        TextSmaller,
+                    ))
+                    .child(
+                        div()
+                            .min_w(px(38.0))
+                            .text_color(rgb(TEXT))
+                            .text_size(px(11.0))
+                            .text_align(gpui::TextAlign::Center)
+                            .child(format!("{:.0}", text.font_size)),
+                    )
+                    .child(context_text_button(
+                        "larger",
+                        "+",
+                        text.font_size < 512.0,
+                        None,
+                        TextLarger,
+                    ))
+                    .child(context_separator())
+                    .child(context_icon_button(
+                        "align-left",
+                        Icon::AlignLeft,
+                        "Align left",
+                        text.align == TextAlign::Left,
+                        AlignTextLeft,
+                    ))
+                    .child(context_icon_button(
+                        "align-center",
+                        Icon::AlignCenter,
+                        "Align center",
+                        text.align == TextAlign::Center,
+                        AlignTextCenter,
+                    ))
+                    .child(context_icon_button(
+                        "align-right",
+                        Icon::AlignRight,
+                        "Align right",
+                        text.align == TextAlign::Right,
+                        AlignTextRight,
+                    )),
+                editor,
+            )
+            .into_any_element(),
         );
     }
 
     if let Some(frame) = editor.selected_frame_data() {
         return Some(
-            panel
-                .child(context_label(format!(
-                    "Frame  {:.0} × {:.0}",
-                    frame.width, frame.height
-                )))
-                .child(context_separator())
-                .child(context_text_button(
-                    "frame-background",
-                    if frame.background.is_some() {
-                        "White"
-                    } else {
-                        "Transparent"
-                    },
-                    ToggleFrameBackground,
-                ))
-                .into_any_element(),
-        );
-    }
-
-    if editor.interaction_kind() == InteractionKind::VectorEditing {
-        return Some(
-            panel
-                .child(context_label("Vector"))
-                .child(context_separator())
-                .child(context_text_button("join", "Join", JoinPaths))
-                .child(context_text_button("split", "Split", SplitPath))
-                .child(context_text_button("reverse", "Reverse", ReversePath))
-                .child(context_text_button(
-                    "close",
-                    "Open / close",
-                    TogglePathClosed,
-                ))
-                .child(context_text_button("done", "Done", FinishEditing))
-                .into_any_element(),
+            with_common_selection_actions(
+                panel
+                    .child(context_label(format!(
+                        "Frame  {:.0} × {:.0}",
+                        frame.width, frame.height
+                    )))
+                    .child(context_separator())
+                    .child(context_text_button(
+                        "frame-background",
+                        if frame.background.is_some() {
+                            "White"
+                        } else {
+                            "Transparent"
+                        },
+                        true,
+                        None,
+                        ToggleFrameBackground,
+                    )),
+                editor,
+            )
+            .into_any_element(),
         );
     }
 
     if editor.can_execute(EditorAction::EnterVectorEdit) {
         return Some(
-            panel
-                .child(context_label("Vector shape"))
-                .child(context_separator())
-                .child(context_text_button(
-                    "edit-vector",
-                    "Edit anchors",
-                    EditVector,
-                ))
-                .into_any_element(),
+            with_common_selection_actions(
+                panel
+                    .child(context_label("Vector shape"))
+                    .child(context_separator())
+                    .child(context_text_button(
+                        "edit-vector",
+                        "Edit anchors",
+                        true,
+                        Some("Enter"),
+                        EditVector,
+                    )),
+                editor,
+            )
+            .into_any_element(),
         );
     }
 
-    None
+    Some(
+        with_common_selection_actions(panel.child(context_label("1 object selected")), editor)
+            .into_any_element(),
+    )
 }
 
 fn context_panel() -> gpui::Stateful<gpui::Div> {
@@ -260,9 +388,128 @@ fn context_separator() -> impl IntoElement {
     div().w(px(1.0)).h(px(18.0)).mx(px(2.0)).bg(rgb(BORDER))
 }
 
+fn with_common_selection_actions(
+    panel: gpui::Stateful<gpui::Div>,
+    editor: &Editor,
+) -> gpui::Stateful<gpui::Div> {
+    let selection_count = editor.selection().len();
+    let can_align = editor.can_execute(EditorAction::AlignLeft);
+    let can_distribute = editor.can_execute(EditorAction::DistributeHorizontal);
+    let can_group = editor.can_execute(EditorAction::Group);
+    let can_ungroup = editor.can_execute(EditorAction::Ungroup);
+
+    panel
+        .when(can_align, |panel| {
+            panel
+                .child(context_separator())
+                .child(context_icon_button(
+                    "object-align-left",
+                    Icon::ObjectAlignLeft,
+                    "Align left",
+                    false,
+                    AlignObjectsLeft,
+                ))
+                .child(context_icon_button(
+                    "object-align-center",
+                    Icon::ObjectAlignCenter,
+                    "Align horizontal centers",
+                    false,
+                    AlignObjectsCenter,
+                ))
+                .child(context_icon_button(
+                    "object-align-right",
+                    Icon::ObjectAlignRight,
+                    "Align right",
+                    false,
+                    AlignObjectsRight,
+                ))
+                .child(context_icon_button(
+                    "object-align-top",
+                    Icon::ObjectAlignTop,
+                    "Align top",
+                    false,
+                    AlignObjectsTop,
+                ))
+                .child(context_icon_button(
+                    "object-align-middle",
+                    Icon::ObjectAlignMiddle,
+                    "Align vertical centers",
+                    false,
+                    AlignObjectsMiddle,
+                ))
+                .child(context_icon_button(
+                    "object-align-bottom",
+                    Icon::ObjectAlignBottom,
+                    "Align bottom",
+                    false,
+                    AlignObjectsBottom,
+                ))
+        })
+        .when(can_distribute, |panel| {
+            panel
+                .child(context_separator())
+                .child(context_icon_button(
+                    "distribute-horizontal",
+                    Icon::DistributeHorizontal,
+                    "Distribute horizontally",
+                    false,
+                    DistributeObjectsHorizontal,
+                ))
+                .child(context_icon_button(
+                    "distribute-vertical",
+                    Icon::DistributeVertical,
+                    "Distribute vertically",
+                    false,
+                    DistributeObjectsVertical,
+                ))
+        })
+        .child(context_separator())
+        .child(context_text_button(
+            "duplicate",
+            "Duplicate",
+            editor.can_execute(EditorAction::Duplicate),
+            Some("⌘D"),
+            Duplicate,
+        ))
+        .when(selection_count > 1, |panel| {
+            panel.child(context_text_button(
+                "group",
+                "Group",
+                can_group,
+                Some("⌘G"),
+                Group,
+            ))
+        })
+        .when(can_ungroup, |panel| {
+            panel.child(context_text_button(
+                "ungroup",
+                "Ungroup",
+                true,
+                Some("⇧⌘G"),
+                Ungroup,
+            ))
+        })
+        .child(context_text_button(
+            "fit-selection",
+            "Fit",
+            editor.can_execute(EditorAction::ZoomToSelection),
+            Some("⌘2"),
+            ZoomToSelection,
+        ))
+        .child(context_text_button(
+            "delete",
+            "Delete",
+            editor.can_execute(EditorAction::Delete),
+            Some("⌫"),
+            Delete,
+        ))
+}
+
 fn context_text_button<A: Action + Clone>(
     id: &'static str,
     label: &'static str,
+    enabled: bool,
+    shortcut: Option<&'static str>,
     action: A,
 ) -> impl IntoElement {
     div()
@@ -276,8 +523,40 @@ fn context_text_button<A: Action + Clone>(
         .rounded(px(4.0))
         .text_color(rgb(TEXT))
         .text_size(px(10.0))
+        .opacity(if enabled { 1.0 } else { 0.38 })
+        .child(label)
+        .tooltip(editor_tooltip(label, shortcut))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(action.clone()), cx);
+                })
+        })
+}
+
+fn context_primary_button<A: Action + Clone>(
+    id: &'static str,
+    label: &'static str,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("context-{id}")))
+        .h(px(25.0))
+        .min_w(px(25.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(rgb(ACCENT))
+        .text_color(rgb(0xffffff))
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .hover(|style| style.bg(rgb(0x179bf0)))
+        .tooltip(editor_tooltip(label, Some("Enter")))
         .child(label)
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
@@ -287,6 +566,7 @@ fn context_text_button<A: Action + Clone>(
 fn context_icon_button<A: Action + Clone>(
     id: &'static str,
     icon_kind: Icon,
+    label: &'static str,
     active: bool,
     action: A,
 ) -> impl IntoElement {
@@ -306,6 +586,7 @@ fn context_icon_button<A: Action + Clone>(
         .cursor_pointer()
         .hover(|style| style.bg(rgb(if active { ACCENT } else { SURFACE_HOVER })))
         .child(icon(icon_kind, 15.0, rgb(TEXT)))
+        .tooltip(editor_tooltip(label, None))
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
         })
@@ -331,6 +612,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "select",
             Icon::Pointer,
+            "Select",
+            "V",
             current_tool == Tool::Select,
             true,
             SelectTool,
@@ -339,6 +622,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "frame",
             Icon::Frame,
+            "Frame",
+            "F",
             current_tool == Tool::Frame,
             true,
             FrameTool,
@@ -346,6 +631,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "rectangle",
             Icon::Rectangle,
+            "Rectangle",
+            "R",
             current_tool == Tool::Rectangle,
             true,
             RectangleTool,
@@ -353,6 +640,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "ellipse",
             Icon::Ellipse,
+            "Ellipse",
+            "O",
             current_tool == Tool::Ellipse,
             true,
             EllipseTool,
@@ -361,6 +650,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "pen",
             Icon::Pen,
+            "Pen",
+            "P",
             matches!(current_tool, Tool::Pen | Tool::VectorEdit),
             true,
             PenTool,
@@ -368,6 +659,8 @@ fn render_tool_rail(current_tool: Tool) -> impl IntoElement {
         .child(tool_button(
             "text",
             Icon::Text,
+            "Text",
+            "T",
             current_tool == Tool::Text,
             true,
             TextTool,
@@ -570,6 +863,56 @@ fn render_main_menu(
             SendToBack,
         ))
         .child(menu_separator())
+        .child(menu_section("Align"))
+        .child(menu_item(
+            "Align left",
+            "",
+            editor.can_execute(EditorAction::AlignLeft),
+            AlignObjectsLeft,
+        ))
+        .child(menu_item(
+            "Align horizontal centers",
+            "",
+            editor.can_execute(EditorAction::AlignCenter),
+            AlignObjectsCenter,
+        ))
+        .child(menu_item(
+            "Align right",
+            "",
+            editor.can_execute(EditorAction::AlignRight),
+            AlignObjectsRight,
+        ))
+        .child(menu_item(
+            "Align top",
+            "",
+            editor.can_execute(EditorAction::AlignTop),
+            AlignObjectsTop,
+        ))
+        .child(menu_item(
+            "Align vertical centers",
+            "",
+            editor.can_execute(EditorAction::AlignMiddle),
+            AlignObjectsMiddle,
+        ))
+        .child(menu_item(
+            "Align bottom",
+            "",
+            editor.can_execute(EditorAction::AlignBottom),
+            AlignObjectsBottom,
+        ))
+        .child(menu_item(
+            "Distribute horizontally",
+            "",
+            editor.can_execute(EditorAction::DistributeHorizontal),
+            DistributeObjectsHorizontal,
+        ))
+        .child(menu_item(
+            "Distribute vertically",
+            "",
+            editor.can_execute(EditorAction::DistributeVertical),
+            DistributeObjectsVertical,
+        ))
+        .child(menu_separator())
         .child(menu_section("Path"))
         .child(menu_item(
             "Finish editing",
@@ -706,6 +1049,8 @@ fn icon_action_button<A: Action + Clone>(
     icon_kind: Icon,
     active: bool,
     enabled: bool,
+    label: &'static str,
+    shortcut: Option<&'static str>,
     action: A,
 ) -> impl IntoElement {
     let icon_color = if enabled { TEXT } else { TEXT_MUTED };
@@ -725,6 +1070,7 @@ fn icon_action_button<A: Action + Clone>(
         })
         .opacity(if enabled { 1.0 } else { 0.35 })
         .child(icon(icon_kind, 17.0, rgb(icon_color)))
+        .tooltip(editor_tooltip(label, shortcut))
         .when(enabled, |button| {
             button
                 .cursor_pointer()
@@ -759,6 +1105,7 @@ fn zoom_button(zoom: f32, active: bool) -> impl IntoElement {
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(format!("{:.0}%", zoom * 100.0))
         .child(icon(Icon::ChevronDown, 13.0, rgb(TEXT_MUTED)))
+        .tooltip(editor_tooltip("Zoom options", None))
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(ToggleZoomMenu), cx);
         })
@@ -767,6 +1114,8 @@ fn zoom_button(zoom: f32, active: bool) -> impl IntoElement {
 fn tool_button<A: Action + Clone>(
     id: &'static str,
     icon_kind: Icon,
+    label: &'static str,
+    shortcut: &'static str,
     active: bool,
     enabled: bool,
     action: A,
@@ -791,6 +1140,7 @@ fn tool_button<A: Action + Clone>(
             18.0,
             rgb(if active { 0xffffff } else { TEXT }),
         ))
+        .tooltip(editor_tooltip(label, Some(shortcut)))
         .when(active, |button| {
             button.child(
                 div()

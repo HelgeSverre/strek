@@ -5,6 +5,7 @@ use gpui::{div, prelude::*, px, rgb, rgba, Context, SharedString, StatefulIntera
 
 use crate::{
     assets::{icon, Icon},
+    toolbar::editor_tooltip,
     VectorEditor,
 };
 
@@ -69,12 +70,12 @@ pub fn render_layer_panel(
 fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl IntoElement {
     let indent = entry.depth as f32 * 16.0;
     let bg = if entry.selected {
-        rgb(0x183d58)
+        rgb(0x164f73)
     } else {
         rgba(0x00000000)
     };
     let hover_bg = if entry.selected {
-        rgb(0x183d58)
+        rgb(0x164f73)
     } else {
         rgb(0x2b2c31)
     };
@@ -107,10 +108,25 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
     let expand_id = entry.id;
     let visibility_id = entry.id;
     let lock_id = entry.id;
+    let expand_tooltip = if entry.expanded {
+        format!("Collapse {}", entry.name)
+    } else {
+        format!("Expand {}", entry.name)
+    };
+    let visibility_tooltip = if entry.visible {
+        format!("Hide {}", entry.name)
+    } else {
+        format!("Show {}", entry.name)
+    };
+    let lock_tooltip = if entry.locked {
+        format!("Unlock {}", entry.name)
+    } else {
+        format!("Lock {}", entry.name)
+    };
 
     div()
         .id(SharedString::from(format!("layer-{:?}", entry.id)))
-        .h(px(28.0))
+        .h(px(32.0))
         .w_full()
         .flex()
         .flex_row()
@@ -121,6 +137,9 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         .bg(bg)
         .hover(|s| s.bg(hover_bg))
         .cursor_pointer()
+        .when(entry.selected, |row| {
+            row.border_l_2().border_color(rgb(0x0c8ce9))
+        })
         .text_color(text_color)
         .text_size(px(12.0))
         .on_click(
@@ -135,13 +154,20 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         .child(
             div()
                 .id(SharedString::from(format!("expand-{:?}", entry.id)))
-                .w(px(12.0))
+                .w(px(20.0))
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
                 .text_size(px(8.0))
                 .text_color(rgb(0x8f929a))
                 .child(expand_icon)
                 .when(entry.has_children, |chevron| {
                     chevron
                         .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x35363b)))
+                        .tooltip(editor_tooltip(expand_tooltip, None))
                         .on_click(cx.listener(move |editor, _, _window, cx| {
                             editor.editor.toggle_layer_expand(expand_id);
                             cx.stop_propagation();
@@ -166,11 +192,12 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         .child(
             div()
                 .id(SharedString::from(format!("visibility-{:?}", entry.id)))
-                .w(px(16.0))
-                .h(px(20.0))
+                .w(px(24.0))
+                .h(px(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded(px(4.0))
                 .opacity(if entry.visible { 0.65 } else { 1.0 })
                 .child(icon(
                     if entry.visible {
@@ -182,6 +209,8 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
                     rgb(if entry.visible { 0xa8abb2 } else { 0x6f7279 }),
                 ))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x35363b)))
+                .tooltip(editor_tooltip(visibility_tooltip, None))
                 .on_click(cx.listener(move |editor, _, _window, cx| {
                     editor.editor.toggle_visibility(visibility_id);
                     cx.stop_propagation();
@@ -192,11 +221,12 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
         .child(
             div()
                 .id(SharedString::from(format!("lock-{:?}", entry.id)))
-                .w(px(16.0))
-                .h(px(20.0))
+                .w(px(24.0))
+                .h(px(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded(px(4.0))
                 .opacity(if entry.locked { 1.0 } else { 0.35 })
                 .child(icon(
                     if entry.locked {
@@ -208,6 +238,8 @@ fn render_layer_entry(entry: LayerEntry, cx: &mut Context<VectorEditor>) -> impl
                     rgb(0xa8abb2),
                 ))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x35363b)))
+                .tooltip(editor_tooltip(lock_tooltip, None))
                 .on_click(cx.listener(move |editor, _, _window, cx| {
                     editor.editor.toggle_locked(lock_id);
                     cx.stop_propagation();

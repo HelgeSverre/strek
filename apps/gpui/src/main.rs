@@ -43,6 +43,14 @@ actions!(
         SendToBack,
         BringForward,
         SendBackward,
+        AlignObjectsLeft,
+        AlignObjectsCenter,
+        AlignObjectsRight,
+        AlignObjectsTop,
+        AlignObjectsMiddle,
+        AlignObjectsBottom,
+        DistributeObjectsHorizontal,
+        DistributeObjectsVertical,
         NudgeUp,
         NudgeDown,
         NudgeLeft,
@@ -616,24 +624,106 @@ impl VectorEditor {
         self.execute_editor_action(EditorAction::SendBackward, cx);
     }
 
+    fn align_objects_left(
+        &mut self,
+        _: &AlignObjectsLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignLeft, cx);
+    }
+
+    fn align_objects_center(
+        &mut self,
+        _: &AlignObjectsCenter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignCenter, cx);
+    }
+
+    fn align_objects_right(
+        &mut self,
+        _: &AlignObjectsRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignRight, cx);
+    }
+
+    fn align_objects_top(
+        &mut self,
+        _: &AlignObjectsTop,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignTop, cx);
+    }
+
+    fn align_objects_middle(
+        &mut self,
+        _: &AlignObjectsMiddle,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignMiddle, cx);
+    }
+
+    fn align_objects_bottom(
+        &mut self,
+        _: &AlignObjectsBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::AlignBottom, cx);
+    }
+
+    fn distribute_objects_horizontal(
+        &mut self,
+        _: &DistributeObjectsHorizontal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::DistributeHorizontal, cx);
+    }
+
+    fn distribute_objects_vertical(
+        &mut self,
+        _: &DistributeObjectsVertical,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_editor_action(EditorAction::DistributeVertical, cx);
+    }
+
     fn nudge_up(&mut self, _: &NudgeUp, _window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_editor_action(EditorAction::NudgeUp, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeUp, cx);
+        }
     }
 
     fn nudge_down(&mut self, _: &NudgeDown, _window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_editor_action(EditorAction::NudgeDown, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeDown, cx);
+        }
     }
 
     fn nudge_left(&mut self, _: &NudgeLeft, _window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_editor_action(EditorAction::NudgeLeft, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeLeft, cx);
+        }
     }
 
     fn nudge_right(&mut self, _: &NudgeRight, _window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_editor_action(EditorAction::NudgeRight, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeRight, cx);
+        }
     }
 
     fn nudge_up_large(&mut self, _: &NudgeUpLarge, _window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_editor_action(EditorAction::NudgeUpLarge, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeUpLarge, cx);
+        }
     }
 
     fn nudge_down_large(
@@ -642,7 +732,9 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.execute_editor_action(EditorAction::NudgeDownLarge, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeDownLarge, cx);
+        }
     }
 
     fn nudge_left_large(
@@ -651,7 +743,9 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.execute_editor_action(EditorAction::NudgeLeftLarge, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeLeftLarge, cx);
+        }
     }
 
     fn nudge_right_large(
@@ -660,7 +754,9 @@ impl VectorEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.execute_editor_action(EditorAction::NudgeRightLarge, cx);
+        if self.open_menu.is_none() {
+            self.execute_editor_action(EditorAction::NudgeRightLarge, cx);
+        }
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1114,7 +1210,10 @@ impl VectorEditor {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key != "space" || self.editor.text_input_snapshot().is_some() {
+        if self.open_menu.is_some()
+            || event.keystroke.key != "space"
+            || self.editor.text_input_snapshot().is_some()
+        {
             return;
         }
         let effects = self.editor.handle_event(editor_core::InputEvent::KeyDown {
@@ -1161,7 +1260,9 @@ impl Render for VectorEditor {
         self.update_window_title(window);
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
-        let key_context = if self.editor.text_input_snapshot().is_some() {
+        let key_context = if self.open_menu.is_some() {
+            "VectorMenu"
+        } else if self.editor.text_input_snapshot().is_some() {
             "VectorTextEditor"
         } else {
             "VectorEditor"
@@ -1228,6 +1329,14 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::send_to_back))
             .on_action(cx.listener(Self::bring_forward))
             .on_action(cx.listener(Self::send_backward))
+            .on_action(cx.listener(Self::align_objects_left))
+            .on_action(cx.listener(Self::align_objects_center))
+            .on_action(cx.listener(Self::align_objects_right))
+            .on_action(cx.listener(Self::align_objects_top))
+            .on_action(cx.listener(Self::align_objects_middle))
+            .on_action(cx.listener(Self::align_objects_bottom))
+            .on_action(cx.listener(Self::distribute_objects_horizontal))
+            .on_action(cx.listener(Self::distribute_objects_vertical))
             .on_action(cx.listener(Self::nudge_up))
             .on_action(cx.listener(Self::nudge_down))
             .on_action(cx.listener(Self::nudge_left))
@@ -1400,41 +1509,42 @@ fn convert_cursor(cursor: editor_core::Cursor) -> gpui::CursorStyle {
 
 fn register_keybindings(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-n", NewDocument, Some("VectorEditor")),
-        KeyBinding::new("cmd-o", OpenDocument, Some("VectorEditor")),
-        KeyBinding::new("cmd-s", SaveDocument, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-s", SaveDocumentAs, Some("VectorEditor")),
-        KeyBinding::new("cmd-q", QuitApplication, Some("VectorEditor")),
-        KeyBinding::new("cmd-z", Undo, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-z", Redo, Some("VectorEditor")),
-        KeyBinding::new("cmd-a", SelectAll, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-a", DeselectAll, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-i", InvertSelection, Some("VectorEditor")),
+        KeyBinding::new("secondary-n", NewDocument, Some("VectorEditor")),
+        KeyBinding::new("secondary-o", OpenDocument, Some("VectorEditor")),
+        KeyBinding::new("secondary-s", SaveDocument, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-s", SaveDocumentAs, Some("VectorEditor")),
+        KeyBinding::new("secondary-q", QuitApplication, Some("VectorEditor")),
+        KeyBinding::new("secondary-z", Undo, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-z", Redo, Some("VectorEditor")),
+        KeyBinding::new("secondary-y", Redo, Some("VectorEditor")),
+        KeyBinding::new("secondary-a", SelectAll, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-a", DeselectAll, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-i", InvertSelection, Some("VectorEditor")),
         KeyBinding::new("backspace", Backspace, Some("VectorEditor")),
         KeyBinding::new("delete", Delete, Some("VectorEditor")),
-        KeyBinding::new("cmd-d", Duplicate, Some("VectorEditor")),
-        KeyBinding::new("cmd-g", Group, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-g", Ungroup, Some("VectorEditor")),
-        KeyBinding::new("cmd-]", BringForward, Some("VectorEditor")),
-        KeyBinding::new("cmd-[", SendBackward, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-]", BringToFront, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-[", SendToBack, Some("VectorEditor")),
-        KeyBinding::new("cmd-=", ZoomIn, Some("VectorEditor")),
-        KeyBinding::new("cmd-+", ZoomIn, Some("VectorEditor")),
-        KeyBinding::new("cmd--", ZoomOut, Some("VectorEditor")),
-        KeyBinding::new("cmd-0", ZoomResetAll, Some("VectorEditor")),
-        KeyBinding::new("cmd-1", ZoomReset, Some("VectorEditor")),
-        KeyBinding::new("cmd-shift-1", ZoomToFit, Some("VectorEditor")),
-        KeyBinding::new("cmd-2", ZoomToSelection, Some("VectorEditor")),
-        KeyBinding::new("cmd-\\", ToggleLayerPanel, Some("VectorEditor")),
+        KeyBinding::new("secondary-d", Duplicate, Some("VectorEditor")),
+        KeyBinding::new("secondary-g", Group, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-g", Ungroup, Some("VectorEditor")),
+        KeyBinding::new("secondary-]", BringForward, Some("VectorEditor")),
+        KeyBinding::new("secondary-[", SendBackward, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-]", BringToFront, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-[", SendToBack, Some("VectorEditor")),
+        KeyBinding::new("secondary-=", ZoomIn, Some("VectorEditor")),
+        KeyBinding::new("secondary-+", ZoomIn, Some("VectorEditor")),
+        KeyBinding::new("secondary--", ZoomOut, Some("VectorEditor")),
+        KeyBinding::new("secondary-0", ZoomResetAll, Some("VectorEditor")),
+        KeyBinding::new("secondary-1", ZoomReset, Some("VectorEditor")),
+        KeyBinding::new("secondary-shift-1", ZoomToFit, Some("VectorEditor")),
+        KeyBinding::new("secondary-2", ZoomToSelection, Some("VectorEditor")),
+        KeyBinding::new("secondary-\\", ToggleLayerPanel, Some("VectorEditor")),
         KeyBinding::new("v", SelectTool, Some("VectorEditor")),
         KeyBinding::new("f", FrameTool, Some("VectorEditor")),
         KeyBinding::new("r", RectangleTool, Some("VectorEditor")),
         KeyBinding::new("o", EllipseTool, Some("VectorEditor")),
         KeyBinding::new("p", PenTool, Some("VectorEditor")),
         KeyBinding::new("t", TextTool, Some("VectorEditor")),
-        KeyBinding::new("cmd-enter", FinishEditing, Some("VectorEditor")),
-        KeyBinding::new("cmd-j", JoinPaths, Some("VectorEditor")),
+        KeyBinding::new("secondary-enter", FinishEditing, Some("VectorEditor")),
+        KeyBinding::new("secondary-j", JoinPaths, Some("VectorEditor")),
         KeyBinding::new("up", NudgeUp, Some("VectorEditor")),
         KeyBinding::new("down", NudgeDown, Some("VectorEditor")),
         KeyBinding::new("left", NudgeLeft, Some("VectorEditor")),
@@ -1443,19 +1553,24 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("shift-down", NudgeDownLarge, Some("VectorEditor")),
         KeyBinding::new("shift-left", NudgeLeftLarge, Some("VectorEditor")),
         KeyBinding::new("shift-right", NudgeRightLarge, Some("VectorEditor")),
-        KeyBinding::new("cmd-c", Copy, Some("VectorEditor")),
-        KeyBinding::new("cmd-x", Cut, Some("VectorEditor")),
-        KeyBinding::new("cmd-v", Paste, Some("VectorEditor")),
+        KeyBinding::new("secondary-c", Copy, Some("VectorEditor")),
+        KeyBinding::new("secondary-x", Cut, Some("VectorEditor")),
+        KeyBinding::new("secondary-v", Paste, Some("VectorEditor")),
         KeyBinding::new("enter", Enter, Some("VectorEditor")),
         KeyBinding::new("escape", Escape, Some("VectorEditor")),
-        KeyBinding::new("cmd-n", NewDocument, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-o", OpenDocument, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-s", SaveDocument, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-shift-s", SaveDocumentAs, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-q", QuitApplication, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-z", Undo, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-shift-z", Redo, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-a", SelectAll, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-n", NewDocument, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-o", OpenDocument, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-s", SaveDocument, Some("VectorTextEditor")),
+        KeyBinding::new(
+            "secondary-shift-s",
+            SaveDocumentAs,
+            Some("VectorTextEditor"),
+        ),
+        KeyBinding::new("secondary-q", QuitApplication, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-z", Undo, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-shift-z", Redo, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-y", Redo, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-a", SelectAll, Some("VectorTextEditor")),
         KeyBinding::new("backspace", Backspace, Some("VectorTextEditor")),
         KeyBinding::new("delete", Delete, Some("VectorTextEditor")),
         KeyBinding::new("left", TextLeft, Some("VectorTextEditor")),
@@ -1464,12 +1579,24 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("shift-right", TextSelectRight, Some("VectorTextEditor")),
         KeyBinding::new("home", TextHome, Some("VectorTextEditor")),
         KeyBinding::new("end", TextEnd, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-c", Copy, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-x", Cut, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-v", Paste, Some("VectorTextEditor")),
-        KeyBinding::new("cmd-enter", FinishEditing, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-c", Copy, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-x", Cut, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-v", Paste, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-enter", FinishEditing, Some("VectorTextEditor")),
         KeyBinding::new("enter", Enter, Some("VectorTextEditor")),
         KeyBinding::new("escape", Escape, Some("VectorTextEditor")),
+        KeyBinding::new("secondary-n", NewDocument, Some("VectorMenu")),
+        KeyBinding::new("secondary-o", OpenDocument, Some("VectorMenu")),
+        KeyBinding::new("secondary-s", SaveDocument, Some("VectorMenu")),
+        KeyBinding::new("secondary-shift-s", SaveDocumentAs, Some("VectorMenu")),
+        KeyBinding::new("secondary-q", QuitApplication, Some("VectorMenu")),
+        KeyBinding::new("escape", Escape, Some("VectorMenu")),
+    ]);
+
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-g", Group, Some("VectorEditor")),
+        KeyBinding::new("ctrl-shift-g", Ungroup, Some("VectorEditor")),
     ]);
 }
 

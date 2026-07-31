@@ -42,24 +42,28 @@ pub fn render_status_bar(
     let zoom_text = format!("{:.0}%", zoom * 100.0);
     let hint = match interaction {
         InteractionKind::Idle => match tool {
-            Tool::Select => "Drag handles to resize · rotate above selection · Space to pan",
-            Tool::Frame => "Drag an artboard · enclosed objects become children",
-            Tool::Rectangle | Tool::Ellipse => "Drag to draw · Shift constrains · Alt centers",
-            Tool::Pen => "Click for corners · drag for curves · Enter finishes",
-            Tool::Text => "Click for point text · drag for a wrapping text box",
+            Tool::Select => {
+                "Shift-click toggles selection · drag handles to transform · Space pans"
+            }
+            Tool::Frame => "Drag an artboard · enclosed objects become children · Esc exits tool",
+            Tool::Rectangle | Tool::Ellipse => {
+                "Drag to draw · Shift constrains · Alt centers · Esc exits tool"
+            }
+            Tool::Pen => "Click for corners · drag for curves · Enter finishes · Esc exits tool",
+            Tool::Text => "Click for point text · drag for a text box · Esc exits tool",
             Tool::VectorEdit => "Select anchors or handles · double-click a segment to insert",
         },
         InteractionKind::Moving => "Moving · release to commit · Esc cancels",
         InteractionKind::Resizing => "Resizing · Shift constrains · Alt resizes from center",
         InteractionKind::Rotating => "Rotating · Shift snaps to 15°",
-        InteractionKind::Marquee => "Selecting objects",
+        InteractionKind::Marquee => "Selecting objects · release to apply · Esc cancels",
         InteractionKind::CreatingShape => "Drawing shape · release to create",
         InteractionKind::CreatingFrame => "Drawing artboard · release to adopt enclosed objects",
         InteractionKind::Pen => "Building path · Enter finishes · Backspace removes last anchor",
         InteractionKind::CreatingText => "Drawing text box",
         InteractionKind::TextEditing => "Editing text · ⌘Enter commits · Esc cancels",
         InteractionKind::VectorEditing => "Editing vector · Enter commits · Delete removes anchors",
-        InteractionKind::Panning => "Panning canvas",
+        InteractionKind::Panning => "Panning canvas · release Space to return",
     };
 
     div()

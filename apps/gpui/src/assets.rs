@@ -64,6 +64,38 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/align-right.svg",
         include_bytes!("../assets/icons/align-right.svg"),
     ),
+    (
+        "icons/object-align-left.svg",
+        include_bytes!("../assets/icons/object-align-left.svg"),
+    ),
+    (
+        "icons/object-align-center.svg",
+        include_bytes!("../assets/icons/object-align-center.svg"),
+    ),
+    (
+        "icons/object-align-right.svg",
+        include_bytes!("../assets/icons/object-align-right.svg"),
+    ),
+    (
+        "icons/object-align-top.svg",
+        include_bytes!("../assets/icons/object-align-top.svg"),
+    ),
+    (
+        "icons/object-align-middle.svg",
+        include_bytes!("../assets/icons/object-align-middle.svg"),
+    ),
+    (
+        "icons/object-align-bottom.svg",
+        include_bytes!("../assets/icons/object-align-bottom.svg"),
+    ),
+    (
+        "icons/distribute-horizontal.svg",
+        include_bytes!("../assets/icons/distribute-horizontal.svg"),
+    ),
+    (
+        "icons/distribute-vertical.svg",
+        include_bytes!("../assets/icons/distribute-vertical.svg"),
+    ),
 ];
 
 pub struct Assets;
@@ -106,6 +138,14 @@ pub enum Icon {
     AlignLeft,
     AlignCenter,
     AlignRight,
+    ObjectAlignLeft,
+    ObjectAlignCenter,
+    ObjectAlignRight,
+    ObjectAlignTop,
+    ObjectAlignMiddle,
+    ObjectAlignBottom,
+    DistributeHorizontal,
+    DistributeVertical,
 }
 
 impl Icon {
@@ -131,6 +171,14 @@ impl Icon {
             Self::AlignLeft => "icons/align-left.svg",
             Self::AlignCenter => "icons/align-center.svg",
             Self::AlignRight => "icons/align-right.svg",
+            Self::ObjectAlignLeft => "icons/object-align-left.svg",
+            Self::ObjectAlignCenter => "icons/object-align-center.svg",
+            Self::ObjectAlignRight => "icons/object-align-right.svg",
+            Self::ObjectAlignTop => "icons/object-align-top.svg",
+            Self::ObjectAlignMiddle => "icons/object-align-middle.svg",
+            Self::ObjectAlignBottom => "icons/object-align-bottom.svg",
+            Self::DistributeHorizontal => "icons/distribute-horizontal.svg",
+            Self::DistributeVertical => "icons/distribute-vertical.svg",
         }
     }
 }
