@@ -2,21 +2,23 @@
 
 use editor_core::{
     AlignCross, AlignMain, Direction, Editor, FrameData, Layout, NodeKind, Paint, Rect, Style,
-    TextData, TransformComponents,
+    TextAlign, TextData, TransformComponents,
 };
 use gpui::{div, prelude::*, px, rgb, rgba, Action, AnyElement, IntoElement, SharedString, Window};
 
 use crate::{
-    toolbar::editor_tooltip, AlignTextCenter, AlignTextLeft, AlignTextRight, PropertyFillBlack,
-    PropertyFillBlue, PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite,
-    PropertyMoveDown, PropertyMoveLeft, PropertyMoveRight, PropertyMoveUp, PropertyOpacityDown,
-    PropertyOpacityUp, PropertyRotateLeft, PropertyRotateRight, PropertyStrokeDown,
-    PropertyStrokeUp, PropertyToggleStroke, SetLayoutCrossCenter, SetLayoutCrossEnd,
-    SetLayoutCrossStart, SetLayoutCrossStretch, SetLayoutFree, SetLayoutHorizontal,
-    SetLayoutMainCenter, SetLayoutMainEnd, SetLayoutMainSpaceBetween, SetLayoutMainStart,
-    SetLayoutVertical, StartFillColorInput, StartStrokeColorInput, StepLayoutPaddingDown,
-    StepLayoutPaddingUp, StepLayoutSpacingDown, StepLayoutSpacingUp, TextLarger, TextSmaller,
-    ToggleFrameBackground,
+    toolbar::{editor_tooltip, font_family_label, PortableFontFamily},
+    AlignTextCenter, AlignTextLeft, AlignTextRight, PropertyFillBlack, PropertyFillBlue,
+    PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite, PropertyMoveDown,
+    PropertyMoveLeft, PropertyMoveRight, PropertyMoveUp, PropertyOpacityDown, PropertyOpacityUp,
+    PropertyRotateLeft, PropertyRotateRight, PropertyStrokeDown, PropertyStrokeUp,
+    PropertyToggleStroke, SetLayoutCrossCenter, SetLayoutCrossEnd, SetLayoutCrossStart,
+    SetLayoutCrossStretch, SetLayoutFree, SetLayoutHorizontal, SetLayoutMainCenter,
+    SetLayoutMainEnd, SetLayoutMainSpaceBetween, SetLayoutMainStart, SetLayoutVertical,
+    SetTextFamilyMonospace, SetTextFamilySerif, SetTextFamilySystem, StartFillColorInput,
+    StartStrokeColorInput, StepLayoutPaddingDown, StepLayoutPaddingUp, StepLayoutSpacingDown,
+    StepLayoutSpacingUp, TextLarger, TextSmaller, TextWeightDown, TextWeightUp,
+    ToggleFrameBackground, ToggleTextItalic,
 };
 
 const SURFACE: u32 = 0x202124;
@@ -374,6 +376,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
         .when_some(snapshot.text, |panel, text| {
             panel.child(
                 section("Typography")
+                    .child(font_family_controls(&text))
                     .child(value_stepper(
                         "Size",
                         format_number(text.font_size),
@@ -382,6 +385,31 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                         TextSmaller,
                         TextLarger,
                     ))
+                    .child(value_stepper(
+                        "Weight",
+                        text.font.weight.to_string(),
+                        "Decrease font weight",
+                        "Increase font weight",
+                        TextWeightDown,
+                        TextWeightUp,
+                    ))
+                    .child(
+                        div()
+                            .h(px(34.0))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .px(px(10.0))
+                            .child(div().w(px(62.0)).text_size(px(10.0)).child("Style"))
+                            .child(property_choice_button(
+                                "text-italic",
+                                "Italic",
+                                "Toggle italic",
+                                text.font.italic,
+                                ToggleTextItalic,
+                            )),
+                    )
                     .child(
                         div()
                             .h(px(36.0))
@@ -391,22 +419,25 @@ pub(crate) fn render(snapshot: PropertiesSnapshot) -> AnyElement {
                             .gap(px(4.0))
                             .px(px(10.0))
                             .child(div().w(px(62.0)).text_size(px(10.0)).child("Align"))
-                            .child(property_button(
+                            .child(property_choice_button(
                                 "text-left",
                                 "Left",
                                 "Align text left",
+                                text.align == TextAlign::Left,
                                 AlignTextLeft,
                             ))
-                            .child(property_button(
+                            .child(property_choice_button(
                                 "text-center",
                                 "Center",
                                 "Align text center",
+                                text.align == TextAlign::Center,
                                 AlignTextCenter,
                             ))
-                            .child(property_button(
+                            .child(property_choice_button(
                                 "text-right",
                                 "Right",
                                 "Align text right",
+                                text.align == TextAlign::Right,
                                 AlignTextRight,
                             )),
                     ),
@@ -573,6 +604,70 @@ fn layout_section(layout: Layout) -> gpui::Div {
                         )),
                 )
         })
+}
+
+fn font_family_controls(text: &TextData) -> gpui::Div {
+    let family = PortableFontFamily::from_name(&text.font.family);
+
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(34.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(10.0))
+                .child(div().w(px(62.0)).text_size(px(10.0)).child("Family"))
+                .child(
+                    div()
+                        .h(px(26.0))
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(SURFACE_RAISED))
+                        .text_size(px(10.0))
+                        .text_color(rgb(TEXT))
+                        .child(font_family_label(&text.font.family)),
+                ),
+        )
+        .child(
+            div()
+                .h(px(32.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(10.0))
+                .child(div().w(px(62.0)))
+                .child(property_choice_button(
+                    "text-family-system",
+                    "System",
+                    "Use system sans-serif",
+                    family == PortableFontFamily::System,
+                    SetTextFamilySystem,
+                ))
+                .child(property_choice_button(
+                    "text-family-serif",
+                    "Serif",
+                    "Use portable serif",
+                    family == PortableFontFamily::Serif,
+                    SetTextFamilySerif,
+                ))
+                .child(property_choice_button(
+                    "text-family-monospace",
+                    "Mono",
+                    "Use portable monospace",
+                    family == PortableFontFamily::Monospace,
+                    SetTextFamilyMonospace,
+                )),
+        )
 }
 
 fn uniform_padding(layout: &editor_core::AutoLayout) -> Option<f32> {
@@ -960,6 +1055,25 @@ mod tests {
     fn paint_format_omits_opaque_alpha_and_preserves_transparency() {
         assert_eq!(format_paint(&Paint::rgb(1.0, 0.5, 0.0)), "#FF8000");
         assert_eq!(format_paint(&Paint::rgba(0.2, 0.4, 0.6, 0.5)), "#33669980");
+    }
+
+    #[test]
+    fn snapshot_preserves_current_text_typography() {
+        let mut editor = Editor::new();
+        let text = editor
+            .document
+            .add_child(editor.document.root, Node::text("Label", "Hello"))
+            .unwrap();
+        editor.selection.select(text);
+        assert!(editor.set_selected_text_font_family("monospace"));
+        assert!(editor.set_selected_text_font_weight(650));
+        assert!(editor.set_selected_text_italic(true));
+
+        let typography = snapshot(&mut editor, None).text.unwrap().font;
+
+        assert_eq!(typography.family, "monospace");
+        assert_eq!(typography.weight, 700);
+        assert!(typography.italic);
     }
 
     #[test]

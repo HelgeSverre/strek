@@ -97,6 +97,12 @@ actions!(
         TogglePathClosed,
         TextSmaller,
         TextLarger,
+        SetTextFamilySystem,
+        SetTextFamilySerif,
+        SetTextFamilyMonospace,
+        TextWeightDown,
+        TextWeightUp,
+        ToggleTextItalic,
         AlignTextLeft,
         AlignTextCenter,
         AlignTextRight,
@@ -1421,6 +1427,76 @@ impl VectorEditor {
         }
     }
 
+    fn set_text_family_system(
+        &mut self,
+        _: &SetTextFamilySystem,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.set_selected_text_font_family("sans-serif") {
+            cx.notify();
+        }
+    }
+
+    fn set_text_family_serif(
+        &mut self,
+        _: &SetTextFamilySerif,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.set_selected_text_font_family("serif") {
+            cx.notify();
+        }
+    }
+
+    fn set_text_family_monospace(
+        &mut self,
+        _: &SetTextFamilyMonospace,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.set_selected_text_font_family("monospace") {
+            cx.notify();
+        }
+    }
+
+    fn text_weight_down(
+        &mut self,
+        _: &TextWeightDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_selected_text_weight(-100, cx);
+    }
+
+    fn text_weight_up(&mut self, _: &TextWeightUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selected_text_weight(100, cx);
+    }
+
+    fn step_selected_text_weight(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(text) = self.editor.selected_text_data() else {
+            return;
+        };
+        let weight = (i32::from(text.font.weight) + delta).clamp(0, i32::from(u16::MAX));
+        if self.editor.set_selected_text_font_weight(weight as u16) {
+            cx.notify();
+        }
+    }
+
+    fn toggle_text_italic(
+        &mut self,
+        _: &ToggleTextItalic,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.editor.selected_text_data() else {
+            return;
+        };
+        if self.editor.set_selected_text_italic(!text.font.italic) {
+            cx.notify();
+        }
+    }
+
     fn align_text_left(&mut self, _: &AlignTextLeft, _window: &mut Window, cx: &mut Context<Self>) {
         if self
             .editor
@@ -2645,6 +2721,12 @@ impl Render for VectorEditor {
             .on_action(cx.listener(Self::toggle_path_closed))
             .on_action(cx.listener(Self::text_smaller))
             .on_action(cx.listener(Self::text_larger))
+            .on_action(cx.listener(Self::set_text_family_system))
+            .on_action(cx.listener(Self::set_text_family_serif))
+            .on_action(cx.listener(Self::set_text_family_monospace))
+            .on_action(cx.listener(Self::text_weight_down))
+            .on_action(cx.listener(Self::text_weight_up))
+            .on_action(cx.listener(Self::toggle_text_italic))
             .on_action(cx.listener(Self::align_text_left))
             .on_action(cx.listener(Self::align_text_center))
             .on_action(cx.listener(Self::align_text_right))

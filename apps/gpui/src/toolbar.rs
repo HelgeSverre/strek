@@ -34,6 +34,41 @@ const TEXT: u32 = 0xf1f3f4;
 const TEXT_MUTED: u32 = 0xa8abb2;
 const ACCENT: u32 = 0x0c8ce9;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PortableFontFamily {
+    System,
+    Serif,
+    Monospace,
+    Other,
+}
+
+impl PortableFontFamily {
+    pub(crate) fn from_name(family: &str) -> Self {
+        match family.trim().to_ascii_lowercase().as_str() {
+            "sans-serif" | "system-ui" => Self::System,
+            "serif" => Self::Serif,
+            "monospace" => Self::Monospace,
+            _ => Self::Other,
+        }
+    }
+}
+
+pub(crate) fn font_family_label(family: &str) -> String {
+    match PortableFontFamily::from_name(family) {
+        PortableFontFamily::System => "System".to_owned(),
+        PortableFontFamily::Serif => "Serif".to_owned(),
+        PortableFontFamily::Monospace => "Monospace".to_owned(),
+        PortableFontFamily::Other => {
+            let family = family.trim();
+            if family.is_empty() {
+                "Unknown".to_owned()
+            } else {
+                family.to_owned()
+            }
+        }
+    }
+}
+
 fn shortcut(keymap: &Keymap, target: CommandTarget) -> Option<String> {
     keymap.shortcut_label(target)
 }
@@ -318,32 +353,73 @@ pub fn render_context_bar(editor: &Editor, keymap: &Keymap) -> Option<AnyElement
     }
 
     if let Some(text) = editor.selected_text_data() {
+        let family = PortableFontFamily::from_name(&text.font.family);
         return Some(
             with_common_selection_actions(
                 panel
-                    .child(context_label(text.font.family))
+                    .child(context_label(format!(
+                        "Text · {}",
+                        font_family_label(&text.font.family)
+                    )))
+                    .child(context_toggle_text_button(
+                        "family-system",
+                        "System",
+                        "Use system sans-serif",
+                        family == PortableFontFamily::System,
+                        crate::SetTextFamilySystem,
+                    ))
+                    .child(context_toggle_text_button(
+                        "family-serif",
+                        "Serif",
+                        "Use portable serif",
+                        family == PortableFontFamily::Serif,
+                        crate::SetTextFamilySerif,
+                    ))
+                    .child(context_toggle_text_button(
+                        "family-monospace",
+                        "Mono",
+                        "Use portable monospace",
+                        family == PortableFontFamily::Monospace,
+                        crate::SetTextFamilyMonospace,
+                    ))
                     .child(context_separator())
                     .child(context_text_button(
-                        "smaller",
+                        "size-down",
                         "−",
                         text.font_size > 1.0,
                         None,
                         TextSmaller,
                     ))
-                    .child(
-                        div()
-                            .min_w(px(38.0))
-                            .text_color(rgb(TEXT))
-                            .text_size(px(11.0))
-                            .text_align(gpui::TextAlign::Center)
-                            .child(format!("{:.0}", text.font_size)),
-                    )
+                    .child(context_value(format!("{:.0}", text.font_size)))
                     .child(context_text_button(
-                        "larger",
+                        "size-up",
                         "+",
                         text.font_size < 512.0,
                         None,
                         TextLarger,
+                    ))
+                    .child(context_separator())
+                    .child(context_text_button(
+                        "weight-down",
+                        "−",
+                        text.font.weight > 100,
+                        None,
+                        crate::TextWeightDown,
+                    ))
+                    .child(context_value(text.font.weight.to_string()))
+                    .child(context_text_button(
+                        "weight-up",
+                        "+",
+                        text.font.weight < 900,
+                        None,
+                        crate::TextWeightUp,
+                    ))
+                    .child(context_toggle_text_button(
+                        "italic",
+                        "I",
+                        "Toggle italic",
+                        text.font.italic,
+                        crate::ToggleTextItalic,
                     ))
                     .child(context_separator())
                     .child(context_icon_button(
@@ -458,6 +534,16 @@ fn context_label(label: impl Into<SharedString>) -> impl IntoElement {
         .text_color(rgb(TEXT_MUTED))
         .text_size(px(10.0))
         .child(label.into())
+}
+
+fn context_value(value: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .min_w(px(34.0))
+        .px(px(3.0))
+        .text_color(rgb(TEXT))
+        .text_size(px(10.0))
+        .text_align(gpui::TextAlign::Center)
+        .child(value.into())
 }
 
 fn context_separator() -> impl IntoElement {
@@ -613,6 +699,43 @@ fn context_text_button<A: Action + Clone>(
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(action.clone()), cx);
                 })
+        })
+}
+
+fn context_toggle_text_button<A: Action + Clone>(
+    id: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    active: bool,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("context-{id}")))
+        .h(px(25.0))
+        .min_w(px(25.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(if active {
+            rgb(ACCENT)
+        } else {
+            rgba(0x00000000)
+        })
+        .text_color(rgb(if active { 0xffffff } else { TEXT }))
+        .text_size(px(10.0))
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(if active { ACCENT } else { SURFACE_HOVER })))
+        .child(label)
+        .tooltip(editor_tooltip(tooltip, None))
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
         })
 }
 
@@ -1502,12 +1625,35 @@ fn menu_separator() -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_zoom_label, format_zoom_percentage};
+    use super::{font_family_label, format_zoom_label, format_zoom_percentage, PortableFontFamily};
 
     #[test]
     fn zoom_labels_preserve_decimal_percentages() {
         assert_eq!(format_zoom_percentage(1.0), "100");
         assert_eq!(format_zoom_percentage(1.255), "125.5");
         assert_eq!(format_zoom_label(1.255), "125.5%");
+    }
+
+    #[test]
+    fn portable_font_families_have_stable_active_states_and_labels() {
+        assert_eq!(
+            PortableFontFamily::from_name("system-ui"),
+            PortableFontFamily::System
+        );
+        assert_eq!(
+            PortableFontFamily::from_name(" sans-serif "),
+            PortableFontFamily::System
+        );
+        assert_eq!(
+            PortableFontFamily::from_name("SERIF"),
+            PortableFontFamily::Serif
+        );
+        assert_eq!(
+            PortableFontFamily::from_name("monospace"),
+            PortableFontFamily::Monospace
+        );
+        assert_eq!(font_family_label("sans-serif"), "System");
+        assert_eq!(font_family_label("Custom Sans"), "Custom Sans");
+        assert_eq!(font_family_label("  "), "Unknown");
     }
 }
