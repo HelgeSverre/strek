@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use editor_core::{ArtworkSnapshot, Rect};
 use glam::Vec2;
@@ -16,10 +17,17 @@ const MAX_RASTER_DIMENSION: u32 = 16_384;
 const MAX_RASTER_PIXELS: u64 = 64_000_000;
 const JPEG_QUALITY: u8 = 92;
 
+static OUTLINE_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
+    let mut database = resvg::usvg::fontdb::Database::new();
+    database.load_system_fonts();
+    Arc::new(database)
+});
+
 /// User-selectable artwork export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Svg,
+    SvgOutlined,
     Png,
     Jpeg,
     WebP,
@@ -28,7 +36,7 @@ pub enum ExportFormat {
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
-            Self::Svg => "svg",
+            Self::Svg | Self::SvgOutlined => "svg",
             Self::Png => "png",
             Self::Jpeg => "jpg",
             Self::WebP => "webp",
@@ -38,6 +46,7 @@ impl ExportFormat {
     fn label(self) -> &'static str {
         match self {
             Self::Svg => "SVG",
+            Self::SvgOutlined => "SVG with outlined text",
             Self::Png => "PNG",
             Self::Jpeg => "JPEG",
             Self::WebP => "WebP",
@@ -53,6 +62,7 @@ pub enum ExportError {
         width: u32,
         height: u32,
     },
+    OutlineSvg(String),
     Rasterize(String),
     Encode {
         format: ExportFormat,
@@ -72,6 +82,12 @@ impl fmt::Display for ExportError {
                 formatter,
                 "raster dimensions {width} × {height} exceed the safe export limit"
             ),
+            Self::OutlineSvg(detail) => {
+                write!(
+                    formatter,
+                    "could not convert SVG text to outlines: {detail}"
+                )
+            }
             Self::Rasterize(detail) => write!(formatter, "could not rasterize artwork: {detail}"),
             Self::Encode { format, detail } => {
                 write!(
@@ -93,6 +109,7 @@ impl Error for ExportError {
             Self::Write { source, .. } => Some(source),
             Self::InvalidBounds
             | Self::RasterTooLarge { .. }
+            | Self::OutlineSvg(_)
             | Self::Rasterize(_)
             | Self::Encode { .. } => None,
         }
@@ -130,8 +147,10 @@ fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, E
     let svg =
         render_svg::to_svg_string_export_with_view_box(&snapshot.display_list, view_min, size);
 
-    if format == ExportFormat::Svg {
-        return Ok(svg.into_bytes());
+    match format {
+        ExportFormat::Svg => return Ok(svg.into_bytes()),
+        ExportFormat::SvgOutlined => return encode_outlined_svg(&svg, view_min, size),
+        ExportFormat::Png | ExportFormat::Jpeg | ExportFormat::WebP => {}
     }
 
     let (width, height) = checked_raster_dimensions(size)?;
@@ -139,13 +158,87 @@ fn encode(format: ExportFormat, snapshot: &ArtworkSnapshot) -> Result<Vec<u8>, E
         .ok_or_else(|| ExportError::Rasterize("the SVG renderer rejected the data".into()))?;
 
     match format {
-        ExportFormat::Svg => unreachable!("SVG exports return before rasterization"),
+        ExportFormat::Svg | ExportFormat::SvgOutlined => {
+            unreachable!("SVG exports return before rasterization")
+        }
         ExportFormat::Png => pixmap
             .encode_png()
             .map_err(|error| encoding_error(format, error)),
         ExportFormat::Jpeg => encode_jpeg(pixmap.data(), width, height),
         ExportFormat::WebP => encode_webp(pixmap.data(), width, height),
     }
+}
+
+fn encode_outlined_svg(svg: &str, view_min: Vec2, size: Vec2) -> Result<Vec<u8>, ExportError> {
+    let options = resvg::usvg::Options {
+        fontdb: OUTLINE_FONT_DB.clone(),
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).map_err(|error| {
+        ExportError::OutlineSvg(format!("the SVG parser rejected the data: {error}"))
+    })?;
+    let outlined = tree.to_string(&resvg::usvg::WriteOptions {
+        preserve_text: false,
+        ..Default::default()
+    });
+
+    if outlined.contains("<text") {
+        return Err(ExportError::OutlineSvg(
+            "the SVG converter left text elements in the output".into(),
+        ));
+    }
+
+    preserve_artwork_view_box(outlined, view_min, size).map(String::into_bytes)
+}
+
+fn preserve_artwork_view_box(
+    outlined: String,
+    view_min: Vec2,
+    size: Vec2,
+) -> Result<String, ExportError> {
+    let root_tag_end = outlined
+        .find('>')
+        .ok_or_else(|| ExportError::OutlineSvg("the converted SVG has no root element".into()))?;
+    let root_end = outlined.rfind("</svg>").ok_or_else(|| {
+        ExportError::OutlineSvg("the converted SVG has no closing root element".into())
+    })?;
+    let visible_content_start = svg_defs_end(&outlined, root_tag_end + 1)?;
+
+    let mut output = String::with_capacity(outlined.len() + 160);
+    output.push_str(&outlined[..root_tag_end]);
+    output.push_str(&format!(
+        r#" viewBox="{} {} {} {}""#,
+        view_min.x, view_min.y, size.x, size.y
+    ));
+    output.push_str(&outlined[root_tag_end..visible_content_start]);
+    output.push_str(&format!(
+        r#"<g transform="translate({} {})">"#,
+        view_min.x, view_min.y
+    ));
+    output.push_str(&outlined[visible_content_start..root_end]);
+    output.push_str("</g>");
+    output.push_str(&outlined[root_end..]);
+    Ok(output)
+}
+
+fn svg_defs_end(svg: &str, search_start: usize) -> Result<usize, ExportError> {
+    let relative_defs_start = svg[search_start..].find("<defs").ok_or_else(|| {
+        ExportError::OutlineSvg("the converted SVG has no definitions element".into())
+    })?;
+    let defs_start = search_start + relative_defs_start;
+    let relative_tag_end = svg[defs_start..].find('>').ok_or_else(|| {
+        ExportError::OutlineSvg("the converted SVG has an incomplete definitions element".into())
+    })?;
+    let tag_end = defs_start + relative_tag_end;
+
+    if svg.as_bytes().get(tag_end.wrapping_sub(1)) == Some(&b'/') {
+        return Ok(tag_end + 1);
+    }
+
+    let relative_defs_end = svg[tag_end + 1..].find("</defs>").ok_or_else(|| {
+        ExportError::OutlineSvg("the converted SVG has an unclosed definitions element".into())
+    })?;
+    Ok(tag_end + 1 + relative_defs_end + "</defs>".len())
 }
 
 fn checked_raster_dimensions(size: Vec2) -> Result<(u32, u32), ExportError> {
@@ -236,7 +329,7 @@ fn raster_dimension(value: f32) -> Result<u32, ExportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_render::{DisplayItem, DisplayList, Paint, PathData};
+    use editor_render::{DisplayItem, DisplayList, Paint, PathData, TextItem};
     use glam::Affine2;
     use image::{GenericImageView, Pixel};
 
@@ -268,10 +361,30 @@ mod tests {
         }
     }
 
+    fn text_snapshot() -> ArtworkSnapshot {
+        let mut display_list = DisplayList::new();
+        display_list.push(DisplayItem::Text {
+            text: TextItem::new("Outlined text", 16.0),
+            transform: Affine2::from_translation(Vec2::new(-25.0, 20.0)),
+            opacity: 1.0,
+        });
+        ArtworkSnapshot {
+            display_list,
+            bounds: Rect::new(Vec2::new(-27.0, 18.0), Vec2::new(80.0, 50.0)),
+        }
+    }
+
     #[test]
     fn normalizes_the_extension_to_the_selected_format() {
         assert_eq!(
             normalize_path(PathBuf::from("/tmp/drawing.final"), ExportFormat::Svg),
+            PathBuf::from("/tmp/drawing.svg")
+        );
+        assert_eq!(
+            normalize_path(
+                PathBuf::from("/tmp/drawing.final"),
+                ExportFormat::SvgOutlined
+            ),
             PathBuf::from("/tmp/drawing.svg")
         );
         assert_eq!(
@@ -295,6 +408,18 @@ mod tests {
 
         assert!(svg.contains(r#"width="24" height="14""#));
         assert!(svg.contains(r#"viewBox="-27 38 24 14""#));
+    }
+
+    #[test]
+    fn outlined_svg_converts_text_to_paths_and_preserves_the_view_box() {
+        let bytes = encode(ExportFormat::SvgOutlined, &text_snapshot()).unwrap();
+        let svg = String::from_utf8(bytes).unwrap();
+
+        assert!(!svg.contains("<text"));
+        assert!(svg.contains("<path"));
+        assert!(svg.contains(r#"width="107" height="32""#));
+        assert!(svg.contains(r#"viewBox="-27 18 107 32""#));
+        resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).unwrap();
     }
 
     #[test]
