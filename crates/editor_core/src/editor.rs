@@ -1081,21 +1081,34 @@ impl Editor {
 
     /// Cancel pointer-driven work before a viewport layout change.
     ///
-    /// Text and vector editing sessions remain active. If panning temporarily
-    /// suspended another pointer interaction, both transient layers are
-    /// cancelled; a suspended text or vector edit is restored.
+    /// Text, vector, and Pen editing sessions remain active. An in-progress
+    /// Pen pointer gesture is ended without discarding its anchors. If panning
+    /// temporarily suspended another pointer interaction, both transient
+    /// layers are cancelled; suspended editing is restored.
     pub fn cancel_pointer_interaction(&mut self) -> bool {
         let mut cancelled = false;
-        while !matches!(
-            self.drag,
-            DragState::None | DragState::TextEditing(_) | DragState::VectorEditing(_)
-        ) {
+        loop {
+            match &mut self.drag {
+                DragState::None | DragState::TextEditing(_) | DragState::VectorEditing(_) => {
+                    return cancelled
+                }
+                DragState::Pen(session) => {
+                    let pointer_cancelled = session.pointer_down || session.active_anchor.is_some();
+                    session.pointer_down = false;
+                    session.active_anchor = None;
+                    if pointer_cancelled {
+                        self.needs_redraw = true;
+                    }
+                    return cancelled || pointer_cancelled;
+                }
+                _ => {}
+            }
+
             if !self.cancel_interaction() {
-                break;
+                return cancelled;
             }
             cancelled = true;
         }
-        cancelled
     }
 
     /// Settle transient editing state before saving, loading, or exporting.
@@ -6476,6 +6489,75 @@ mod tests {
         assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
         assert!(!editor.cancel_pointer_interaction());
         assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
+    }
+
+    #[test]
+    fn cancelling_pointer_work_preserves_pen_anchors_and_ends_only_its_pointer_gesture() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolPen));
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(10.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(20.0, 20.0),
+            modifiers: Modifiers::default(),
+        });
+
+        let anchor_before = match &editor.drag {
+            DragState::Pen(session) => {
+                assert!(session.pointer_down);
+                assert_eq!(session.active_anchor, Some(0));
+                assert_eq!(session.anchors.len(), 1);
+                session.anchors[0]
+            }
+            _ => panic!("expected Pen session"),
+        };
+
+        assert!(editor.cancel_pointer_interaction());
+        assert_eq!(editor.interaction_kind(), InteractionKind::Pen);
+        let DragState::Pen(session) = &editor.drag else {
+            panic!("expected Pen session");
+        };
+        assert_eq!(session.anchors, vec![anchor_before]);
+        assert!(!session.pointer_down);
+        assert_eq!(session.active_anchor, None);
+
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(30.0, 30.0),
+            modifiers: Modifiers::default(),
+        });
+        let DragState::Pen(session) = &editor.drag else {
+            panic!("expected Pen session");
+        };
+        assert_eq!(session.anchors, vec![anchor_before]);
+
+        editor.handle_event(InputEvent::KeyDown {
+            key: Key::Space,
+            modifiers: Modifiers::default(),
+        });
+        let pan_before = editor.view.pan;
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(40.0, 40.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::new(50.0, 50.0),
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.interaction_kind(), InteractionKind::Panning);
+
+        assert!(editor.cancel_pointer_interaction());
+        assert_eq!(editor.interaction_kind(), InteractionKind::Pen);
+        assert_eq!(editor.view.pan, pan_before);
+        let DragState::Pen(session) = &editor.drag else {
+            panic!("expected restored Pen session");
+        };
+        assert_eq!(session.anchors, vec![anchor_before]);
+        assert!(!session.pointer_down);
+        assert_eq!(session.active_anchor, None);
     }
 
     #[test]
