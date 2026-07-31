@@ -27,6 +27,25 @@ on runStrek(arguments)
     return do shell script shellCommand
 end runStrek
 
+on invariantNumber(numberValue)
+    set savedDelimiters to AppleScript's text item delimiters
+    try
+        set decimalSeparator to character 2 of (0.5 as text)
+        set renderedNumber to numberValue as text
+        if decimalSeparator is not "." then
+            set AppleScript's text item delimiters to decimalSeparator
+            set numberParts to text items of renderedNumber
+            set AppleScript's text item delimiters to "."
+            set renderedNumber to numberParts as text
+        end if
+        set AppleScript's text item delimiters to savedDelimiters
+        return renderedNumber
+    on error errorMessage number errorNumber
+        set AppleScript's text item delimiters to savedDelimiters
+        error errorMessage number errorNumber
+    end try
+end invariantNumber
+
 on strekState()
     return my runStrek({"state"})
 end strekState
@@ -36,7 +55,9 @@ on strekAction(commandId)
 end strekAction
 
 on strekPointer(phase, x, y)
-    return my runStrek({"pointer", phase, x, y})
+    set xText to my invariantNumber(x)
+    set yText to my invariantNumber(y)
+    return my runStrek({"pointer", phase, xText, yText})
 end strekPointer
 
 on strekText(textValue)
