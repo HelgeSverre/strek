@@ -8,7 +8,7 @@ use std::fmt::Write;
 use editor_render::{
     DisplayItem, DisplayList, LineCap, LineJoin, Paint, PathCmd, PathData, TextAlignment, TextItem,
 };
-use glam::Affine2;
+use glam::{Affine2, Vec2};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Convert a display list to an SVG string.
@@ -257,13 +257,25 @@ pub fn to_svg_fragment(display_list: &DisplayList) -> String {
 
 /// Convert a display list to an SVG string for export (excludes UI elements like selection/guides).
 pub fn to_svg_string_export(display_list: &DisplayList, width: f32, height: f32) -> String {
+    to_svg_string_export_with_view_box(display_list, Vec2::ZERO, Vec2::new(width, height))
+}
+
+/// Convert a display list to an SVG string for export using an explicit world-space view box.
+///
+/// This is suitable for artwork positioned away from the world origin, including content with
+/// negative coordinates. UI-only display items are excluded.
+pub fn to_svg_string_export_with_view_box(
+    display_list: &DisplayList,
+    view_min: Vec2,
+    size: Vec2,
+) -> String {
     let mut svg = String::new();
 
     // SVG header
     write!(
         svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        width, height, width, height
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="{} {} {} {}">"#,
+        size.x, size.y, view_min.x, view_min.y, size.x, size.y
     )
     .unwrap();
 
@@ -666,6 +678,27 @@ mod tests {
         assert!(editor_svg.contains("data-editor-ui=\"tool-preview\""));
         assert!(!exported_svg.contains("tool-preview"));
         assert!(!exported_svg.contains("<path"));
+    }
+
+    #[test]
+    fn export_view_box_preserves_translated_and_negative_artwork() {
+        let mut list = DisplayList::new();
+        list.push(DisplayItem::FillPath {
+            path: PathData::rect(0.0, 0.0, 20.0, 10.0),
+            paint: Paint::black(),
+            transform: Affine2::from_translation(Vec2::new(-25.0, 40.0)),
+            opacity: 1.0,
+        });
+
+        let svg = to_svg_string_export_with_view_box(
+            &list,
+            Vec2::new(-27.0, 38.0),
+            Vec2::new(24.0, 14.0),
+        );
+
+        assert!(svg.contains(r#"width="24" height="14""#));
+        assert!(svg.contains(r#"viewBox="-27 38 24 14""#));
+        assert!(svg.contains("matrix(1.000000,0.000000,0.000000,1.000000,-25.000000,40.000000)"));
     }
 
     #[test]
