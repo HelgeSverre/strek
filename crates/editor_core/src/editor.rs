@@ -82,6 +82,15 @@ pub enum InteractionKind {
     Panning,
 }
 
+/// Immutable world-space artwork prepared for serialization or rasterization.
+#[derive(Debug, Clone)]
+pub struct ArtworkSnapshot {
+    /// Document-only display items with world-space transforms.
+    pub display_list: DisplayList,
+    /// Conservative visual bounds, including transformed shape strokes.
+    pub bounds: Rect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResizeHandle {
     NorthWest,
@@ -5269,25 +5278,70 @@ impl Editor {
 
     /// Zoom to fit all content in the viewport.
     pub fn zoom_to_fit(&mut self) {
+        if let Some(bounds) = self.artwork_bounds() {
+            self.zoom_to_bounds(bounds);
+        }
+    }
+
+    /// Return conservative world-space bounds for all effectively visible artwork.
+    ///
+    /// Shape bounds include enough room for the SVG renderer's default miter limit, so exported
+    /// strokes are not clipped. Frames contribute their explicit dimensions even when their
+    /// background is transparent.
+    pub fn artwork_bounds(&mut self) -> Option<Rect> {
         let ids = self
             .document
             .descendants(self.document.root)
             .filter(|id| self.document.is_effectively_visible(*id))
             .collect::<Vec<_>>();
         let mut combined = Rect::empty();
+
         for id in ids {
-            let Some(bounds) = self.document.world_bounds(id) else {
+            let stroke_outset = self
+                .document
+                .get(id)
+                .and_then(|node| match &node.kind {
+                    NodeKind::Shape(_) => node.style.stroke.as_ref(),
+                    NodeKind::Group | NodeKind::Text(_) | NodeKind::Frame(_) => None,
+                })
+                .map(|stroke| stroke.width.max(0.0))
+                .unwrap_or(0.0);
+            let transform_scale = if stroke_outset > 0.0 {
+                max_affine_scale(self.document.world_transform(id))
+            } else {
+                0.0
+            };
+            let Some(mut bounds) = self.document.world_bounds(id) else {
                 continue;
             };
+            if !bounds.min.is_finite() || !bounds.max.is_finite() {
+                continue;
+            }
+
+            // SVG's default miter limit is four times the half-stroke width.
+            let margin = stroke_outset * transform_scale * 2.0;
+            if margin.is_finite() && margin > 0.0 {
+                bounds.min -= Vec2::splat(margin);
+                bounds.max += Vec2::splat(margin);
+            }
             combined = if combined.is_empty() {
                 bounds
             } else {
                 combined.union(&bounds)
             };
         }
-        if !combined.is_empty() {
-            self.zoom_to_bounds(combined);
-        }
+
+        (!combined.is_empty()).then_some(combined)
+    }
+
+    /// Build a document-only display list in world coordinates with its visual bounds.
+    pub fn artwork_snapshot(&mut self) -> Option<ArtworkSnapshot> {
+        let bounds = self.artwork_bounds()?;
+        let display_list = self.document.build_display_list(&View::default());
+        Some(ArtworkSnapshot {
+            display_list,
+            bounds,
+        })
     }
 
     /// Zoom to fit the current selection.
@@ -5894,6 +5948,14 @@ impl Editor {
         self.needs_redraw = true;
         true
     }
+}
+
+fn max_affine_scale(transform: Affine2) -> f32 {
+    let matrix = transform.matrix2;
+    let trace = matrix.x_axis.length_squared() + matrix.y_axis.length_squared();
+    let determinant = matrix.determinant();
+    let discriminant = (trace * trace - 4.0 * determinant * determinant).max(0.0);
+    ((trace + discriminant.sqrt()) * 0.5).sqrt()
 }
 
 impl Default for Editor {
@@ -6882,6 +6944,48 @@ mod tests {
 
         assert_eq!(editor.view.zoom, 4.0);
         assert_eq!(editor.view.pan, Vec2::new(80.0, 50.0));
+    }
+
+    #[test]
+    fn artwork_snapshot_uses_world_space_and_excludes_hidden_content() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Visible", PathData::rect(0.0, 0.0, 20.0, 10.0))
+                    .with_style(Style::fill_and_stroke(Paint::black(), Stroke::black(2.0)))
+                    .with_transform(Affine2::from_translation(Vec2::new(-25.0, 40.0))),
+            )
+            .unwrap();
+        editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Hidden", PathData::rect(0.0, 0.0, 100.0, 100.0))
+                    .with_visible(false)
+                    .with_transform(Affine2::from_translation(Vec2::splat(1_000.0))),
+            )
+            .unwrap();
+        editor.execute_action(EditorAction::ZoomIn);
+
+        let snapshot = editor.artwork_snapshot().unwrap();
+
+        assert_eq!(snapshot.bounds.min, Vec2::new(-29.0, 36.0));
+        assert_eq!(snapshot.bounds.max, Vec2::new(-1.0, 54.0));
+        assert_eq!(snapshot.display_list.len(), 2);
+        let editor_render::DisplayItem::FillPath { transform, .. } =
+            &snapshot.display_list.items[0]
+        else {
+            panic!("first visible display item should be the shape fill");
+        };
+        assert_eq!(transform.translation, Vec2::new(-25.0, 40.0));
+    }
+
+    #[test]
+    fn artwork_snapshot_is_absent_for_an_empty_document() {
+        assert!(Editor::new().artwork_snapshot().is_none());
     }
 
     #[test]

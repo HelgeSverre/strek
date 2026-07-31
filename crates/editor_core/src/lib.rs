@@ -33,7 +33,8 @@ pub use action::{ActionCategory, ActionMeta, EditorAction, Shortcut};
 pub use cache::{Cache, DirtyFlags};
 pub use command::{Command, Patch};
 pub use editor::{
-    AnchorRef, Editor, EditorClipboard, InteractionKind, TextInputSnapshot, TextNavigation, Tool,
+    AnchorRef, ArtworkSnapshot, Editor, EditorClipboard, InteractionKind, TextInputSnapshot,
+    TextNavigation, Tool,
 };
 pub use history::History;
 pub use input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
