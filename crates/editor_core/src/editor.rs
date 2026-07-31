@@ -488,6 +488,14 @@ impl Editor {
         }
     }
 
+    /// Create a clean editor session for an existing document.
+    pub fn from_document(document: Document) -> Self {
+        Self {
+            document,
+            ..Self::new()
+        }
+    }
+
     /// Create an editor with a demo document.
     pub fn with_demo_content() -> Self {
         let mut editor = Self::new();
@@ -939,6 +947,21 @@ impl Editor {
             DragState::VectorEditing(_) => InteractionKind::VectorEditing,
             DragState::Panning { .. } => InteractionKind::Panning,
         }
+    }
+
+    /// Settle transient editing state before saving, loading, or exporting.
+    pub fn settle_for_document_io(&mut self) {
+        self.settle_interaction();
+    }
+
+    /// Mark the current document revision as persisted.
+    pub fn mark_saved(&mut self) {
+        self.history.mark_saved();
+    }
+
+    /// Whether the current document differs from its saved revision.
+    pub fn is_dirty(&self) -> bool {
+        self.history.is_dirty()
     }
 
     fn commit_pen_session(&mut self, session: PenSession, closed: bool) {

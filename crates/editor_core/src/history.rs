@@ -1,17 +1,41 @@
 use crate::command::Command;
 use crate::Document;
 
+#[derive(Debug)]
+struct HistoryEntry {
+    command: Command,
+    before_revision: u64,
+    after_revision: u64,
+}
+
 /// Undo/redo history stack.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct History {
     /// Stack of commands that can be undone
-    undo_stack: Vec<Command>,
+    undo_stack: Vec<HistoryEntry>,
 
     /// Stack of commands that can be redone
-    redo_stack: Vec<Command>,
+    redo_stack: Vec<HistoryEntry>,
 
     /// Maximum number of commands to keep in history
     max_size: Option<usize>,
+
+    current_revision: u64,
+    saved_revision: u64,
+    next_revision: u64,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            max_size: None,
+            current_revision: 0,
+            saved_revision: 0,
+            next_revision: 1,
+        }
+    }
 }
 
 impl History {
@@ -36,7 +60,14 @@ impl History {
             return;
         }
 
-        self.undo_stack.push(cmd);
+        let after_revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.undo_stack.push(HistoryEntry {
+            command: cmd,
+            before_revision: self.current_revision,
+            after_revision,
+        });
+        self.current_revision = after_revision;
         self.redo_stack.clear();
 
         // Enforce max size
@@ -50,9 +81,10 @@ impl History {
     /// Undo the last command.
     /// Returns true if a command was undone.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
-        if let Some(cmd) = self.undo_stack.pop() {
-            cmd.unapply(doc);
-            self.redo_stack.push(cmd);
+        if let Some(entry) = self.undo_stack.pop() {
+            entry.command.unapply(doc);
+            self.current_revision = entry.before_revision;
+            self.redo_stack.push(entry);
             true
         } else {
             false
@@ -62,9 +94,10 @@ impl History {
     /// Redo the last undone command.
     /// Returns true if a command was redone.
     pub fn redo(&mut self, doc: &mut Document) -> bool {
-        if let Some(cmd) = self.redo_stack.pop() {
-            cmd.apply(doc);
-            self.undo_stack.push(cmd);
+        if let Some(entry) = self.redo_stack.pop() {
+            entry.command.apply(doc);
+            self.current_revision = entry.after_revision;
+            self.undo_stack.push(entry);
             true
         } else {
             false
@@ -83,18 +116,32 @@ impl History {
 
     /// Get the description of the next undo command.
     pub fn undo_description(&self) -> Option<&str> {
-        self.undo_stack.last().map(|cmd| cmd.description.as_str())
+        self.undo_stack
+            .last()
+            .map(|entry| entry.command.description.as_str())
     }
 
     /// Get the description of the next redo command.
     pub fn redo_description(&self) -> Option<&str> {
-        self.redo_stack.last().map(|cmd| cmd.description.as_str())
+        self.redo_stack
+            .last()
+            .map(|entry| entry.command.description.as_str())
     }
 
     /// Clear all history.
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+    }
+
+    /// Mark the current document revision as persisted.
+    pub fn mark_saved(&mut self) {
+        self.saved_revision = self.current_revision;
+    }
+
+    /// Whether the current document revision differs from the saved revision.
+    pub fn is_dirty(&self) -> bool {
+        self.current_revision != self.saved_revision
     }
 
     /// Get the number of commands in the undo stack.
@@ -219,5 +266,47 @@ mod tests {
         history.push(cmd);
 
         assert_eq!(history.undo_description(), Some("Test Command"));
+    }
+
+    #[test]
+    fn dirty_state_tracks_save_undo_redo_and_branches() {
+        let mut doc = Document::new();
+        let mut history = History::new();
+        let id = doc
+            .add_child(
+                doc.root,
+                Node::shape("Rect", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+
+        assert!(!history.is_dirty());
+
+        let first = Command::new("Move").with_patch(Patch::SetTransform {
+            id,
+            before: Affine2::IDENTITY,
+            after: Affine2::from_translation(Vec2::new(10.0, 0.0)),
+        });
+        first.apply(&mut doc);
+        history.push(first);
+        assert!(history.is_dirty());
+
+        history.mark_saved();
+        assert!(!history.is_dirty());
+
+        assert!(history.undo(&mut doc));
+        assert!(history.is_dirty());
+        assert!(history.redo(&mut doc));
+        assert!(!history.is_dirty());
+
+        assert!(history.undo(&mut doc));
+        let branch = Command::new("Move elsewhere").with_patch(Patch::SetTransform {
+            id,
+            before: Affine2::IDENTITY,
+            after: Affine2::from_translation(Vec2::new(20.0, 0.0)),
+        });
+        branch.apply(&mut doc);
+        history.push(branch);
+        assert!(history.is_dirty());
+        assert!(!history.can_redo());
     }
 }
