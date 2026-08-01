@@ -415,9 +415,11 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     ));
 
     let result = (|| {
-        let mut file = create_temporary_file(&temporary_path)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
+        {
+            let mut file = create_temporary_file(&temporary_path)?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+        }
         replace_file(&temporary_path, path)
     })();
 

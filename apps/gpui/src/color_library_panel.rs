@@ -1495,7 +1495,7 @@ impl ColorLibraryPanel {
                     value_input,
                     self.keyboard_focus == PanelFocus::Value(color),
                 )
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .on_click(cx.listener(move |panel, _, window, cx| {
                     panel.keyboard_focus = PanelFocus::Value(color);
                     panel.activate_keyboard_focus(window, cx);

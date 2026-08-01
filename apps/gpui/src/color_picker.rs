@@ -999,7 +999,7 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .flex_1()
-                                .font_family("SFMono-Regular")
+                                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                                 .text_size(px(10.0))
                                 .text_color(rgb(if snapshot.invalid { 0xfca58f } else { TEXT }))
                                 .child(snapshot.hex_value),
@@ -1203,7 +1203,7 @@ fn channel_slider(
         .child(
             div()
                 .w(px(50.0))
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_size(px(9.0))
                 .text_color(rgb(TEXT))
                 .text_align(gpui::TextAlign::Right)

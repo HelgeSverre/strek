@@ -22,6 +22,7 @@ mod status_bar;
 mod svg_import;
 mod text_input;
 mod toolbar;
+mod typography;
 mod workspace_preferences;
 
 use std::env;
@@ -5187,7 +5188,7 @@ fn render_guide_position_input(input: GuidePositionInput) -> impl IntoElement {
                 .items_center()
                 .rounded(px(4.0))
                 .bg(rgb(0x17181a))
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_size(px(10.0))
                 .text_color(rgb(if input.invalid { 0xfca58f } else { 0xf1f3f4 }))
                 .child(input.value),
@@ -6430,9 +6431,14 @@ mod layout_tests {
 
     #[test]
     fn automation_file_paths_are_unambiguous() {
-        assert_eq!(
-            automation_absolute_path("/tmp/logo.svg").unwrap(),
+        let absolute = if cfg!(target_os = "windows") {
+            PathBuf::from(r"C:\tmp\logo.svg")
+        } else {
             PathBuf::from("/tmp/logo.svg")
+        };
+        assert_eq!(
+            automation_absolute_path(&absolute.to_string_lossy()).unwrap(),
+            absolute
         );
         assert!(automation_absolute_path("logo.svg").is_err());
     }

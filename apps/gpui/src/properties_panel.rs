@@ -1175,7 +1175,7 @@ fn color_value_editor<A: Action + Clone>(
         .child(
             div()
                 .flex_1()
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_size(px(10.0))
                 .text_color(rgb(if active.is_some_and(|input| input.invalid) {
                     0xfca58f

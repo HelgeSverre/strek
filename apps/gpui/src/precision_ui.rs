@@ -530,7 +530,7 @@ fn stepper_row_f32(spec: F32StepperSpec, callback: ValueCallback<f32>) -> impl I
                 .min_w(px(54.0))
                 .text_align(gpui::TextAlign::Center)
                 .text_size(px(10.0))
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_color(rgb(TEXT))
                 .child(format!("{} {suffix}", format_number(value))),
         )
@@ -585,7 +585,7 @@ fn stepper_row_u8(
                 .min_w(px(54.0))
                 .text_align(gpui::TextAlign::Center)
                 .text_size(px(10.0))
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_color(rgb(TEXT))
                 .child(value.to_string()),
         )

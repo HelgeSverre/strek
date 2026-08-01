@@ -509,7 +509,7 @@ fn resolve_gpui_font_family(family: &str) -> String {
     } else if trimmed.eq_ignore_ascii_case("serif") {
         platform_serif_family()
     } else if trimmed.eq_ignore_ascii_case("monospace") {
-        platform_monospace_family()
+        crate::typography::MONOSPACE_FONT_FAMILY
     } else {
         trimmed
     };
@@ -521,16 +521,6 @@ fn platform_serif_family() -> &'static str {
         "Times New Roman"
     } else {
         "DejaVu Serif"
-    }
-}
-
-fn platform_monospace_family() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "DejaVu Sans Mono"
     }
 }
 
@@ -1212,7 +1202,7 @@ mod tests {
         assert_eq!(resolve_gpui_font_family("serif"), platform_serif_family());
         assert_eq!(
             resolve_gpui_font_family("monospace"),
-            platform_monospace_family()
+            crate::typography::MONOSPACE_FONT_FAMILY
         );
         assert_eq!(resolve_gpui_font_family("Custom Family"), "Custom Family");
     }

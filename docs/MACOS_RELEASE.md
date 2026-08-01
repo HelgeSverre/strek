@@ -298,9 +298,9 @@ The existing `Release` workflow builds the architecture-specific archives and
 calls the reusable macOS packaging workflow. The release is created only after
 the signed and notarized installer job succeeds.
 
-The repository is private, so recipients still need access to its GitHub
-Releases. Publishing the `.pkg` on a public website is a separate distribution
-decision and does not require changing the signing process.
+Recipients can download the signed installer from the GitHub Release. Publishing
+the `.pkg` on another website is a separate distribution decision and does not
+require changing the signing process.
 
 ## Credential rotation
 

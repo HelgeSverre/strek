@@ -76,10 +76,9 @@ just run
 
 ## Install
 
-Strek is currently a private preview. Collaborators can download the Apple
-Silicon/Intel universal macOS installer from the repository's private GitHub
-Releases. The installer is Developer ID-signed and notarized by Apple. There is
-no public download page or Homebrew formula yet. Everyone else should run from
+Strek is under active development. Tagged releases include a universal macOS
+installer for Apple Silicon and Intel. The installer is Developer ID-signed and
+notarized by Apple. There is no Homebrew formula yet; you can also run from
 source or create a local package as described below.
 
 ## Automation
@@ -252,9 +251,8 @@ just format  # format the workspace
 ```
 
 Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
-Apple Silicon and Intel archives to a private GitHub Release. The workflow does
-not publish package-manager or shell installers while the repository remains
-private.
+Apple Silicon and Intel archives to a GitHub Release. The workflow does not
+currently publish package-manager or shell installers.
 
 ## Package for macOS
 

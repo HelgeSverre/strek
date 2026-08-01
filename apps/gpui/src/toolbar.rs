@@ -743,7 +743,7 @@ fn context_color_input<A: Action + Clone>(
         )
         .child(
             div()
-                .font_family("SFMono-Regular")
+                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
                 .text_size(px(9.0))
                 .text_color(rgb(if invalid { 0xfca58f } else { TEXT }))
                 .child(value),
