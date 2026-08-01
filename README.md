@@ -92,6 +92,54 @@ The packaged app includes an AppleScript helper:
 osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" state
 ```
 
+### Connect the MCP server
+
+Strek includes a local stdio MCP server. The desktop application must already
+be running; the MCP process forwards tool calls to that application. First
+resolve the absolute path to the installed binary:
+
+```sh
+STREK_BIN="$(command -v strek)"
+```
+
+When running from source instead, use an absolute development-build path such
+as `STREK_BIN="$PWD/target/debug/strek"`.
+
+Claude Code (user scope):
+
+```sh
+claude mcp add --scope user strek -- "$STREK_BIN" mcp
+```
+
+OpenCode:
+
+```sh
+opencode mcp add strek -- "$STREK_BIN" mcp
+```
+
+Codex:
+
+```sh
+codex mcp add strek -- "$STREK_BIN" mcp
+```
+
+GitHub Copilot CLI:
+
+```sh
+copilot mcp add strek -- "$STREK_BIN" mcp
+```
+
+Amp:
+
+```sh
+amp mcp add strek -- "$STREK_BIN" mcp
+```
+
+Restart or reconnect the client after adding the server if it does not discover
+Strek immediately. The MCP server exposes state inspection, editor actions,
+canvas pointer input with modifiers, text insertion, UI visibility controls,
+and screenshots.
+
 See [AUTOMATION.md](AUTOMATION.md) for the complete CLI, AppleScript, and MCP
 surface, client configuration, state schema, coordinates, permissions, and
 troubleshooting.
