@@ -777,6 +777,7 @@ impl Strek {
         };
 
         self.refresh_color_library_panel(cx);
+        window.refresh();
         let state = self.automation_state(window);
         match result {
             Ok(message) => automation::AutomationResponse::success(state, message),
@@ -828,6 +829,7 @@ impl Strek {
             Ok(())
         };
 
+        window.refresh();
         let state = self.automation_state(window);
         let message = format!("set selection {target:?} color picker visibility to {visible}");
         match result {
@@ -1220,6 +1222,7 @@ mod tests {
         cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 let opening_revision = editor.editor.current_revision();
+                let initial_guide_count = editor.editor.document().guides.len();
                 editor
                     .editor
                     .add_guide(editor_core::GuideAxis::Vertical, 12.0)
@@ -1238,7 +1241,10 @@ mod tests {
                 );
 
                 assert!(!response.ok);
-                assert_eq!(editor.editor.document().guides.len(), 1);
+                assert_eq!(
+                    editor.editor.document().guides.len(),
+                    initial_guide_count + 1
+                );
                 assert_eq!(editor.file_operation, FileOperation::Idle);
             });
         });
@@ -1271,6 +1277,13 @@ mod tests {
     ) {
         let (editor, cx) = test_editor(cx);
         cx.update(|window, cx| {
+            let initial_descendant_count = editor.update(cx, |editor, _| {
+                editor
+                    .editor
+                    .document()
+                    .descendants(editor.editor.document().root)
+                    .count()
+            });
             let dispatch = editor.update(cx, |editor, cx| {
                 assert!(editor.editor.execute_action(EditorAction::ToolPen));
                 for position in [glam::Vec2::ZERO, glam::Vec2::new(20.0, 0.0)] {
@@ -1314,7 +1327,7 @@ mod tests {
                         .document()
                         .descendants(editor.editor.document().root)
                         .count(),
-                    1
+                    initial_descendant_count + 1
                 );
             });
         });

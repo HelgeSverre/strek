@@ -363,7 +363,19 @@ fn recent_files_path() -> Option<PathBuf> {
 
 /// Per-user directory for editor preferences and recent state.
 pub(crate) fn app_config_directory() -> Option<PathBuf> {
-    config_root().map(|root| root.join("strek"))
+    resolve_app_config_directory(
+        env::var_os("STREK_CONFIG_DIR").map(PathBuf::from),
+        config_root(),
+    )
+}
+
+fn resolve_app_config_directory(
+    override_directory: Option<PathBuf>,
+    config_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    override_directory
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .or_else(|| config_root.map(|root| root.join("strek")))
 }
 
 #[cfg(target_os = "macos")]
@@ -500,6 +512,23 @@ mod tests {
     fn temporary_test_directory(name: &str) -> PathBuf {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!("strek-{name}-{}-{sequence}", std::process::id()))
+    }
+
+    #[test]
+    fn explicit_config_directory_is_isolated_and_empty_values_use_the_platform_root() {
+        let platform_root = PathBuf::from("/platform/config");
+
+        assert_eq!(
+            resolve_app_config_directory(
+                Some(PathBuf::from("/isolated/strek")),
+                Some(platform_root.clone()),
+            ),
+            Some(PathBuf::from("/isolated/strek"))
+        );
+        assert_eq!(
+            resolve_app_config_directory(Some(PathBuf::new()), Some(platform_root)),
+            Some(PathBuf::from("/platform/config/strek"))
+        );
     }
 
     #[test]

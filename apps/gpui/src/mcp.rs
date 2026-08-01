@@ -354,7 +354,7 @@ impl StrekMcp {
     }
 
     #[tool(
-        description = "Activate Strek and capture its complete window as a PNG image without moving the system cursor"
+        description = "Capture Strek's complete window as a PNG image without activating it or moving the system cursor"
     )]
     async fn screenshot(&self) -> CallToolResult {
         match tokio::task::spawn_blocking(automation::capture_screenshot).await {

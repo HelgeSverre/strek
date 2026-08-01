@@ -1,6 +1,7 @@
 //! Main editor state combining document, selection, history, and tools.
 
 mod color_library_commands;
+mod demo;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -691,35 +692,11 @@ impl Editor {
     /// Create an editor with a demo document.
     pub fn with_demo_content() -> Self {
         let mut editor = Self::new();
-
-        // Add some demo shapes
-        let rect1 = Node::shape("Blue Rectangle", PathData::rect(0.0, 0.0, 150.0, 100.0))
-            .with_style(Style::fill(Paint::rgb(0.2, 0.4, 0.8)))
-            .with_transform(glam::Affine2::from_translation(Vec2::new(50.0, 50.0)));
-
-        let rect2 = Node::shape("Red Rectangle", PathData::rect(0.0, 0.0, 100.0, 150.0))
-            .with_style(Style::fill(Paint::rgb(0.8, 0.2, 0.2)))
-            .with_transform(glam::Affine2::from_translation(Vec2::new(250.0, 100.0)));
-
-        let rect3 = Node::shape("Green Rectangle", PathData::rect(0.0, 0.0, 120.0, 80.0))
-            .with_style(Style::fill(Paint::rgb(0.2, 0.7, 0.3)))
-            .with_transform(glam::Affine2::from_translation(Vec2::new(150.0, 300.0)));
-
-        // Add demo text
-        let text1 = Node::text("Hello Text", "Hello, World!")
-            .with_style(Style::fill(Paint::rgb(0.1, 0.1, 0.1)))
-            .with_transform(glam::Affine2::from_translation(Vec2::new(400.0, 80.0)));
-
-        let text2 = Node::text("Title", "Strek")
-            .with_style(Style::fill(Paint::rgb(0.3, 0.3, 0.8)))
-            .with_transform(glam::Affine2::from_translation(Vec2::new(450.0, 250.0)));
-
-        editor.document.add_child(editor.document.root, rect1);
-        editor.document.add_child(editor.document.root, rect2);
-        editor.document.add_child(editor.document.root, rect3);
-        editor.document.add_child(editor.document.root, text1);
-        editor.document.add_child(editor.document.root, text2);
-
+        if demo::populate(&mut editor).is_none() {
+            return Self::new();
+        }
+        editor.history.clear();
+        editor.history.mark_saved();
         editor.needs_redraw = true;
         editor
     }
@@ -8033,9 +8010,13 @@ mod tests {
     #[test]
     fn test_demo_content() {
         let editor = Editor::with_demo_content();
-        // Should have 3 shapes + 2 text nodes = 5 items
         let count = editor.document.descendants(editor.document.root).count();
-        assert_eq!(count, 5);
+        assert_eq!(count, 43);
+        assert_eq!(editor.document.guides.len(), 4);
+        assert_eq!(editor.document.color_library.groups.len(), 2);
+        assert_eq!(editor.document.color_library.colors.len(), 8);
+        assert!(!editor.is_dirty());
+        assert!(!editor.can_execute(EditorAction::Undo));
     }
 
     #[test]
@@ -8524,7 +8505,7 @@ mod tests {
 
         // Click on empty space (pointer down starts marquee mode)
         let down_event = InputEvent::PointerDown {
-            position: Vec2::new(500.0, 500.0),
+            position: Vec2::new(770.0, 700.0),
             button: MouseButton::Left,
             modifiers: Modifiers::default(),
         };
@@ -8535,7 +8516,7 @@ mod tests {
 
         // Pointer up without drag clears selection
         let up_event = InputEvent::PointerUp {
-            position: Vec2::new(500.0, 500.0),
+            position: Vec2::new(770.0, 700.0),
             button: MouseButton::Left,
             modifiers: Modifiers::default(),
         };

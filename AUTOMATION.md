@@ -19,6 +19,17 @@ Start the Strek desktop application before issuing automation commands. The CLI
 and MCP server are clients of that running process; `strek mcp` does not launch
 the GUI.
 
+For unattended automation, launch the desktop window without activating it:
+
+```sh
+strek --background
+```
+
+Semantic requests and window screenshots explicitly refresh inactive windows,
+so scripted edits remain visible without bringing Strek to the foreground. On
+macOS, background mode parks a two-pixel edge of the window on the rightmost
+display so the system continues rendering its otherwise off-screen surface.
+
 By default, Strek creates a per-user local endpoint. On Linux and macOS it is a
 socket below `XDG_RUNTIME_DIR`, when it is an absolute path, or the system
 temporary directory:
@@ -45,6 +56,11 @@ $env:STREK_AUTOMATION_SOCKET = "127.0.0.1:49153"
 cargo run -p strek
 target\debug\strek.exe automate state
 ```
+
+Set `STREK_CONFIG_DIR` to an isolated directory when an unattended run should
+not read or update the normal workspace preferences, recent files, or custom
+keybindings. The README showcase recorder uses this to produce deterministic
+output without changing the user's configuration.
 
 ## Recommended workflow
 
@@ -76,18 +92,19 @@ Running `strek automate` without a subcommand is equivalent to
 | `strek automate activate` | Bring the Strek window to the front. |
 | `strek automate action <command-id>` | Run an enabled editor command from `state.actions`. |
 | `strek automate select <replace\|add\|remove\|toggle> [layer-id ...]` | Change selection using IDs from `document`. |
-| `strek automate color <fill\|stroke> <hex\|none>` | Set or remove selection paint directly. |
+| `strek automate color <fill\|stroke\|frame-background> <hex\|none>` | Set or remove selection paint directly. |
 | `strek automate property <target> <value>` | Set a semantic numeric property directly. |
 | `strek automate layer <layer-id> [--name value] [--visible bool] [--locked bool]` | Update layer metadata directly. |
 | `strek automate pointer <down\|move\|up> <x> <y> [left\|middle\|right]` | Send a canvas-local pointer event; the button defaults to `left`. |
 | `strek automate text <text>` | Insert text into the active text-editing session. |
 | `strek automate ui <target> <show\|hide>` | Show or hide a supported panel or overlay. |
-| `strek automate screenshot <output.png>` | Activate Strek and save a complete window screenshot. |
+| `strek automate screenshot <output.png>` | Save a complete window screenshot without activating Strek. |
 
 The CLI accepts these UI targets: `main-menu`, `command-palette`,
-`layers-panel`, `design-panel`, `fill-color-picker`, and
-`stroke-color-picker`. The color-picker targets operate on the current
-selection. Underscores are accepted in place of hyphens.
+`layers-panel`, `design-panel`, `fill-color-picker`, `stroke-color-picker`,
+`frame-background-color-picker`, `color-library`, and `precision-controls`.
+The color-picker targets operate on the current selection. Underscores are
+accepted in place of hyphens.
 
 All commands except `screenshot` print an `AutomationResponse` as formatted
 JSON and exit nonzero when the request fails:
@@ -316,7 +333,7 @@ from the stdio server to that application's local automation endpoint.
 | `insert_text` | `text` | Inserts text into the active text-editing session and returns current state. |
 | `set_ui` | `target`, `visible` | Shows or hides a supported UI target and returns current state. |
 | `activate` | None | Brings Strek to the front. |
-| `screenshot` | None | Activates Strek and returns the complete window as `image/png`. |
+| `screenshot` | None | Returns the complete window as `image/png` without activating Strek. |
 
 MCP pointer phases are `down`, `move`, and `up`; buttons are `left`, `middle`,
 and `right`. All modifier flags default to `false`. MCP UI targets use
@@ -349,8 +366,8 @@ Transport failures and screenshot failures are MCP tool errors.
 - Canvas input is rejected while a menu, command palette, context menu, inline
   numeric editor, or property scrub is active. Close it before sending pointer
   events.
-- Screenshots activate the Strek window first. On macOS, the first capture may
-  request Screen Recording permission; denial is returned as an error.
+- Screenshots do not activate Strek. On macOS, the first capture may request
+  Screen Recording permission; denial is returned as an error.
 - Window screenshots are currently supported only on macOS.
 - The default endpoint permits one running Strek automation server per user. Use
   distinct `STREK_AUTOMATION_SOCKET` values for concurrent development

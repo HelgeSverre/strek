@@ -21,6 +21,14 @@ workflows rather than general-purpose illustration.
 The project is under active development. Core editing workflows are usable, but
 the file format and UI should not yet be treated as stable.
 
+<p align="center">
+  <img src="docs/assets/strek-showcase.gif" width="960" alt="Strek editing a layered vector brand board through background automation">
+</p>
+
+<p align="center">
+  <em>Recorded entirely through Strek's cursor-free automation API.</em>
+</p>
+
 ## What works
 
 - Selection, marquee selection, grouping, ordering, alignment, and distribution
@@ -93,6 +101,10 @@ strek automate pointer down 120 100
 strek automate pointer move 360 260
 strek automate pointer up 360 260
 ```
+
+Run `scripts/record-readme-demo.sh` on macOS to reproduce the showcase GIF
+without bringing Strek to the foreground. The script requires `ffmpeg`, `jq`,
+and ImageMagick's `magick` command in addition to the normal build prerequisites.
 
 The packaged app includes an AppleScript helper:
 

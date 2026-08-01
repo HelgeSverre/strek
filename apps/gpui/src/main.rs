@@ -204,6 +204,7 @@ enum PendingDocumentAction {
 enum DocumentOrigin {
     #[default]
     Untitled,
+    Starter,
     Native(PathBuf),
     ImportedSvg(PathBuf),
 }
@@ -211,7 +212,7 @@ enum DocumentOrigin {
 impl DocumentOrigin {
     fn source_path(&self) -> Option<&Path> {
         match self {
-            Self::Untitled => None,
+            Self::Untitled | Self::Starter => None,
             Self::Native(path) | Self::ImportedSvg(path) => Some(path),
         }
     }
@@ -219,14 +220,14 @@ impl DocumentOrigin {
     fn native_path(&self) -> Option<&Path> {
         match self {
             Self::Native(path) => Some(path),
-            Self::Untitled | Self::ImportedSvg(_) => None,
+            Self::Untitled | Self::Starter | Self::ImportedSvg(_) => None,
         }
     }
 
     fn import_source_path(&self) -> Option<&Path> {
         match self {
             Self::ImportedSvg(path) => Some(path),
-            Self::Untitled | Self::Native(_) => None,
+            Self::Untitled | Self::Starter | Self::Native(_) => None,
         }
     }
 
@@ -425,13 +426,14 @@ struct Strek {
     current_cursor: gpui::CursorStyle,
     canvas_input_bounds: Option<Bounds<gpui::Pixels>>,
     text_image_cache: canvas::TextImageCache,
+    fit_artwork_on_first_layout: bool,
     did_focus: bool,
 }
 
 impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
         let workspace_preferences = workspace_preferences::WorkspacePreferences::load();
-        let mut editor = Editor::new();
+        let mut editor = Editor::with_demo_content();
         editor
             .set_snap_settings(editor_core::SnapSettings {
                 enabled: workspace_preferences.snapping_enabled,
@@ -443,7 +445,7 @@ impl Strek {
             .expect("sanitized workspace snapping preferences must be valid");
         Self {
             editor,
-            document_origin: DocumentOrigin::Untitled,
+            document_origin: DocumentOrigin::Starter,
             recent_files: document_io::RecentFiles::load(),
             recent_files_persist_task: None,
             state_write_flush_in_progress: false,
@@ -476,11 +478,15 @@ impl Strek {
             current_cursor: gpui::CursorStyle::Arrow,
             canvas_input_bounds: None,
             text_image_cache: canvas::TextImageCache::default(),
+            fit_artwork_on_first_layout: true,
             did_focus: false,
         }
     }
 
     fn document_name(&self) -> String {
+        if matches!(self.document_origin, DocumentOrigin::Starter) {
+            return "Strek Showcase".to_owned();
+        }
         self.source_document_path()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
@@ -683,6 +689,7 @@ impl Strek {
         self.color_library_panel = None;
         self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
+        self.fit_artwork_on_first_layout = false;
         self.current_cursor = gpui::CursorStyle::Arrow;
         self.dismiss_menus();
     }
@@ -4531,6 +4538,10 @@ impl Render for Strek {
             (window_size.height.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT).max(1.0),
         );
         self.editor.set_viewport_size(canvas_viewport);
+        if self.fit_artwork_on_first_layout {
+            self.editor.zoom_to_fit();
+            self.fit_artwork_on_first_layout = false;
+        }
 
         let precision_visibility = precision_ui::PrecisionVisibility {
             rulers: self.workspace_preferences.show_rulers,
@@ -5988,7 +5999,7 @@ fn register_keybindings(cx: &mut App, keymap: &commands::Keymap) {
 
 fn main() {
     let mut args = env::args().skip(1);
-    match args.next().as_deref() {
+    let launch_in_background = match args.next().as_deref() {
         Some("automate") => {
             if let Err(error) = automation::run_cli(args) {
                 eprintln!("strek automate: {error}");
@@ -6003,8 +6014,9 @@ fn main() {
             }
             return;
         }
-        _ => {}
-    }
+        Some("--background") => true,
+        _ => false,
+    };
 
     env_logger::init();
     let automation_requests = match automation::start_server() {
@@ -6072,7 +6084,12 @@ fn main() {
                 },
             ]);
 
-            let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+            let window_size = size(px(1280.0), px(800.0));
+            let bounds = if launch_in_background {
+                background_window_bounds(window_size, cx)
+            } else {
+                Bounds::centered(None, window_size, cx)
+            };
 
             let mut automation_requests = automation_requests;
             cx.open_window(
@@ -6103,13 +6120,68 @@ fn main() {
                 }
             })
             .detach();
-            cx.activate(true);
+            if !launch_in_background {
+                cx.activate(true);
+            }
         });
+}
+
+#[cfg(target_os = "macos")]
+fn background_window_bounds(
+    window_size: gpui::Size<gpui::Pixels>,
+    cx: &App,
+) -> Bounds<gpui::Pixels> {
+    let Some(display) = cx
+        .displays()
+        .into_iter()
+        .max_by(|left, right| left.bounds().right().0.total_cmp(&right.bounds().right().0))
+    else {
+        return Bounds::centered(None, window_size, cx);
+    };
+    parked_background_bounds(window_size, display.bounds())
+}
+
+#[cfg(target_os = "macos")]
+fn parked_background_bounds(
+    window_size: gpui::Size<gpui::Pixels>,
+    display: Bounds<gpui::Pixels>,
+) -> Bounds<gpui::Pixels> {
+    const VISIBLE_EDGE: f32 = 2.0;
+
+    Bounds {
+        origin: gpui::point(
+            display.origin.x + display.size.width - px(VISIBLE_EDGE),
+            display.origin.y,
+        ),
+        size: window_size,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn background_window_bounds(
+    window_size: gpui::Size<gpui::Pixels>,
+    cx: &App,
+) -> Bounds<gpui::Pixels> {
+    Bounds::centered(None, window_size, cx)
 }
 
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_window_leaves_only_a_two_pixel_edge_on_screen() {
+        let display = Bounds {
+            origin: gpui::point(px(-1920.0), px(25.0)),
+            size: size(px(1920.0), px(1080.0)),
+        };
+        let bounds = parked_background_bounds(size(px(1280.0), px(800.0)), display);
+
+        assert_eq!(bounds.origin.x, display.right() - px(2.0));
+        assert_eq!(bounds.origin.y, display.origin.y);
+        assert_eq!(bounds.size, size(px(1280.0), px(800.0)));
+    }
 
     #[test]
     fn imported_svg_origin_requires_a_new_native_save_destination() {
@@ -6119,6 +6191,16 @@ mod layout_tests {
         assert_eq!(origin.source_path(), Some(path.as_path()));
         assert_eq!(origin.native_path(), None);
         assert!(origin.requires_native_save());
+    }
+
+    #[test]
+    fn starter_origin_is_unsaved_but_discardable_until_edited() {
+        let origin = DocumentOrigin::Starter;
+
+        assert_eq!(origin.source_path(), None);
+        assert_eq!(origin.native_path(), None);
+        assert_eq!(origin.import_source_path(), None);
+        assert!(!origin.requires_native_save());
     }
 
     #[test]
