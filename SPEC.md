@@ -1468,6 +1468,9 @@ intentional product backlog.
 - [x] Live preview during value scrubbing with one undo entry on commit
 - [x] Numeric values with horizontal drag-to-adjust and Escape cancellation
 - [x] Shift-aware fine/coarse steps shared by numeric steppers and scrubs
+- [x] Direct typed entry for position, opacity, stroke width, text size, spacing,
+  and uniform padding without removing scrub or stepper interaction
+- [x] Compatible repeated keyboard nudges coalesced into one undoable movement
 
 ### Milestone 12: Drawing Tools
 - [x] Rectangle tool with constrained and centered drawing
@@ -1499,6 +1502,14 @@ intentional product backlog.
 - [x] Dirty-state tracking and unsaved-change prompts
 - [ ] Automatic SVG font embedding (outlined text is the portable alternative)
 
+### Milestone 15: Automation & MCP
+- [x] Session-stable opaque layer identifiers and document-tree inspection
+- [x] Selection by layer identifier and semantic layer-property updates
+- [x] Direct fill, stroke, and numeric-property operations
+- [x] Explicit-path new, open, save, and export operations
+- [x] Inline SVG, PNG, JPEG, and WebP artifact responses
+- [x] Matching command-socket, CLI, AppleScript, and MCP access
+
 ### Product backlog
 
 The following candidates are intentionally not marked complete. They are
@@ -1507,13 +1518,12 @@ interoperability.
 
 Important next candidates:
 
-- Direct numeric entry for position, dimensions, rotation, scale, skew, and
-  other inspector values; scrubbing and steppers should remain available
+- Editable dimensions, rotation, scale, and skew controls, including direct
+  numeric entry; typed entry is complete for the inspector's existing semantic
+  numeric controls
 - Exporting a selected frame or selection, with explicit dimensions and reusable
   export presets
 - Autosave and crash recovery for dirty documents
-- Coalescing repeated keyboard nudges into a single undoable movement when
-  appropriate
 - Boolean path operations and a more complete path/stroke editing workflow
 
 Nice-to-have candidates:
@@ -1523,8 +1533,6 @@ Nice-to-have candidates:
 - Actual cross-axis stretch and size constraints in auto layout
 - Grid, ruler, guide, and persistent snapping controls beyond the current
   contextual snap guides
-- Automation commands for opening, saving, exporting, and addressing layers by
-  stable identifiers instead of driving those workflows through UI gestures
 
 ---
 

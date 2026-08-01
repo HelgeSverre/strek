@@ -36,8 +36,9 @@ the file format and UI should not yet be treated as stable.
 - Text editing with selection, IME composition, family, weight, italic, size,
   and alignment controls
 - Live horizontal scrubbing and fine/coarse steppers for position, opacity,
-  stroke width, text size, and auto-layout spacing/padding; each completed scrub
-  is committed as one undo step and `Escape` cancels it
+  stroke width, text size, and auto-layout spacing/padding, plus double-click
+  typed entry; each completed scrub is committed as one undo step and `Escape`
+  cancels it
 - Frame background toggling and per-tool fill/stroke defaults for new shapes and
   paths
 - Reusable fill/stroke color picker with a hue/saturation wheel, HEX and alpha
@@ -49,6 +50,9 @@ the file format and UI should not yet be treated as stable.
 - SVG, outlined-text SVG, PNG, JPEG, and WebP export
 - Copy visible artwork to the clipboard in the image formats supported by the
   current platform
+- Cursor-free CLI, AppleScript, and MCP automation with document-tree
+  inspection, session-stable layer IDs, semantic edits, explicit file paths,
+  and direct export artifacts
 
 ## Run the GPUI app
 
@@ -136,9 +140,10 @@ amp mcp add strek -- "$STREK_BIN" mcp
 ```
 
 Restart or reconnect the client after adding the server if it does not discover
-Strek immediately. The MCP server exposes state inspection, editor actions,
-canvas pointer input with modifiers, text insertion, UI visibility controls,
-and screenshots.
+Strek immediately. The MCP server exposes document-tree inspection and
+session-stable layer IDs, semantic selection/property/color edits, explicit file operations,
+direct SVG/PNG/JPEG/WebP artifacts, editor actions, canvas pointer input with
+modifiers, text insertion, UI visibility controls, and screenshots.
 
 See [AUTOMATION.md](AUTOMATION.md) for the complete CLI, AppleScript, and MCP
 surface, client configuration, state schema, coordinates, permissions, and

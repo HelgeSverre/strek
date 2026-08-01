@@ -48,11 +48,14 @@ target\debug\strek.exe automate state
 
 ## Recommended workflow
 
-1. Call `state` or `get_state`.
-2. Read `canvas` before choosing canvas-local coordinates.
-3. Select an enabled command ID from `actions` instead of hard-coding labels.
-4. Send an action or a `down`, `move`, `up` pointer sequence.
-5. Inspect the returned state or take a screenshot.
+1. Call `state`/`get_state`, then `document`/`get_document` when the task
+   concerns existing artwork.
+2. Use the returned opaque layer IDs with `select`, `layer`, `color`, and
+   `property` for semantic edits.
+3. Use enabled command IDs from `actions` for editor commands.
+4. Read `canvas` and use pointer input only for spatial interactions such as
+   drawing, dragging, or editing path anchors.
+5. Reinspect the document, export an artifact, or take a screenshot.
 
 Successful state-changing requests include the settled post-action state, so a
 separate state request is often unnecessary.
@@ -65,8 +68,17 @@ Running `strek automate` without a subcommand is equivalent to
 | Command | Purpose |
 | --- | --- |
 | `strek automate state` | Inspect the editor, window, canvas, selection, and available actions. |
+| `strek automate document` | Inspect the document tree, session-stable layer IDs, styles, world bounds, and transforms. |
+| `strek automate new [--discard]` | Create a document, optionally discarding unsaved changes. |
+| `strek automate open <absolute-path> [--discard]` | Open a native document or import a supported SVG. |
+| `strek automate save <absolute-path>` | Save the current document in Strek's native format. |
+| `strek automate export <svg\|svg-outlined\|png\|jpeg\|webp> [absolute-path]` | Export to a path, or omit it to return a bounded inline artifact. |
 | `strek automate activate` | Bring the Strek window to the front. |
 | `strek automate action <command-id>` | Run an enabled editor command from `state.actions`. |
+| `strek automate select <replace\|add\|remove\|toggle> [layer-id ...]` | Change selection using IDs from `document`. |
+| `strek automate color <fill\|stroke> <hex\|none>` | Set or remove selection paint directly. |
+| `strek automate property <target> <value>` | Set a semantic numeric property directly. |
+| `strek automate layer <layer-id> [--name value] [--visible bool] [--locked bool]` | Update layer metadata directly. |
 | `strek automate pointer <down\|move\|up> <x> <y> [left\|middle\|right]` | Send a canvas-local pointer event; the button defaults to `left`. |
 | `strek automate text <text>` | Insert text into the active text-editing session. |
 | `strek automate ui <target> <show\|hide>` | Show or hide a supported panel or overlay. |
@@ -85,6 +97,8 @@ JSON and exit nonzero when the request fails:
 | `ok` | Whether Strek accepted and completed the request. |
 | `message` | A human-readable result or error. |
 | `state` | Current automation state, when available. |
+| `document` | Document-tree inspection result for `document`. |
+| `artifact` | Inline export metadata and base64 payload when export has no path. |
 
 `screenshot` prints the output path on success.
 
@@ -118,10 +132,18 @@ Tool values are `select`, `frame`, `rectangle`, `ellipse`, `line`, `pen`,
 `rotating`, `marquee`, `creating_shape`, `creating_frame`, `pen`,
 `creating_text`, `text_editing`, `vector_editing`, and `panning`.
 
-Only editor commands appear in `actions`; file open/save/export operations are
-not currently exposed through these automation requests. Always use the IDs
-reported by the running version of Strek. Typical IDs include `tool.rectangle`
-and `edit.undo`.
+Only editor commands appear in `actions`; use the dedicated file and semantic
+commands for the other operations. Always use IDs reported by the running
+version of Strek. Layer IDs are opaque and stable only for the current loaded
+document session; inspect the tree again after `new` or `open`. Typical command
+IDs include `tool.rectangle` and `edit.undo`.
+
+Numeric property targets are `world-x`, `world-y`, `opacity`, `stroke-width`,
+`text-size`, `layout-spacing`, and `layout-padding`. Opacity uses the model range
+from `0` to `1`; the other values use document units. Explicit file paths must
+be absolute so the desktop app and its client cannot interpret different
+working directories. Inline artifacts are limited to 2 MiB of encoded artifact
+bytes; use a destination path for larger exports.
 
 ### Examples
 
@@ -147,6 +169,19 @@ Show a panel and capture the result:
 strek automate ui layers-panel show
 strek automate screenshot /tmp/strek.png
 ```
+
+Inspect and recolor an existing layer without pointer input:
+
+```sh
+strek automate document
+strek automate select replace node-0000000100000001
+strek automate color fill '#ff3366'
+strek automate property opacity 0.8
+strek automate export svg /tmp/strek-export.svg
+```
+
+Use the ID from the current `document` response; the example ID is only
+illustrative. Omitting the export path returns an `artifact` object in JSON.
 
 Pointer coordinates are pixels relative to the canvas, not the screen or
 window. Use `canvas.width` and `canvas.height` from state to choose an in-bounds
@@ -179,7 +214,17 @@ The helper also exposes named handlers for use inside AppleScript:
 | Handler | Equivalent command |
 | --- | --- |
 | `strekState()` | `strek automate state` |
+| `strekDocument()` | `strek automate document` |
+| `strekActivate()` | `strek automate activate` |
+| `strekNew(discardChanges)` | `strek automate new [--discard]` |
+| `strekOpen(path, discardChanges)` | `strek automate open <path> [--discard]` |
+| `strekSave(path)` | `strek automate save <path>` |
+| `strekExport(format, path)` | `strek automate export <format> [path]`; pass `missing value` for an inline artifact. |
 | `strekAction(commandId)` | `strek automate action <command-id>` |
+| `strekSelect(mode, layerIds)` | `strek automate select <mode> <layer-id ...>` |
+| `strekColor(target, color)` | `strek automate color <target> <hex\|none>`; pass `missing value` to remove paint. |
+| `strekProperty(target, value)` | `strek automate property <target> <value>` |
+| `strekLayer(id, name, visible, locked)` | `strek automate layer ...`; pass `missing value` for unchanged fields. |
 | `strekPointer(phase, x, y)` | `strek automate pointer <phase> <x> <y>` |
 | `strekText(textValue)` | `strek automate text <text>` |
 | `strekUi(targetName, isVisible)` | `strek automate ui <target> <show\|hide>` |
@@ -198,8 +243,8 @@ strekAutomation's strekPointer("up", 360, 260)
 set screenshotPath to strekAutomation's strekScreenshot("/tmp/strek.png")
 ```
 
-The state, action, pointer, text, and UI handlers return the CLI's JSON as
-text. The screenshot handler returns the written path.
+All handlers except screenshot return the CLI's JSON as text. The screenshot
+handler returns the written path.
 
 The helper resolves the `strek` executable in this order:
 
@@ -253,10 +298,20 @@ from the stdio server to that application's local automation endpoint.
 | Tool | Parameters | Result |
 | --- | --- | --- |
 | `get_state` | None | Structured automation response containing current state. |
+| `get_document` | None | Document tree with session-stable layer IDs, styles, world bounds, and transforms. |
+| `new_document` | optional `discard_changes` | Creates a new document. |
+| `open_document` | absolute `path`, optional `discard_changes` | Opens native JSON or imports supported SVG. |
+| `save_document` | absolute `path` | Saves native JSON. |
+| `export_artwork` | `format`, optional absolute `path` | Writes an export or directly returns SVG text/raster image content. |
 | `perform_action` | `id` | Runs an enabled editor command ID from `get_state`. |
+| `select_layers` | `ids`, optional `mode` | Replaces, adds, removes, or toggles selection by layer ID. |
+| `set_color` | `target`, optional `color` | Sets fill/stroke HEX color; omit color to remove paint. |
+| `set_numeric_property` | `target`, `value` | Sets an absolute semantic numeric property. |
+| `set_layer_properties` | `ids`, optional `name`, `visible`, `locked` | Updates layer metadata; name requires exactly one ID. |
 | `pointer` | `phase`, `x`, `y`, optional `button`, `shift`, `control`, `alt`, `command` | Sends a canvas-local pointer event and returns current state. |
 | `insert_text` | `text` | Inserts text into the active text-editing session and returns current state. |
 | `set_ui` | `target`, `visible` | Shows or hides a supported UI target and returns current state. |
+| `activate` | None | Brings Strek to the front. |
 | `screenshot` | None | Activates Strek and returns the complete window as `image/png`. |
 
 MCP pointer phases are `down`, `move`, and `up`; buttons are `left`, `middle`,
@@ -264,15 +319,15 @@ and `right`. All modifier flags default to `false`. MCP UI targets use
 `main_menu`, `command_palette`, `layers_panel`, `design_panel`,
 `fill_color_picker`, and `stroke_color_picker`.
 
-A typical tool sequence is:
+A typical semantic editing sequence is:
 
 ```text
 get_state {}
-perform_action {"id":"tool.rectangle"}
-pointer {"phase":"down","x":120,"y":100}
-pointer {"phase":"move","x":360,"y":260}
-pointer {"phase":"up","x":360,"y":260}
-screenshot {}
+get_document {}
+select_layers {"mode":"replace","ids":["node-0000000100000001"]}
+set_color {"target":"fill","color":"#ff3366"}
+set_numeric_property {"target":"opacity","value":0.8}
+export_artwork {"format":"svg"}
 ```
 
 Endpoint-backed tools return structured errors when Strek rejects a request.
