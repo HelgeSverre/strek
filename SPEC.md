@@ -1518,6 +1518,10 @@ interoperability.
 
 Important next candidates:
 
+- Canvas precision controls: grid, rulers, persistent guides, and explicit
+  snapping controls. The design is scoped below; implementation is pending.
+- A document-local Color Library with quick Saved Color access in every picker.
+  The design is scoped below; implementation is pending.
 - Editable dimensions, rotation, scale, and skew controls, including direct
   numeric entry; typed entry is complete for the inspector's existing semantic
   numeric controls
@@ -1528,11 +1532,349 @@ Important next candidates:
 
 Nice-to-have candidates:
 
-- Gradients, richer color management, and advanced stroke controls such as caps,
-  joins, and dash patterns
+- Gradients and advanced stroke controls such as caps, joins, and dash patterns
 - Actual cross-axis stretch and size constraints in auto layout
-- Grid, ruler, guide, and persistent snapping controls beyond the current
-  contextual snap guides
+
+### Scoped candidate: Canvas precision controls
+
+Status: design complete; implementation pending. The comparative rationale and
+source links are in
+[`docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md`](docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md).
+
+#### Vocabulary and scope
+
+- A **grid** is a repeating, non-exporting alignment lattice in document
+  coordinates.
+- **Rulers** are non-exporting viewport chrome showing document coordinates.
+- A **guide** is a persistent document-owned horizontal or vertical line.
+- A **smart guide** is temporary feedback produced by object or guide snapping.
+- **Snapping** is the screen-tolerance correction applied during an edit.
+
+Version one adds one square document grid, pixel rulers, document-wide guides,
+and coarse snap-target controls. It does not add layout columns/rows, per-frame
+precision aids, or specialist construction geometry.
+
+#### Ownership and persistence
+
+Document-owned state:
+
+```text
+GridSettings
+  spacing: finite positive document units
+  major_every: integer in 1..=10
+
+Guide
+  id: stable GuideId
+  axis: Horizontal | Vertical
+  position: finite document coordinate
+```
+
+The grid definition and guide collection are saved, validated, dirty-tracked,
+and undoable. Guide drags coalesce into one history entry.
+
+Workspace preferences are not saved in the document and do not enter undo:
+
+- show rulers;
+- show grid;
+- show guides;
+- lock guides;
+- master snapping;
+- snap to Objects, Guides, and Grid;
+- screen-space tolerance.
+
+Visibility and snap eligibility are independent. A hidden grid or hidden guide
+collection may remain a snap target, but the precision popover must make that
+state explicit. Rulers and the grid use a fixed document origin of `(0, 0)` in
+version one.
+
+The native format will move to version 3 when this metadata is implemented.
+Version 1 and 2 files load with default grid settings and no guides. Validation
+must reject non-finite positions, invalid spacing, duplicate IDs, and more than
+10,000 guides.
+
+#### Grid and ruler rendering
+
+- Grid spacing stays fixed in document units at every zoom.
+- Minor lines are skipped when their screen separation becomes too dense;
+  major lines remain until they also need adaptive skipping.
+- Rendering suppression does not change logical snap locations.
+- Grid and ruler density is bounded by the viewport, not document extent.
+- Ruler tick intervals adapt to zoom and show pixel/document-unit labels.
+- Grid lines, rulers, and guides are editor chrome and never enter artwork
+  snapshots, SVG, raster export, or clipboard images.
+- Grid colors and opacity follow the application theme in version one rather
+  than becoming document settings.
+
+#### Guide interaction
+
+- Drag from the top ruler to create a horizontal guide.
+- Drag from the left ruler to create a vertical guide.
+- Drag an unlocked guide to reposition it.
+- Option-drag duplicates a guide.
+- Double-click a guide's ruler marker to enter its coordinate exactly.
+- Delete or Backspace removes the active guide.
+- Dragging a guide back over its source ruler removes it.
+- View commands show/hide rulers, grid, and guides; lock/unlock guides; and clear
+  all guides.
+- Clearing all guides commits one undo entry, so it can be reversed without an
+  interrupting confirmation.
+- Guide creation, movement, duplication, and deletion use semantic core commands
+  rather than direct GPUI mutation.
+
+Guides do not participate in layer selection and do not appear in the Layers
+panel. GPUI may keep an active-guide ID for keyboard/context actions, but that is
+ephemeral workspace state.
+
+#### Snapping behavior
+
+The toolbar uses a split magnet control: the primary action toggles master
+snapping and the disclosure opens a compact popover containing:
+
+```text
+Snapping                 On
+  Objects                 On
+  Guides                  On
+  Grid                    Off
+Tolerance               8 px
+-----------------------------
+Show rulers
+Show grid
+Show guides
+Lock guides
+Grid settings…
+Clear guides
+```
+
+The tolerance defaults to the existing 8 screen pixels and is constrained to
+1–32 pixels. Holding Control during a pointer interaction temporarily bypasses
+all snapping without changing the stored master setting.
+
+For each axis, the snap engine chooses the eligible correction with the smallest
+screen-space distance. Effective ties use `guide > object > grid`; remaining
+ties use stable target order. X and Y are resolved independently so different
+targets may win on each axis. Smart-guide feedback identifies the winning
+target rather than every eligible candidate.
+
+The first release must apply these controls to:
+
+- moving a selection;
+- resizing a selection;
+- rectangle, ellipse, line, and frame creation.
+
+Pen-anchor and direct-vector snapping may follow under the Objects category once
+their candidate and handle semantics are specified. Rotation, equal-spacing,
+tangent, perpendicular, path-intersection, and pixel-fitting snaps are deferred.
+
+#### Commands and automation
+
+All visible controls must have command-palette equivalents. Automation should
+gain semantic operations to:
+
+- inspect grid, guides, visibility, and snap settings;
+- update grid spacing and major interval;
+- create, move, and remove guides by stable ID;
+- set visibility, guide lock, snap categories, and tolerance.
+
+Pointer automation remains useful for testing ruler drags, but is not the only
+way to manage precision data.
+
+#### Acceptance criteria
+
+- Grid and guide edits round-trip through native files and undo/redo.
+- View/snap toggles neither dirty the document nor enter history.
+- Old files migrate with safe defaults.
+- Snapping remains consistent in screen pixels across zoom levels.
+- Competing targets resolve deterministically and Control bypasses all targets.
+- Dense grids remain bounded and readable while panning and zooming.
+- Guides are keyboard-editable and can be managed without precise dragging.
+- No precision overlay appears in any export or clipboard artifact.
+
+#### Explicitly deferred
+
+- row, column, baseline, isometric, angular, modular, and multiple grids;
+- per-frame grids/guides and frame-local ruler origins;
+- custom ruler/grid origin and alternate measurement units;
+- rotated, named, colored, or individually locked guides;
+- arbitrary artwork converted to guides;
+- snap presets and candidate-count algorithms;
+- equal-gap/size, tangent, perpendicular, glyph, and full path-geometry snaps;
+- separate pixel fitting or whole-pixel transform enforcement.
+
+### Scoped candidate: Document Color Library
+
+Status: design complete; implementation pending. “Color manager” is the informal
+workflow name; the product vocabulary is:
+
+- **Document Color Library**: the complete document-local data set;
+- **Color Library**: the modeless manager panel;
+- **Saved Colors**: the picker section;
+- **Saved Color**: one reusable solid RGBA value;
+- **Color Group**: an ordered, collapsible organizational container;
+- **swatch**: the visual sample for a color, not a competing feature name;
+- **Color Variable**: reserved for a future linked value that updates artwork.
+
+#### Semantics
+
+Saved Colors are deliberately unlinked and copy-by-value:
+
+- applying one copies its RGBA value into the target property;
+- editing one changes only the library entry;
+- deleting one changes only the library entry;
+- existing artwork never depends on the entry or its group;
+- direct color edits never need a detach operation.
+
+This behavior is required even when an artwork color exactly matches a Saved
+Color. Linked colors, aliases, and themes require a separate Color Variables
+specification and data model.
+
+Version one stores document-local solid sRGB RGBA values. It does not store
+gradients, patterns, color-space formulas, or application-wide/shared palettes.
+
+#### Data model and persistence
+
+```text
+ColorLibrary
+  groups: ordered ColorGroup records
+  colors: SavedColor records
+
+ColorGroup
+  id: stable ColorGroupId
+  name: non-empty string
+  manual_order: integer
+  sort_mode: Manual | Name | HueAndShades | Lightness | Chroma | Brightness
+  sort_direction: Ascending | Descending
+
+SavedColor
+  id: stable SavedColorId
+  group_id: optional ColorGroupId
+  name: optional non-empty string
+  rgba: four finite normalized components
+  manual_order: integer within its group or Ungrouped
+```
+
+Ungrouped is a virtual built-in section, not a deletable `ColorGroup`. Empty or
+whitespace-only color names normalize to `None`; their fallback label is
+uppercase HEX including alpha when it is not fully opaque.
+
+Group and Saved Color mutations are document edits and are undoable. The chosen
+sort mode is saved because it defines the library's authored organization.
+Manual order is retained while another sort mode is active.
+
+The Color Library ships in the same planned native version 3 metadata migration
+as precision aids. Version 1 and 2 files receive an empty library. Validation
+limits are 256 groups, 10,000 Saved Colors, and 256 UTF-8 bytes per name, with
+valid IDs, group references, orders, and normalized finite color components.
+SVG import starts with an empty library; export does not serialize the library.
+
+Panel geometry, collapsed groups, the last-used group, and picker presentation
+are workspace preferences. Changing them does not dirty the document.
+
+#### Sort behavior
+
+Sort modes are defined rather than delegated to UI ordering:
+
+- **Manual** uses group order and each color's stored `manual_order`.
+- **Name** compares names case-insensitively; unnamed colors follow named colors
+  and compare by displayed HEX.
+- **Hue & Shades** compares OKLCH hue, then OKLCH lightness. Low-chroma colors
+  are grouped as neutrals rather than receiving unstable hue positions.
+- **Lightness** compares OKLCH `L`.
+- **Chroma** compares OKLCH `C` and is described in UI help as color intensity.
+- **Brightness** compares sRGB relative luminance.
+
+All computed sorts are stable, using manual order and then stable ID as final
+ties. Alpha is a preceding tie breaker where the visible RGB color is equal.
+
+Changing sort mode never overwrites manual order. Dragging or editing an Order
+value while a computed sort is active switches that group to Manual, captures
+the currently displayed order, and then applies the requested move. The manual
+order is normalized to contiguous zero-based values internally; the panel shows
+1-based Order values.
+
+#### Shared picker integration
+
+Every fill/stroke selection surface and every creation-style color surface must
+continue to use the shared color-picker component. The picker adds:
+
+- a searchable Saved Colors section grouped like the library;
+- typeahead matching optional name, group name, HEX, and RGB value;
+- keyboard navigation and Enter to apply;
+- a highlight for an exact RGBA match;
+- a one-click **Save Color** action beside the current color;
+- **Manage Color Library…** to open or focus the manager.
+
+Save Color immediately adds an unnamed entry to the last-used group, or
+Ungrouped when none exists. It leaves the picker open and offers a lightweight
+confirmation with a secondary Rename action. If an exact RGBA entry already
+exists, Save Color reveals that entry instead of silently adding a duplicate.
+The manager provides an explicit Duplicate action when duplicates are desired.
+
+The active target—selection fill, selection stroke, frame background, creation
+fill, or creation stroke—must remain visible in the picker. Future color
+properties must adopt the same component rather than implementing their own
+Saved Colors lookup.
+
+#### Color Library panel
+
+The Color Library is a modeless, movable, resizable in-app utility panel. It is
+not a separate operating-system window and does not require a docking framework
+in version one. Opening its command focuses an existing panel before creating a
+new presentation. Its position and size are restored on the next launch and
+clamped into the available window.
+
+Each collapsible group presents a compact table:
+
+| Column | Interaction |
+| --- | --- |
+| Order/drag | Drag or type a 1-based position in Manual mode |
+| Color | Click the swatch to edit with the shared picker |
+| Name | Edit inline; blank is valid |
+| Value | Edit validated HEX/RGBA text inline |
+| Actions | Duplicate, move to group, or remove |
+
+Enter commits inline edits and Escape cancels them. Invalid color text remains
+in the editor with an error and cannot commit. Panel rows and controls support
+keyboard traversal without relying on drag-and-drop.
+
+Groups can be added, renamed, collapsed, reordered, sorted independently, and
+removed. Removing a non-empty group moves its entries to Ungrouped by default.
+**Delete Group and Colors…** is a separate confirmed command. Removing a Saved
+Color never searches for or modifies matching artwork.
+
+#### Commands and automation
+
+The command palette exposes Open/Focus Color Library and Save Current Color.
+Semantic automation should support:
+
+- inspect the complete library with stable group/color IDs;
+- add, update, duplicate, move, reorder, and remove a Saved Color;
+- add, rename, reorder, sort, and remove a Color Group;
+- apply a Saved Color by ID to any supported color target;
+- open/focus the manager and picker for interaction testing.
+
+Automation uses IDs rather than names because names are optional and not unique.
+
+#### Acceptance criteria
+
+- Saved Colors and groups round-trip, validate, migrate, undo, and redo.
+- Applying a Saved Color copies its value and creates no hidden linkage.
+- Editing/deleting entries and groups never changes existing artwork.
+- Quick add and search work from every current color-selection context.
+- Empty names, duplicate explicit entries, and alpha values behave consistently.
+- Manual order survives computed sorting until the user explicitly reorders.
+- Perceptual sorts are deterministic across launches and platforms.
+- The manager remains usable by keyboard and remembers non-document UI state.
+- Color Library data never appears in SVG/raster output.
+
+#### Explicitly deferred
+
+- linked Color Variables/global colors, aliases, modes, and themes;
+- application, project, team, cloud, or operating-system libraries;
+- gradients, patterns, images, spot colors, CMYK, Lab, and print separations;
+- ASE/GPL/ACB or proprietary palette import/export;
+- image palette extraction, harmony generation, and bulk recoloring;
+- automatic “document colors,” usage counting, and unused-color cleanup;
+- docking infrastructure and multiple simultaneous manager windows.
 
 ---
 
