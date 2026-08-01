@@ -4,7 +4,7 @@ Strek exposes the same editor commands and canvas input used by its native UI
 through three cursor-free interfaces:
 
 - `strek automate` for shell scripts
-- the bundled `Strek Automation.applescript` helper
+- the bundled `AUTOMATION.applescript` helper
 - `strek mcp` for Model Context Protocol clients
 
 All three talk to the running desktop application through a local IPC endpoint.
@@ -197,16 +197,16 @@ input.
 The packaged application installs its helper here:
 
 ```text
-/Applications/Strek.app/Contents/Resources/Strek Automation.applescript
+/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript
 ```
 
 Run any CLI automation subcommand through the helper's `run` handler:
 
 ```sh
-osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" state
-osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" action tool.rectangle
-osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" pointer down 120 100
-osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" screenshot /tmp/strek.png
+osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" state
+osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" action tool.rectangle
+osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" pointer down 120 100
+osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" screenshot /tmp/strek.png
 ```
 
 The helper also exposes named handlers for use inside AppleScript:
@@ -233,7 +233,7 @@ The helper also exposes named handlers for use inside AppleScript:
 Load the helper once and call its handlers:
 
 ```applescript
-set strekAutomation to load script POSIX file "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript"
+set strekAutomation to load script POSIX file "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript"
 
 set stateJSON to strekAutomation's strekState()
 strekAutomation's strekAction("tool.rectangle")
@@ -258,7 +258,7 @@ For a development build, set the environment variable before invoking
 
 ```sh
 STREK_AUTOMATION_BINARY="$PWD/target/debug/strek" \
-  osascript "apps/gpui/assets/Strek Automation.applescript" state
+  osascript "apps/gpui/assets/AUTOMATION.applescript" state
 ```
 
 `strekPointer` uses the left button and does not expose modifiers. Use the
@@ -266,7 +266,7 @@ generic `run` handler from `osascript` for another button, or use MCP for
 modifier keys:
 
 ```sh
-osascript "apps/gpui/assets/Strek Automation.applescript" pointer down 120 100 right
+osascript "apps/gpui/assets/AUTOMATION.applescript" pointer down 120 100 right
 ```
 
 ## MCP server

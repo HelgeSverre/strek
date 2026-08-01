@@ -93,7 +93,7 @@ strek automate pointer up 360 260
 The packaged app includes an AppleScript helper:
 
 ```sh
-osascript "/Applications/Strek.app/Contents/Resources/Strek Automation.applescript" state
+osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" state
 ```
 
 ### Connect the MCP server
@@ -268,6 +268,8 @@ certificates, notarized, stapled, verified, and attached to tagged releases.
 See [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the one-time Apple and
 GitHub credential setup, manual test workflow, and release procedure.
 
+## Project documentation
+
 The workspace is split by responsibility:
 
 - `apps/gpui` — native application and GPUI interface
@@ -276,6 +278,16 @@ The workspace is split by responsibility:
 - `crates/editor_render` — backend-neutral display-list types
 - `crates/render_svg` — SVG serialization
 
-`SPEC.md` describes intended editor behavior. `Strek Architecture.md` contains
-broader historical architecture notes; when either differs from working code,
-tests and implementation are authoritative.
+- [`SPEC.md`](SPEC.md) describes current behavior, milestones, the product
+  backlog, and bounded specifications for planned work.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) describes current crate boundaries, data
+  flow, state ownership, and the planned extension points.
+- [`docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md`](docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md)
+  records the design-tool comparison behind the next precision and color work.
+- [`AUTOMATION.md`](AUTOMATION.md) documents the CLI, AppleScript, and MCP
+  surfaces.
+- [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md) documents packaging and release
+  operations.
+
+When documentation and working behavior differ, tests and implementation are
+authoritative.

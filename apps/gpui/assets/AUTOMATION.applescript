@@ -1,4 +1,4 @@
--- Cursor-free AppleScript helpers for Strek's local automation endpoint.
+-- Bundled cursor-free AppleScript helpers for Strek's local automation endpoint.
 -- Set this property to target a development binary such as target/debug/strek.
 property strekBinary : missing value
 
