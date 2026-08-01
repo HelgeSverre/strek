@@ -259,6 +259,12 @@ struct PropertyColorInput {
     picker: color_picker::ColorPickerState,
 }
 
+impl PropertyColorInput {
+    fn matches(&self, scope: ColorInputScope, target: properties_panel::ColorTarget) -> bool {
+        self.scope == scope && self.target == target
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ZoomInput {
     value: String,
@@ -500,6 +506,29 @@ impl Strek {
                 }
             }
             AutomationRequest::SetUi { target, visible } => {
+                match target {
+                    UiTarget::FillColorPicker => {
+                        return self.automation_color_picker_response(
+                            properties_panel::ColorTarget::Fill,
+                            visible,
+                            window,
+                            cx,
+                        );
+                    }
+                    UiTarget::StrokeColorPicker => {
+                        return self.automation_color_picker_response(
+                            properties_panel::ColorTarget::Stroke,
+                            visible,
+                            window,
+                            cx,
+                        );
+                    }
+                    UiTarget::MainMenu
+                    | UiTarget::CommandPalette
+                    | UiTarget::LayersPanel
+                    | UiTarget::DesignPanel => {}
+                }
+
                 let scrub_cancelled = self.cancel_numeric_property_scrub();
                 match target {
                     UiTarget::MainMenu => {
@@ -532,27 +561,7 @@ impl Strek {
                             self.toggle_design_panel(&ToggleDesignPanel, window, cx);
                         }
                     }
-                    UiTarget::FillColorPicker | UiTarget::StrokeColorPicker => {
-                        let target = match target {
-                            UiTarget::FillColorPicker => properties_panel::ColorTarget::Fill,
-                            UiTarget::StrokeColorPicker => properties_panel::ColorTarget::Stroke,
-                            _ => unreachable!(),
-                        };
-                        if visible {
-                            self.start_property_color_input(
-                                ColorInputScope::Selection,
-                                target,
-                                window,
-                                cx,
-                            );
-                        } else if self
-                            .property_color_input
-                            .as_ref()
-                            .is_some_and(|input| input.target == target)
-                        {
-                            self.dismiss_color_picker(cx);
-                        }
-                    }
+                    UiTarget::FillColorPicker | UiTarget::StrokeColorPicker => unreachable!(),
                 }
                 if scrub_cancelled {
                     cx.notify();
@@ -571,6 +580,52 @@ impl Strek {
         match result {
             Ok(message) => automation::AutomationResponse::success(state, message),
             Err(message) => automation::AutomationResponse::error(state, message),
+        }
+    }
+
+    fn automation_color_picker_response(
+        &mut self,
+        target: properties_panel::ColorTarget,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> automation::AutomationResponse {
+        let matches_request = self
+            .property_color_input
+            .as_ref()
+            .is_some_and(|input| input.matches(ColorInputScope::Selection, target));
+        let result = if visible {
+            if matches_request {
+                Ok(())
+            } else if color_input_style(&self.editor, ColorInputScope::Selection).is_none() {
+                Err("select at least one object before opening its color picker".to_owned())
+            } else {
+                let scrub_cancelled = self.cancel_numeric_property_scrub();
+                let opened =
+                    self.start_property_color_input(ColorInputScope::Selection, target, window, cx);
+                if scrub_cancelled {
+                    cx.notify();
+                }
+                opened
+                    .then_some(())
+                    .ok_or_else(|| "the selection color picker could not be opened".to_owned())
+            }
+        } else {
+            let scrub_cancelled = self.cancel_numeric_property_scrub();
+            if matches_request {
+                self.dismiss_color_picker(cx);
+            }
+            if scrub_cancelled {
+                cx.notify();
+            }
+            Ok(())
+        };
+
+        let state = self.automation_state(window);
+        let message = format!("set selection {target:?} color picker visibility to {visible}");
+        match result {
+            Ok(()) => automation::AutomationResponse::success(state, message),
+            Err(error) => automation::AutomationResponse::error(state, error),
         }
     }
 
@@ -2392,12 +2447,9 @@ impl Strek {
         target: properties_panel::ColorTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if self.editor.cancel_pointer_interaction() {
-            self.current_cursor = convert_cursor(self.editor.cursor());
-        }
+    ) -> bool {
         let Some(style) = color_input_style(&self.editor, scope) else {
-            return;
+            return false;
         };
         let paint = match target {
             properties_panel::ColorTarget::Fill => style.fill.as_ref(),
@@ -2407,6 +2459,9 @@ impl Strek {
         }
         .cloned()
         .unwrap_or_else(editor_core::Paint::black);
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
         self.zoom_input = None;
         self.property_color_input = Some(PropertyColorInput {
             scope,
@@ -2415,6 +2470,7 @@ impl Strek {
         });
         self.focus_handle.focus(window);
         cx.notify();
+        true
     }
 
     fn start_creation_fill_color_input(
@@ -2456,13 +2512,16 @@ impl Strek {
         }
     }
 
-    pub(crate) fn set_color_picker_paint(
-        &mut self,
-        paint: editor_core::Paint,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_color_picker_preset(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(input) = &mut self.property_color_input {
-            input.picker.set_paint(paint);
+            input.picker.select_preset(index);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn focus_color_picker_hex_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.focus_hex_input();
             cx.notify();
         }
     }
@@ -2481,13 +2540,12 @@ impl Strek {
         &mut self,
         control: color_picker::ColorPickerControl,
         point: gpui::Point<gpui::Pixels>,
-        drag_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
         if self
             .property_color_input
             .as_mut()
-            .is_some_and(|input| input.picker.update_from_point(control, point, drag_bounds))
+            .is_some_and(|input| input.picker.update_from_point(control, point))
         {
             cx.notify();
         }
@@ -3044,26 +3102,53 @@ impl Strek {
             "escape" => {
                 self.dismiss_color_picker(cx);
             }
-            "enter" => {
-                self.commit_color_picker(cx);
+            "tab" => {
+                if let Some(input) = &mut self.property_color_input {
+                    input.picker.focus_next(event.keystroke.modifiers.shift);
+                    cx.notify();
+                }
+            }
+            "left" | "right" | "up" | "down" => {
+                if self.property_color_input.as_mut().is_some_and(|input| {
+                    input
+                        .picker
+                        .handle_arrow(&event.keystroke.key, event.keystroke.modifiers.shift)
+                }) {
+                    cx.notify();
+                }
+            }
+            "enter" | "space" => {
+                let action = self
+                    .property_color_input
+                    .as_mut()
+                    .map(|input| input.picker.activate_focused());
+                if let Some(action) = action {
+                    self.handle_color_picker_keyboard_action(action, cx);
+                }
             }
             "backspace" | "delete" => {
                 if let Some(input) = &mut self.property_color_input {
-                    input.picker.backspace();
-                    cx.notify();
+                    if input.picker.accepts_text_input() {
+                        input.picker.backspace();
+                        cx.notify();
+                    }
                 }
             }
             "a" if primary => {
                 if let Some(input) = &mut self.property_color_input {
-                    input.picker.select_hex();
-                    cx.notify();
+                    if input.picker.accepts_text_input() {
+                        input.picker.select_hex();
+                        cx.notify();
+                    }
                 }
             }
             "v" if primary => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     if let Some(input) = &mut self.property_color_input {
-                        input.picker.replace_hex(&text);
-                        cx.notify();
+                        if input.picker.accepts_text_input() {
+                            input.picker.replace_hex(&text);
+                            cx.notify();
+                        }
                     }
                 }
             }
@@ -3076,13 +3161,27 @@ impl Strek {
                     return;
                 };
                 if let Some(input) = &mut self.property_color_input {
-                    input.picker.append_hex(text);
-                    cx.notify();
+                    if input.picker.accepts_text_input() {
+                        input.picker.append_hex(text);
+                        cx.notify();
+                    }
                 }
             }
             _ => {}
         }
         cx.stop_propagation();
+    }
+
+    fn handle_color_picker_keyboard_action(
+        &mut self,
+        action: color_picker::ColorPickerKeyboardAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            color_picker::ColorPickerKeyboardAction::Updated => cx.notify(),
+            color_picker::ColorPickerKeyboardAction::Commit => self.commit_color_picker(cx),
+            color_picker::ColorPickerKeyboardAction::Dismiss => self.dismiss_color_picker(cx),
+        }
     }
 
     fn handle_zoom_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -3633,6 +3732,8 @@ impl Render for Strek {
                     color_picker::ColorPickerPlacement {
                         top: toolbar::HEADER_HEIGHT + 12.0,
                         right: visible_panel_width(show_design_panel, design_panel_width) + 12.0,
+                        viewport_width: window_size.width.0,
+                        max_height: (window_size.height.0 - 16.0).max(1.0),
                     },
                     editor_entity.clone(),
                 ))
@@ -4237,6 +4338,28 @@ mod layout_tests {
             Some(editor_core::Paint::rgb(0.9, 0.1, 0.2))
         );
         assert!(!editor.history.can_undo());
+    }
+
+    #[test]
+    fn color_picker_identity_includes_its_scope_and_target() {
+        let input = PropertyColorInput {
+            scope: ColorInputScope::Creation,
+            target: properties_panel::ColorTarget::Fill,
+            picker: color_picker::ColorPickerState::new(editor_core::Paint::black()),
+        };
+
+        assert!(input.matches(
+            ColorInputScope::Creation,
+            properties_panel::ColorTarget::Fill
+        ));
+        assert!(!input.matches(
+            ColorInputScope::Selection,
+            properties_panel::ColorTarget::Fill
+        ));
+        assert!(!input.matches(
+            ColorInputScope::Creation,
+            properties_panel::ColorTarget::Stroke
+        ));
     }
 
     #[test]

@@ -5,9 +5,9 @@ use std::sync::{Arc, OnceLock};
 
 use editor_core::Paint;
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb, rgba, AnyElement,
-    Bounds, DragMoveEvent, IntoElement, MouseButton, Pixels, Point, Render, RenderImage,
-    SharedString, WeakEntity, Window,
+    anchored, div, img, linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb,
+    rgba, AnyElement, Bounds, Corner, DragMoveEvent, IntoElement, MouseButton, Pixels, Point,
+    Render, RenderImage, SharedString, WeakEntity, Window,
 };
 use image::{Frame, Rgba as ImageRgba, RgbaImage};
 use smallvec::smallvec;
@@ -63,8 +63,58 @@ pub(crate) enum ColorPickerControl {
     Alpha,
 }
 
-#[derive(Clone)]
-struct ColorPickerDrag;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ColorPickerKeyboardFocus {
+    #[default]
+    Hex,
+    Wheel,
+    Model,
+    Channel(usize),
+    Alpha,
+    Preset,
+    Cancel,
+    Apply,
+}
+
+impl ColorPickerKeyboardFocus {
+    const ORDER: [Self; 10] = [
+        Self::Hex,
+        Self::Wheel,
+        Self::Model,
+        Self::Channel(0),
+        Self::Channel(1),
+        Self::Channel(2),
+        Self::Alpha,
+        Self::Preset,
+        Self::Cancel,
+        Self::Apply,
+    ];
+
+    fn next(self, reverse: bool) -> Self {
+        let index = Self::ORDER
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or_default();
+        let next = if reverse {
+            index.checked_sub(1).unwrap_or(Self::ORDER.len() - 1)
+        } else {
+            (index + 1) % Self::ORDER.len()
+        };
+        Self::ORDER[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColorPickerKeyboardAction {
+    Updated,
+    Commit,
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ColorPickerDrag {
+    control: ColorPickerControl,
+}
 
 impl Render for ColorPickerDrag {
     fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -76,6 +126,8 @@ impl Render for ColorPickerDrag {
 pub(crate) struct ColorPickerPlacement {
     pub top: f32,
     pub right: f32,
+    pub viewport_width: f32,
+    pub max_height: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +140,8 @@ pub(crate) struct ColorPickerSnapshot {
     oklch: [f32; 3],
     hex_value: String,
     invalid: bool,
+    keyboard_focus: ColorPickerKeyboardFocus,
+    preset_index: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,11 +162,14 @@ pub(crate) struct ColorPickerState {
     hex_value: String,
     replace_on_type: bool,
     invalid: bool,
+    keyboard_focus: ColorPickerKeyboardFocus,
+    preset_index: usize,
     bounds: ControlBounds,
 }
 
 impl ColorPickerState {
     pub(crate) fn new(paint: Paint) -> Self {
+        let paint = normalize_paint(paint);
         let mut picker = Self {
             hex_value: format_paint(&paint),
             paint,
@@ -122,6 +179,8 @@ impl ColorPickerState {
             oklch: [0.0; 3],
             replace_on_type: true,
             invalid: false,
+            keyboard_focus: ColorPickerKeyboardFocus::default(),
+            preset_index: 0,
             bounds: ControlBounds::default(),
         };
         picker.refresh_channels_from_paint();
@@ -138,6 +197,8 @@ impl ColorPickerState {
             oklch: self.oklch,
             hex_value: self.hex_value.clone(),
             invalid: self.invalid,
+            keyboard_focus: self.keyboard_focus,
+            preset_index: self.preset_index,
         }
     }
 
@@ -151,12 +212,108 @@ impl ColorPickerState {
 
     pub(crate) fn set_model(&mut self, model: ColorModel) {
         self.model = model;
+        self.keyboard_focus = ColorPickerKeyboardFocus::Model;
     }
 
     pub(crate) fn set_paint(&mut self, paint: Paint) {
-        self.paint = paint;
+        self.paint = normalize_paint(paint);
         self.refresh_channels_from_paint();
         self.sync_hex_from_paint();
+    }
+
+    pub(crate) fn accepts_text_input(&self) -> bool {
+        self.keyboard_focus == ColorPickerKeyboardFocus::Hex
+    }
+
+    pub(crate) fn focus_hex_input(&mut self) {
+        self.keyboard_focus = ColorPickerKeyboardFocus::Hex;
+        self.select_hex();
+    }
+
+    pub(crate) fn focus_next(&mut self, reverse: bool) {
+        self.keyboard_focus = self.keyboard_focus.next(reverse);
+    }
+
+    pub(crate) fn handle_arrow(&mut self, key: &str, coarse: bool) -> bool {
+        let direction = match key {
+            "left" | "down" => -1.0,
+            "right" | "up" => 1.0,
+            _ => return false,
+        };
+        match self.keyboard_focus {
+            ColorPickerKeyboardFocus::Wheel => {
+                if matches!(key, "left" | "right") {
+                    let step = if coarse { 10.0 } else { 1.0 };
+                    self.set_shared_hue(self.hsv[0] + direction * step);
+                } else {
+                    let step = if coarse { 0.05 } else { 0.01 };
+                    self.hsv[1] = (self.hsv[1] + direction * step).clamp(0.0, 1.0);
+                }
+                let alpha = paint_channels(&self.paint)[3];
+                let rgb = hsv_to_rgb(self.hsv[0], self.hsv[1], self.hsv[2]);
+                self.paint = Paint::rgba(rgb[0], rgb[1], rgb[2], alpha);
+                self.refresh_hsl_and_oklch();
+                self.sync_hex_from_paint();
+            }
+            ColorPickerKeyboardFocus::Model => {
+                let index = ColorModel::ALL
+                    .iter()
+                    .position(|model| *model == self.model)
+                    .unwrap_or_default();
+                let next = if direction < 0.0 {
+                    index.checked_sub(1).unwrap_or(ColorModel::ALL.len() - 1)
+                } else {
+                    (index + 1) % ColorModel::ALL.len()
+                };
+                self.model = ColorModel::ALL[next];
+            }
+            ColorPickerKeyboardFocus::Channel(index) => {
+                let step = if coarse { 0.05 } else { 0.01 };
+                let fraction = (self.channel_fraction(index) + direction * step).clamp(0.0, 1.0);
+                self.update_channel(index, fraction);
+                self.sync_hex_from_paint();
+            }
+            ColorPickerKeyboardFocus::Alpha => {
+                let step = if coarse { 0.05 } else { 0.01 };
+                let mut rgba = paint_channels(&self.paint);
+                rgba[3] = (rgba[3] + direction * step).clamp(0.0, 1.0);
+                self.paint = Paint::Solid(rgba);
+                self.sync_hex_from_paint();
+            }
+            ColorPickerKeyboardFocus::Preset => {
+                self.preset_index = if direction < 0.0 {
+                    self.preset_index
+                        .checked_sub(1)
+                        .unwrap_or(PRESETS.len() - 1)
+                } else {
+                    (self.preset_index + 1) % PRESETS.len()
+                };
+                self.set_preset(self.preset_index);
+                self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
+            }
+            ColorPickerKeyboardFocus::Hex
+            | ColorPickerKeyboardFocus::Cancel
+            | ColorPickerKeyboardFocus::Apply => return false,
+        }
+        true
+    }
+
+    pub(crate) fn activate_focused(&mut self) -> ColorPickerKeyboardAction {
+        match self.keyboard_focus {
+            ColorPickerKeyboardFocus::Cancel => ColorPickerKeyboardAction::Dismiss,
+            ColorPickerKeyboardFocus::Apply | ColorPickerKeyboardFocus::Hex => {
+                ColorPickerKeyboardAction::Commit
+            }
+            ColorPickerKeyboardFocus::Preset => {
+                self.set_preset(self.preset_index);
+                self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
+                ColorPickerKeyboardAction::Updated
+            }
+            ColorPickerKeyboardFocus::Wheel
+            | ColorPickerKeyboardFocus::Model
+            | ColorPickerKeyboardFocus::Channel(_)
+            | ColorPickerKeyboardFocus::Alpha => ColorPickerKeyboardAction::Updated,
+        }
     }
 
     pub(crate) fn set_control_bounds(
@@ -178,22 +335,26 @@ impl ColorPickerState {
         &mut self,
         control: ColorPickerControl,
         point: Point<Pixels>,
-        drag_bounds: Option<Bounds<Pixels>>,
     ) -> bool {
-        let bounds = drag_bounds.or_else(|| match control {
+        let bounds = match control {
             ColorPickerControl::Wheel => self.bounds.wheel,
             ColorPickerControl::Channel(index) => {
                 self.bounds.channels.get(index).copied().flatten()
             }
             ColorPickerControl::Alpha => self.bounds.alpha,
-        });
+        };
         let Some(bounds) = bounds.filter(|bounds| {
             bounds.size.width.0 > f32::EPSILON && bounds.size.height.0 > f32::EPSILON
         }) else {
             return false;
         };
 
-        let before = self.paint.clone();
+        self.keyboard_focus = match control {
+            ColorPickerControl::Wheel => ColorPickerKeyboardFocus::Wheel,
+            ColorPickerControl::Channel(index) => ColorPickerKeyboardFocus::Channel(index),
+            ColorPickerControl::Alpha => ColorPickerKeyboardFocus::Alpha,
+        };
+
         match control {
             ColorPickerControl::Wheel => self.update_wheel(point, bounds),
             ColorPickerControl::Channel(index) => {
@@ -206,7 +367,7 @@ impl ColorPickerState {
             }
         }
         self.sync_hex_from_paint();
-        self.paint != before
+        true
     }
 
     pub(crate) fn backspace(&mut self) {
@@ -262,7 +423,7 @@ impl ColorPickerState {
         let saturation = dx.hypot(dy).clamp(0.0, 1.0);
         let hue = normalize_degrees(dy.atan2(dx).to_degrees());
         let rgba = paint_channels(&self.paint);
-        self.hsv[0] = hue;
+        self.set_shared_hue(hue);
         self.hsv[1] = saturation;
         let rgb = hsv_to_rgb(self.hsv[0], self.hsv[1], self.hsv[2]);
         self.paint = Paint::rgba(rgb[0], rgb[1], rgb[2], rgba[3]);
@@ -278,19 +439,19 @@ impl ColorPickerState {
         let rgb = [rgba[0], rgba[1], rgba[2]];
         let rgb = match self.model {
             ColorModel::Hsv => {
-                self.hsv[index] = if index == 0 {
-                    fraction * 360.0
+                if index == 0 {
+                    self.set_shared_hue(fraction * 360.0);
                 } else {
-                    fraction
-                };
+                    self.hsv[index] = fraction;
+                }
                 hsv_to_rgb(self.hsv[0], self.hsv[1], self.hsv[2])
             }
             ColorModel::Hsl => {
-                self.hsl[index] = if index == 0 {
-                    fraction * 360.0
+                if index == 0 {
+                    self.set_shared_hue(fraction * 360.0);
                 } else {
-                    fraction
-                };
+                    self.hsl[index] = fraction;
+                }
                 hsl_to_rgb(self.hsl[0], self.hsl[1], self.hsl[2])
             }
             ColorModel::Rgb => {
@@ -313,7 +474,47 @@ impl ColorPickerState {
             ColorModel::Hsv => self.refresh_hsl_and_oklch(),
             ColorModel::Hsl => self.refresh_hsv_and_oklch(),
             ColorModel::Rgb => self.refresh_channels_from_paint(),
-            ColorModel::Oklch => self.refresh_hsv_and_hsl(),
+            ColorModel::Oklch => self.refresh_channels_from_paint(),
+        }
+    }
+
+    fn channel_fraction(&self, index: usize) -> f32 {
+        match self.model {
+            ColorModel::Hsv => match index {
+                0 => self.hsv[0] / 360.0,
+                1 | 2 => self.hsv[index],
+                _ => 0.0,
+            },
+            ColorModel::Hsl => match index {
+                0 => self.hsl[0] / 360.0,
+                1 | 2 => self.hsl[index],
+                _ => 0.0,
+            },
+            ColorModel::Rgb => paint_channels(&self.paint)
+                .get(index)
+                .copied()
+                .unwrap_or_default(),
+            ColorModel::Oklch => match index {
+                0 => self.oklch[0],
+                1 => self.oklch[1] / OKLCH_MAX_CHROMA,
+                2 => self.oklch[2] / 360.0,
+                _ => 0.0,
+            },
+        }
+        .clamp(0.0, 1.0)
+    }
+
+    fn set_preset(&mut self, index: usize) {
+        if let Some((_, color)) = PRESETS.get(index) {
+            self.set_paint(preset_paint(*color));
+        }
+    }
+
+    pub(crate) fn select_preset(&mut self, index: usize) {
+        if index < PRESETS.len() {
+            self.preset_index = index;
+            self.set_preset(index);
+            self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
         }
     }
 
@@ -337,25 +538,46 @@ impl ColorPickerState {
 
     fn refresh_hsv_and_hsl(&mut self) {
         let [red, green, blue, _] = paint_channels(&self.paint);
-        self.hsv = tuple_to_array(rgb_to_hsv([red, green, blue]));
-        self.hsl = tuple_to_array(rgb_to_hsl([red, green, blue]));
+        let mut hsv = tuple_to_array(rgb_to_hsv([red, green, blue]));
+        let mut hsl = tuple_to_array(rgb_to_hsl([red, green, blue]));
+        let hue = if hsv[1] > 0.000_1 && hsv[2] > 0.000_1 {
+            hsv[0]
+        } else {
+            self.hsv[0]
+        };
+        hsv[0] = hue;
+        hsl[0] = hue;
+        self.hsv = hsv;
+        self.hsl = hsl;
     }
 
     fn refresh_oklch(&mut self) {
         let [red, green, blue, _] = paint_channels(&self.paint);
+        let previous_hue = self.oklch[2];
         self.oklch = tuple_to_array(rgb_to_oklch([red, green, blue]));
+        if self.oklch[1] <= 0.000_1 {
+            self.oklch[2] = previous_hue;
+        }
     }
 
     fn refresh_hsl_and_oklch(&mut self) {
         let [red, green, blue, _] = paint_channels(&self.paint);
         self.hsl = tuple_to_array(rgb_to_hsl([red, green, blue]));
-        self.oklch = tuple_to_array(rgb_to_oklch([red, green, blue]));
+        self.hsl[0] = self.hsv[0];
+        self.refresh_oklch();
     }
 
     fn refresh_hsv_and_oklch(&mut self) {
         let [red, green, blue, _] = paint_channels(&self.paint);
         self.hsv = tuple_to_array(rgb_to_hsv([red, green, blue]));
-        self.oklch = tuple_to_array(rgb_to_oklch([red, green, blue]));
+        self.hsv[0] = self.hsl[0];
+        self.refresh_oklch();
+    }
+
+    fn set_shared_hue(&mut self, hue: f32) {
+        let hue = normalize_degrees(hue);
+        self.hsv[0] = hue;
+        self.hsl[0] = hue;
     }
 }
 
@@ -364,6 +586,8 @@ pub(crate) fn render(
     placement: ColorPickerPlacement,
     editor_entity: WeakEntity<Strek>,
 ) -> AnyElement {
+    let picker_width = (placement.viewport_width - 16.0).clamp(1.0, 286.0);
+    let wheel_size = (picker_width - 24.0).clamp(1.0, WHEEL_SIZE as f32);
     let rgba_channels = paint_channels(&snapshot.paint);
     let rgb_channels = [rgba_channels[0], rgba_channels[1], rgba_channels[2]];
     let marker_x = 0.5 + snapshot.hsv[0].to_radians().cos() * snapshot.hsv[1] * 0.5;
@@ -378,153 +602,208 @@ pub(crate) fn render(
     let opaque = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 1.0);
     let transparent = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 0.0);
 
-    div()
-        .id("color-picker")
-        .absolute()
-        .top(px(placement.top))
-        .right(px(placement.right))
-        .w(px(286.0))
-        .p(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(SURFACE))
-        .shadow_lg()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
-                        .child(snapshot.title),
-                )
-                .child(
-                    div()
-                        .w(px(28.0))
-                        .h(px(22.0))
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgba(paint_as_rgba(&snapshot.paint))),
-                ),
-        )
-        .child(div().flex().justify_center().child(wheel_control(
-            marker_x,
-            marker_y,
-            editor_entity.clone(),
-        )))
-        .child(
-            div()
-                .flex()
-                .gap(px(4.0))
-                .children(ColorModel::ALL.into_iter().map(|model| {
-                    model_button(model, snapshot.model, editor_entity.clone()).into_any_element()
-                })),
-        )
-        .children(channels.into_iter().enumerate().map(|(index, channel)| {
-            channel_slider(index, channel, editor_entity.clone()).into_any_element()
-        }))
-        .child(channel_slider(
-            3,
-            ChannelView {
-                label: "A",
-                value: format!("{:.0}%", rgba_channels[3] * 100.0),
-                fraction: rgba_channels[3],
-            },
-            editor_entity.clone(),
+    anchored()
+        .anchor(Corner::TopRight)
+        .position(point(
+            px(placement.viewport_width - placement.right),
+            px(placement.top),
         ))
-        .child(div().h(px(8.0)).rounded(px(4.0)).bg(linear_gradient(
-            90.0,
-            linear_color_stop(rgba(paint_as_rgba(&transparent)), 0.0),
-            linear_color_stop(rgba(paint_as_rgba(&opaque)), 1.0),
-        )))
+        .snap_to_window_with_margin(px(8.0))
         .child(
             div()
+                .id("color-picker")
+                .w(px(picker_width))
+                .max_h(px(placement.max_height))
+                .overflow_y_scroll()
+                .p(px(12.0))
                 .flex()
-                .gap(px(5.0))
-                .children(PRESETS.into_iter().map(|(name, color)| {
-                    preset_swatch(name, color, editor_entity.clone()).into_any_element()
-                })),
-        )
-        .child(
-            div()
-                .h(px(30.0))
-                .px(px(7.0))
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .rounded(px(4.0))
+                .flex_col()
+                .gap(px(10.0))
+                .rounded(px(8.0))
                 .border_1()
-                .border_color(rgb(if snapshot.invalid { 0xf24822 } else { BORDER }))
-                .bg(rgb(SURFACE_RAISED))
-                .child(div().text_size(px(9.0)).text_color(rgb(MUTED)).child("HEX"))
+                .border_color(rgb(BORDER))
+                .bg(rgb(SURFACE))
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
-                        .flex_1()
-                        .font_family("SFMono-Regular")
-                        .text_size(px(10.0))
-                        .text_color(rgb(if snapshot.invalid { 0xfca58f } else { TEXT }))
-                        .child(snapshot.hex_value),
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(TEXT))
+                                .child(snapshot.title),
+                        )
+                        .child(
+                            div()
+                                .w(px(28.0))
+                                .h(px(22.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgba(paint_as_rgba(&snapshot.paint))),
+                        ),
                 )
+                .child(div().flex().justify_center().child(wheel_control(
+                    wheel_size,
+                    marker_x,
+                    marker_y,
+                    snapshot.keyboard_focus == ColorPickerKeyboardFocus::Wheel,
+                    editor_entity.clone(),
+                )))
                 .child(
                     div()
-                        .text_size(px(9.0))
-                        .text_color(rgb(MUTED))
-                        .child("Type, then Enter"),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap(px(6.0))
-                .child(picker_button(
-                    "color-picker-cancel",
-                    "Cancel",
-                    false,
+                        .flex()
+                        .gap(px(4.0))
+                        .children(ColorModel::ALL.into_iter().map(|model| {
+                            model_button(
+                                model,
+                                snapshot.model,
+                                snapshot.keyboard_focus == ColorPickerKeyboardFocus::Model,
+                                editor_entity.clone(),
+                            )
+                            .into_any_element()
+                        })),
+                )
+                .children(channels.into_iter().enumerate().map(|(index, channel)| {
+                    channel_slider(
+                        index,
+                        channel,
+                        snapshot.keyboard_focus == ColorPickerKeyboardFocus::Channel(index),
+                        editor_entity.clone(),
+                    )
+                    .into_any_element()
+                }))
+                .child(channel_slider(
+                    3,
+                    ChannelView {
+                        label: "A",
+                        value: format!("{:.0}%", rgba_channels[3] * 100.0),
+                        fraction: rgba_channels[3],
+                    },
+                    snapshot.keyboard_focus == ColorPickerKeyboardFocus::Alpha,
                     editor_entity.clone(),
                 ))
-                .child(picker_button(
-                    "color-picker-apply",
-                    "Apply",
-                    true,
-                    editor_entity,
-                )),
+                .child(div().h(px(8.0)).rounded(px(4.0)).bg(linear_gradient(
+                    90.0,
+                    linear_color_stop(rgba(paint_as_rgba(&transparent)), 0.0),
+                    linear_color_stop(rgba(paint_as_rgba(&opaque)), 1.0),
+                )))
+                .child(
+                    div().flex().flex_wrap().gap(px(5.0)).children(
+                        PRESETS
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (name, color))| {
+                                preset_swatch(
+                                    index,
+                                    name,
+                                    color,
+                                    snapshot.keyboard_focus == ColorPickerKeyboardFocus::Preset
+                                        && snapshot.preset_index == index,
+                                    editor_entity.clone(),
+                                )
+                                .into_any_element()
+                            }),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("color-picker-hex")
+                        .h(px(30.0))
+                        .px(px(7.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(if snapshot.invalid {
+                            0xf24822
+                        } else if snapshot.keyboard_focus == ColorPickerKeyboardFocus::Hex {
+                            ACCENT
+                        } else {
+                            BORDER
+                        }))
+                        .bg(rgb(SURFACE_RAISED))
+                        .child(div().text_size(px(9.0)).text_color(rgb(MUTED)).child("HEX"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_family("SFMono-Regular")
+                                .text_size(px(10.0))
+                                .text_color(rgb(if snapshot.invalid { 0xfca58f } else { TEXT }))
+                                .child(snapshot.hex_value),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(rgb(MUTED))
+                                .child("Type, then Enter"),
+                        )
+                        .cursor_text()
+                        .on_click({
+                            let editor_entity = editor_entity.clone();
+                            move |_, _, cx| {
+                                editor_entity
+                                    .update(cx, |editor, cx| {
+                                        editor.focus_color_picker_hex_input(cx);
+                                    })
+                                    .ok();
+                                cx.stop_propagation();
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(picker_button(
+                            "color-picker-cancel",
+                            "Cancel",
+                            false,
+                            snapshot.keyboard_focus == ColorPickerKeyboardFocus::Cancel,
+                            editor_entity.clone(),
+                        ))
+                        .child(picker_button(
+                            "color-picker-apply",
+                            "Apply",
+                            true,
+                            snapshot.keyboard_focus == ColorPickerKeyboardFocus::Apply,
+                            editor_entity,
+                        )),
+                ),
         )
         .into_any_element()
 }
 
 fn wheel_control(
+    size: f32,
     marker_x: f32,
     marker_y: f32,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
     let control = ColorPickerControl::Wheel;
     interactive_control(
         "color-picker-wheel",
         control,
+        false,
         editor_entity,
         div()
             .relative()
-            .w(px(WHEEL_SIZE as f32))
-            .h(px(WHEEL_SIZE as f32))
+            .w(px(size))
+            .h(px(size))
             .rounded_full()
+            .border_2()
+            .border_color(rgb(if keyboard_focused { ACCENT } else { BORDER }))
             .overflow_hidden()
             .cursor_crosshair()
-            .child(
-                img(color_wheel_image())
-                    .w(px(WHEEL_SIZE as f32))
-                    .h(px(WHEEL_SIZE as f32)),
-            )
+            .child(img(color_wheel_image()).w(px(size)).h(px(size)))
             .child(
                 div()
                     .absolute()
@@ -545,6 +824,7 @@ fn wheel_control(
 fn model_button(
     model: ColorModel,
     active: ColorModel,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
     div()
@@ -559,7 +839,13 @@ fn model_button(
         .justify_center()
         .rounded(px(4.0))
         .border_1()
-        .border_color(rgb(if model == active { ACCENT } else { BORDER }))
+        .border_color(rgb(if keyboard_focused && model == active {
+            0xffffff
+        } else if model == active {
+            ACCENT
+        } else {
+            BORDER
+        }))
         .bg(if model == active {
             rgba(0x0c8ce92e)
         } else {
@@ -588,6 +874,7 @@ struct ChannelView {
 fn channel_slider(
     index: usize,
     channel: ChannelView,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
     let control = if index == 3 {
@@ -600,6 +887,8 @@ fn channel_slider(
         .flex_1()
         .h(px(8.0))
         .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(if keyboard_focused { ACCENT } else { 0x17181a }))
         .bg(rgb(0x17181a))
         .cursor_col_resize()
         .child(
@@ -641,6 +930,7 @@ fn channel_slider(
         .child(interactive_control(
             SharedString::from(format!("color-channel-{index}")),
             control,
+            true,
             editor_entity,
             track,
         ))
@@ -658,6 +948,7 @@ fn channel_slider(
 fn interactive_control(
     id: impl Into<gpui::ElementId>,
     control: ColorPickerControl,
+    fill_width: bool,
     editor_entity: WeakEntity<Strek>,
     content: impl IntoElement,
 ) -> impl IntoElement {
@@ -665,7 +956,7 @@ fn interactive_control(
     let down_entity = editor_entity.clone();
     let drag_entity = editor_entity;
     div()
-        .flex_1()
+        .when(fill_width, |element| element.flex_1())
         .child(content)
         .on_children_prepainted(move |bounds, _, cx| {
             let Some(bounds) = bounds.first().copied() else {
@@ -681,24 +972,22 @@ fn interactive_control(
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             down_entity
                 .update(cx, |editor, cx| {
-                    editor.update_color_picker_from_point(control, event.position, None, cx);
+                    editor.update_color_picker_from_point(control, event.position, cx);
                 })
                 .ok();
             cx.stop_propagation();
         })
-        .on_drag(ColorPickerDrag, |drag, _, _, cx| {
+        .on_drag(ColorPickerDrag { control }, |drag, _, _, cx| {
             cx.stop_propagation();
-            cx.new(|_| drag.clone())
+            cx.new(|_| *drag)
         })
         .on_drag_move::<ColorPickerDrag>(move |event: &DragMoveEvent<ColorPickerDrag>, _, cx| {
+            if event.drag(cx).control != control {
+                return;
+            }
             drag_entity
                 .update(cx, |editor, cx| {
-                    editor.update_color_picker_from_point(
-                        control,
-                        event.event.position,
-                        Some(event.bounds),
-                        cx,
-                    );
+                    editor.update_color_picker_from_point(control, event.event.position, cx);
                 })
                 .ok();
             cx.stop_propagation();
@@ -706,13 +995,12 @@ fn interactive_control(
 }
 
 fn preset_swatch(
+    index: usize,
     name: &'static str,
     color: u32,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
-    let red = ((color >> 16) & 0xff) as f32 / 255.0;
-    let green = ((color >> 8) & 0xff) as f32 / 255.0;
-    let blue = (color & 0xff) as f32 / 255.0;
     div()
         .id(SharedString::from(format!(
             "color-preset-{}",
@@ -723,24 +1011,33 @@ fn preset_swatch(
         .p(px(2.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(if keyboard_focused { ACCENT } else { BORDER }))
         .cursor_pointer()
         .hover(|style| style.border_color(rgb(ACCENT)))
         .child(div().size_full().rounded(px(2.0)).bg(rgb(color)))
         .on_click(move |_, _, cx| {
             editor_entity
                 .update(cx, |editor, cx| {
-                    editor.set_color_picker_paint(Paint::rgb(red, green, blue), cx);
+                    editor.select_color_picker_preset(index, cx);
                 })
                 .ok();
             cx.stop_propagation();
         })
 }
 
+fn preset_paint(color: u32) -> Paint {
+    Paint::rgb(
+        ((color >> 16) & 0xff) as f32 / 255.0,
+        ((color >> 8) & 0xff) as f32 / 255.0,
+        (color & 0xff) as f32 / 255.0,
+    )
+}
+
 fn picker_button(
     id: &'static str,
     label: &'static str,
     primary: bool,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
     div()
@@ -753,7 +1050,13 @@ fn picker_button(
         .justify_center()
         .rounded(px(4.0))
         .border_1()
-        .border_color(rgb(if primary { ACCENT } else { BORDER }))
+        .border_color(rgb(if keyboard_focused {
+            0xffffff
+        } else if primary {
+            ACCENT
+        } else {
+            BORDER
+        }))
         .bg(if primary {
             rgba(0x0c8ce92e)
         } else {
@@ -869,8 +1172,7 @@ fn horizontal_fraction(point: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
 }
 
 pub(crate) fn format_paint(paint: &Paint) -> String {
-    let channels =
-        paint_channels(paint).map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let channels = normalized_paint_channels(paint).map(|channel| (channel * 255.0).round() as u8);
     if channels[3] == u8::MAX {
         format!("#{:02X}{:02X}{:02X}", channels[0], channels[1], channels[2])
     } else {
@@ -918,7 +1220,7 @@ pub(crate) fn parse_hex_paint(value: &str) -> Option<Paint> {
 
 pub(crate) fn paint_as_rgba(paint: &Paint) -> u32 {
     let [red, green, blue, alpha] =
-        paint_channels(paint).map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u32);
+        normalized_paint_channels(paint).map(|channel| (channel * 255.0).round() as u32);
     (red << 24) | (green << 16) | (blue << 8) | alpha
 }
 
@@ -944,6 +1246,32 @@ fn paint_channels(paint: &Paint) -> [f32; 4] {
     *channels
 }
 
+fn normalize_paint(paint: Paint) -> Paint {
+    let Paint::Solid(channels) = paint;
+    Paint::Solid(normalize_channels(channels))
+}
+
+fn normalized_paint_channels(paint: &Paint) -> [f32; 4] {
+    normalize_channels(paint_channels(paint))
+}
+
+fn normalize_channels([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
+    [
+        normalize_channel(red, 0.0),
+        normalize_channel(green, 0.0),
+        normalize_channel(blue, 0.0),
+        normalize_channel(alpha, 1.0),
+    ]
+}
+
+fn normalize_channel(channel: f32, fallback: f32) -> f32 {
+    if channel.is_finite() {
+        channel.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
 fn tuple_to_array((first, second, third): (f32, f32, f32)) -> [f32; 3] {
     [first, second, third]
 }
@@ -953,7 +1281,7 @@ fn normalize_degrees(degrees: f32) -> f32 {
 }
 
 fn rgb_to_hsv(rgb: [f32; 3]) -> (f32, f32, f32) {
-    let [red, green, blue] = rgb.map(|channel| channel.clamp(0.0, 1.0));
+    let [red, green, blue] = rgb.map(|channel| normalize_channel(channel, 0.0));
     let max = red.max(green).max(blue);
     let min = red.min(green).min(blue);
     let delta = max - min;
@@ -993,7 +1321,7 @@ fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
 }
 
 fn rgb_to_hsl(rgb: [f32; 3]) -> (f32, f32, f32) {
-    let [red, green, blue] = rgb.map(|channel| channel.clamp(0.0, 1.0));
+    let [red, green, blue] = rgb.map(|channel| normalize_channel(channel, 0.0));
     let max = red.max(green).max(blue);
     let min = red.min(green).min(blue);
     let delta = max - min;
@@ -1093,7 +1421,7 @@ fn oklch_to_srgb(lightness: f32, chroma: f32, hue: f32) -> [f32; 3] {
 }
 
 fn srgb_to_linear(channel: f32) -> f32 {
-    let channel = channel.clamp(0.0, 1.0);
+    let channel = normalize_channel(channel, 0.0);
     if channel <= 0.040_45 {
         channel / 12.92
     } else {
@@ -1205,5 +1533,94 @@ mod tests {
 
         let [red, green, blue, _] = paint_channels(&picker.paint);
         assert_rgb_close([red, green, blue], [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn achromatic_hue_survives_switching_between_hsv_and_hsl() {
+        let mut picker = ColorPickerState::new(Paint::black());
+        picker.update_channel(0, 120.0 / 360.0);
+        picker.set_model(ColorModel::Hsl);
+        picker.update_channel(1, 1.0);
+        picker.update_channel(2, 0.5);
+
+        let [red, green, blue, _] = paint_channels(&picker.paint);
+        assert_rgb_close([red, green, blue], [0.0, 1.0, 0.0]);
+        assert!((picker.hsv[0] - 120.0).abs() < 0.000_1);
+        assert!((picker.hsl[0] - 120.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn oklch_state_reflects_the_gamut_mapped_paint() {
+        let mut picker = ColorPickerState::new(Paint::black());
+        picker.set_model(ColorModel::Oklch);
+        picker.update_channel(0, 0.7);
+        picker.update_channel(2, 140.0 / 360.0);
+        picker.update_channel(1, 1.0);
+
+        let [red, green, blue, _] = paint_channels(&picker.paint);
+        let actual = rgb_to_oklch([red, green, blue]);
+        assert!((picker.oklch[0] - actual.0).abs() < 0.000_1);
+        assert!((picker.oklch[1] - actual.1).abs() < 0.000_1);
+        assert!((picker.oklch[2] - actual.2).abs() < 0.000_1);
+        assert!(picker.oklch[1] < OKLCH_MAX_CHROMA);
+    }
+
+    #[test]
+    fn picker_normalizes_non_finite_paint_before_rendering() {
+        let picker = ColorPickerState::new(Paint::rgba(
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ));
+
+        assert_eq!(picker.paint, Paint::rgba(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(picker.hex_value(), "#000000");
+        assert!(picker
+            .hsv
+            .into_iter()
+            .chain(picker.hsl)
+            .chain(picker.oklch)
+            .all(f32::is_finite));
+    }
+
+    #[test]
+    fn pointer_updates_use_the_recorded_visual_control_bounds() {
+        let mut picker = ColorPickerState::new(Paint::black());
+        picker.set_model(ColorModel::Rgb);
+        picker.set_control_bounds(
+            ColorPickerControl::Channel(1),
+            Bounds::new(point(px(10.0), px(20.0)), gpui::size(px(100.0), px(8.0))),
+        );
+
+        assert!(
+            picker.update_from_point(ColorPickerControl::Channel(1), point(px(60.0), px(200.0)),)
+        );
+        assert_eq!(picker.paint, Paint::rgba(0.0, 0.5, 0.0, 1.0));
+    }
+
+    #[test]
+    fn drag_payload_identifies_its_control() {
+        let drag = ColorPickerDrag {
+            control: ColorPickerControl::Channel(1),
+        };
+
+        assert_eq!(drag.control, ColorPickerControl::Channel(1));
+        assert_ne!(drag.control, ColorPickerControl::Wheel);
+    }
+
+    #[test]
+    fn keyboard_navigation_adjusts_controls_and_can_return_to_hex() {
+        let mut picker = ColorPickerState::new(Paint::black());
+        picker.focus_next(false);
+
+        assert_eq!(picker.keyboard_focus, ColorPickerKeyboardFocus::Wheel);
+        assert!(picker.handle_arrow("up", false));
+        assert!((picker.hsv[1] - 0.01).abs() < 0.000_1);
+        assert!(picker.handle_arrow("right", false));
+        assert!((picker.hsv[0] - 1.0).abs() < 0.000_1);
+
+        picker.focus_hex_input();
+        assert!(picker.accepts_text_input());
     }
 }
