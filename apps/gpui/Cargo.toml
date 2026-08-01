@@ -51,4 +51,5 @@ license-file = "../../LICENSE"
 formats = ["app"]
 
 [package.metadata.packager.macos]
+minimum-system-version = "12.3"
 signing-identity = "-"

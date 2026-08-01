@@ -158,6 +158,15 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  # Build one signed and notarized installer that runs natively on both Apple
+  # Silicon and Intel. This is maintained alongside the generated dist jobs
+  # because cargo-packager does not produce macOS .pkg installers itself.
+  build-macos-pkg:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    uses: ./.github/workflows/macos-pkg.yml
+    secrets: inherit
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
@@ -212,8 +221,9 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - build-macos-pkg
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && needs.build-macos-pkg.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

@@ -68,9 +68,10 @@ just run
 ## Install
 
 Strek is currently a private preview. Collaborators can download the Apple
-Silicon or Intel macOS archive from the repository's private GitHub Releases.
-There is no public installer or Homebrew formula yet. Everyone else should run
-from source or create a local app bundle as described below.
+Silicon/Intel universal macOS installer from the repository's private GitHub
+Releases. The installer is Developer ID-signed and notarized by Apple. There is
+no public download page or Homebrew formula yet. Everyone else should run from
+source or create a local package as described below.
 
 ## Automation
 
@@ -199,17 +200,20 @@ private.
 
 ## Package for macOS
 
-The GPUI package metadata produces an ad-hoc-signed, architecture-specific
-macOS application bundle for local testing. Install the packager once, then
-build the bundle:
+The GPUI package metadata and packaging script produce a universal macOS
+application and installer. Install the pinned packager once, then run a local
+unsigned structure test:
 
 ```sh
-cargo install cargo-packager --locked
-cargo packager -p strek --release --formats app
+cargo install cargo-packager --version 0.11.8 --locked
+.github/scripts/package-macos-pkg.sh --unsigned
 ```
 
-The bundle is written below `target/release/`. Signing, notarization, and a
-second architecture must be added and tested before distributing it publicly.
+Unsigned local packages must not be distributed. Production packages are built
+in GitHub Actions, signed with separate Developer ID Application and Installer
+certificates, notarized, stapled, verified, and attached to tagged releases.
+See [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the one-time Apple and
+GitHub credential setup, manual test workflow, and release procedure.
 
 The workspace is split by responsibility:
 
