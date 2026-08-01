@@ -48,8 +48,49 @@ const EXECUTION_HEARTBEAT: Duration = Duration::from_millis(250);
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AutomationRequest {
     State,
+    Document,
+    NewDocument {
+        #[serde(default)]
+        discard_changes: bool,
+    },
+    OpenDocument {
+        path: String,
+        #[serde(default)]
+        discard_changes: bool,
+    },
+    SaveDocument {
+        path: String,
+    },
+    Export {
+        format: ArtifactFormat,
+        #[serde(default)]
+        path: Option<String>,
+    },
     Action {
         id: String,
+    },
+    Select {
+        ids: Vec<String>,
+        #[serde(default)]
+        mode: SelectionMode,
+    },
+    SetColor {
+        target: ColorTarget,
+        #[serde(default)]
+        color: Option<String>,
+    },
+    SetNumericProperty {
+        target: NumericProperty,
+        value: f32,
+    },
+    SetLayerProperties {
+        ids: Vec<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        visible: Option<bool>,
+        #[serde(default)]
+        locked: Option<bool>,
     },
     Pointer {
         phase: PointerPhase,
@@ -68,6 +109,111 @@ pub(crate) enum AutomationRequest {
         visible: bool,
     },
     Activate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ArtifactFormat {
+    Svg,
+    SvgOutlined,
+    Png,
+    Jpeg,
+    WebP,
+}
+
+impl FromStr for ArtifactFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "svg" => Ok(Self::Svg),
+            "svg-outlined" | "svg_outlined" => Ok(Self::SvgOutlined),
+            "png" => Ok(Self::Png),
+            "jpeg" | "jpg" => Ok(Self::Jpeg),
+            "webp" => Ok(Self::WebP),
+            _ => Err(format!(
+                "unknown export format `{value}`; use svg, svg-outlined, png, jpeg, or webp"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SelectionMode {
+    #[default]
+    Replace,
+    Add,
+    Remove,
+    Toggle,
+}
+
+impl FromStr for SelectionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "replace" => Ok(Self::Replace),
+            "add" => Ok(Self::Add),
+            "remove" => Ok(Self::Remove),
+            "toggle" => Ok(Self::Toggle),
+            _ => Err(format!(
+                "unknown selection mode `{value}`; use replace, add, remove, or toggle"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ColorTarget {
+    Fill,
+    Stroke,
+}
+
+impl FromStr for ColorTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fill" => Ok(Self::Fill),
+            "stroke" => Ok(Self::Stroke),
+            _ => Err(format!(
+                "unknown color target `{value}`; use fill or stroke"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NumericProperty {
+    WorldX,
+    WorldY,
+    Opacity,
+    StrokeWidth,
+    TextSize,
+    LayoutSpacing,
+    LayoutPadding,
+}
+
+impl FromStr for NumericProperty {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "x" | "world-x" | "world_x" => Ok(Self::WorldX),
+            "y" | "world-y" | "world_y" => Ok(Self::WorldY),
+            "opacity" => Ok(Self::Opacity),
+            "stroke-width" | "stroke_width" => Ok(Self::StrokeWidth),
+            "text-size" | "text_size" => Ok(Self::TextSize),
+            "layout-spacing" | "layout_spacing" => Ok(Self::LayoutSpacing),
+            "layout-padding" | "layout_padding" => Ok(Self::LayoutPadding),
+            _ => Err(format!(
+                "unknown numeric property `{value}`; use x, y, opacity, stroke-width, text-size, layout-spacing, or layout-padding"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -161,6 +307,10 @@ pub(crate) struct AutomationResponse {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<AutomationState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<AutomationDocument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<AutomationArtifact>,
 }
 
 impl AutomationResponse {
@@ -169,6 +319,8 @@ impl AutomationResponse {
             ok: true,
             message: Some(message.into()),
             state: Some(state),
+            document: None,
+            artifact: None,
         }
     }
 
@@ -177,6 +329,8 @@ impl AutomationResponse {
             ok: false,
             message: Some(message.into()),
             state: Some(state),
+            document: None,
+            artifact: None,
         }
     }
 
@@ -189,6 +343,42 @@ impl AutomationResponse {
                 .unwrap_or_else(|| "Strek rejected the automation request".to_owned()))
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationDocument {
+    pub root_id: String,
+    pub layers: Vec<AutomationLayer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationLayer {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub child_ids: Vec<String>,
+    pub name: String,
+    pub kind: String,
+    pub visible: bool,
+    pub locked: bool,
+    pub selected: bool,
+    pub opacity: f32,
+    pub fill: Option<String>,
+    pub stroke: Option<AutomationStroke>,
+    pub world_bounds: Option<AutomationBounds>,
+    pub world_transform: [f32; 6],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationStroke {
+    pub color: String,
+    pub width: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationArtifact {
+    pub format: String,
+    pub media_type: String,
+    pub base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,6 +1014,8 @@ fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> 
             ok: false,
             message: Some(message.into()),
             state: None,
+            document: None,
+            artifact: None,
         },
     )
 }
@@ -842,12 +1034,15 @@ fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>>
     let fallback = AutomationResponse {
         ok: response.ok,
         message: Some(if response.ok {
-            "request completed, but its state exceeded the automation response limit".to_owned()
+            "request completed, but its response payload exceeded the automation response limit"
+                .to_owned()
         } else {
             "request was rejected, but its details exceeded the automation response limit"
                 .to_owned()
         }),
         state: None,
+        document: None,
+        artifact: None,
     };
     let mut bytes = serde_json::to_vec(&fallback).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -942,6 +1137,42 @@ fn parse_request(
 ) -> Result<AutomationRequest, String> {
     match command.as_str() {
         "state" => no_more_args(args, AutomationRequest::State),
+        "document" => no_more_args(args, AutomationRequest::Document),
+        "new" => {
+            let discard_changes = match args.next().as_deref() {
+                None => false,
+                Some("--discard") => true,
+                Some(argument) => return Err(format!("unknown new option `{argument}`")),
+            };
+            no_more_args(
+                args,
+                AutomationRequest::NewDocument { discard_changes },
+            )
+        }
+        "open" => {
+            let path = next_value(args, "document path")?;
+            let discard_changes = match args.next().as_deref() {
+                None => false,
+                Some("--discard") => true,
+                Some(argument) => return Err(format!("unknown open option `{argument}`")),
+            };
+            no_more_args(
+                args,
+                AutomationRequest::OpenDocument {
+                    path,
+                    discard_changes,
+                },
+            )
+        }
+        "save" => {
+            let path = next_value(args, "document path")?;
+            no_more_args(args, AutomationRequest::SaveDocument { path })
+        }
+        "export" => {
+            let format = next_value(args, "export format")?.parse::<ArtifactFormat>()?;
+            let path = args.next();
+            no_more_args(args, AutomationRequest::Export { format, path })
+        }
         "activate" => no_more_args(args, AutomationRequest::Activate),
         "action" => {
             let id = args
@@ -949,10 +1180,53 @@ fn parse_request(
                 .ok_or_else(|| "usage: strek automate action <command-id>".to_owned())?;
             no_more_args(args, AutomationRequest::Action { id })
         }
+        "select" => {
+            let mode = next_value(args, "selection mode")?.parse::<SelectionMode>()?;
+            let ids = args.by_ref().collect::<Vec<_>>();
+            Ok(AutomationRequest::Select { ids, mode })
+        }
+        "color" => {
+            let target = next_value(args, "color target")?.parse::<ColorTarget>()?;
+            let value = next_value(args, "HEX color or none")?;
+            let color = (!value.eq_ignore_ascii_case("none")).then_some(value);
+            no_more_args(args, AutomationRequest::SetColor { target, color })
+        }
+        "property" => {
+            let target = next_value(args, "property target")?.parse::<NumericProperty>()?;
+            let value = parse_number(next_value(args, "property value")?, "property value")?;
+            no_more_args(
+                args,
+                AutomationRequest::SetNumericProperty { target, value },
+            )
+        }
+        "layer" => {
+            let id = next_value(args, "layer ID")?;
+            let mut name = None;
+            let mut visible = None;
+            let mut locked = None;
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--name" => name = Some(next_value(args, "layer name")?),
+                    "--visible" => {
+                        visible = Some(parse_bool(next_value(args, "visible")?, "visible")?);
+                    }
+                    "--locked" => {
+                        locked = Some(parse_bool(next_value(args, "locked")?, "locked")?);
+                    }
+                    _ => return Err(format!("unknown layer option `{option}`")),
+                }
+            }
+            Ok(AutomationRequest::SetLayerProperties {
+                ids: vec![id],
+                name,
+                visible,
+                locked,
+            })
+        }
         "pointer" => {
             let phase = next_value(args, "pointer phase")?.parse()?;
-            let x = parse_number(next_value(args, "pointer x")?, "x")?;
-            let y = parse_number(next_value(args, "pointer y")?, "y")?;
+            let x = parse_number(next_value(args, "pointer x")?, "x coordinate")?;
+            let y = parse_number(next_value(args, "pointer y")?, "y coordinate")?;
             let button = args
                 .next()
                 .map(|button| button.parse())
@@ -987,7 +1261,7 @@ fn parse_request(
             no_more_args(args, AutomationRequest::SetUi { target, visible })
         }
         _ => Err(format!(
-            "unknown automation command `{command}`; use state, action, pointer, text, ui, activate, or screenshot"
+            "unknown automation command `{command}`; use state, document, new, open, save, export, action, select, color, property, layer, pointer, text, ui, activate, or screenshot"
         )),
     }
 }
@@ -1010,11 +1284,19 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 fn parse_number(value: String, name: &str) -> Result<f32, String> {
     let value = value
         .parse::<f32>()
-        .map_err(|_| format!("invalid {name} coordinate `{value}`"))?;
+        .map_err(|_| format!("invalid {name} `{value}`"))?;
     value
         .is_finite()
         .then_some(value)
-        .ok_or_else(|| format!("{name} coordinate must be finite"))
+        .ok_or_else(|| format!("{name} must be finite"))
+}
+
+fn parse_bool(value: String, name: &str) -> Result<bool, String> {
+    match value.as_str() {
+        "true" | "show" | "on" => Ok(true),
+        "false" | "hide" | "off" => Ok(false),
+        _ => Err(format!("{name} must be true or false")),
+    }
 }
 
 pub(crate) fn capture_screenshot() -> Result<Vec<u8>, String> {
@@ -1194,6 +1476,65 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_document_and_semantic_editing_requests() {
+        let mut no_args = std::iter::empty();
+        assert!(matches!(
+            parse_request("document".to_owned(), &mut no_args),
+            Ok(AutomationRequest::Document)
+        ));
+
+        let mut args = ["add", "node-0000000000000001"]
+            .into_iter()
+            .map(str::to_owned);
+        assert!(matches!(
+            parse_request("select".to_owned(), &mut args),
+            Ok(AutomationRequest::Select {
+                mode: SelectionMode::Add,
+                ids
+            }) if ids == ["node-0000000000000001"]
+        ));
+
+        let mut args = ["fill", "#336699cc"].into_iter().map(str::to_owned);
+        assert!(matches!(
+            parse_request("color".to_owned(), &mut args),
+            Ok(AutomationRequest::SetColor {
+                target: ColorTarget::Fill,
+                color: Some(color)
+            }) if color == "#336699cc"
+        ));
+
+        let mut args = ["opacity", "0.5"].into_iter().map(str::to_owned);
+        assert!(matches!(
+            parse_request("property".to_owned(), &mut args),
+            Ok(AutomationRequest::SetNumericProperty {
+                target: NumericProperty::Opacity,
+                value: 0.5
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_export_supports_inline_and_explicit_path_results() {
+        let mut inline = ["png"].into_iter().map(str::to_owned);
+        assert!(matches!(
+            parse_request("export".to_owned(), &mut inline),
+            Ok(AutomationRequest::Export {
+                format: ArtifactFormat::Png,
+                path: None
+            })
+        ));
+
+        let mut to_path = ["svg", "/tmp/logo.svg"].into_iter().map(str::to_owned);
+        assert!(matches!(
+            parse_request("export".to_owned(), &mut to_path),
+            Ok(AutomationRequest::Export {
+                format: ArtifactFormat::Svg,
+                path: Some(path)
+            }) if path == "/tmp/logo.svg"
+        ));
+    }
+
+    #[test]
     fn expired_pending_request_never_executes() {
         let (responder, response) = std::sync::mpsc::sync_channel(1);
         let executed = Cell::new(false);
@@ -1238,6 +1579,8 @@ mod tests {
                     ok: true,
                     message: None,
                     state: None,
+                    document: None,
+                    artifact: None,
                 }
             })
         });
@@ -1278,6 +1621,8 @@ mod tests {
                 ok: true,
                 message: None,
                 state: None,
+                document: None,
+                artifact: None,
             })
             .unwrap();
 
@@ -1346,6 +1691,8 @@ mod tests {
             ok: true,
             message: Some("x".repeat(MAX_RESPONSE_BYTES)),
             state: None,
+            document: None,
+            artifact: None,
         };
 
         let line = serialize_response_line(&response).unwrap();

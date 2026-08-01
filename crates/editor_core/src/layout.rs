@@ -153,6 +153,14 @@ impl Edges {
         }
     }
 
+    /// Return the shared edge value when all four edges are equal.
+    pub fn uniform_value(self) -> Option<f32> {
+        [self.top, self.right, self.bottom]
+            .into_iter()
+            .all(|edge| (edge - self.left).abs() <= f32::EPSILON)
+            .then_some(self.left)
+    }
+
     /// Create symmetric padding (horizontal, vertical).
     pub fn symmetric(horizontal: f32, vertical: f32) -> Self {
         Self {

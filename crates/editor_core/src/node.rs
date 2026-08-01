@@ -1,6 +1,6 @@
 use glam::Affine2;
 use serde::{Deserialize, Serialize};
-use slotmap::new_key_type;
+use slotmap::{new_key_type, Key, KeyData};
 
 use crate::layout::AutoLayout;
 use crate::path::PathData;
@@ -11,6 +11,24 @@ new_key_type! {
     /// Stable identifier for nodes in the document.
     /// Uses generational indexing to detect stale references.
     pub struct NodeId;
+}
+
+impl NodeId {
+    /// Convert this key into an opaque session-stable handle for external APIs.
+    ///
+    /// The value must only be converted back with [`Self::from_opaque`]. Its
+    /// numeric layout is intentionally not part of the editor's public model.
+    pub fn to_opaque(self) -> u64 {
+        self.data().as_ffi()
+    }
+
+    /// Reconstruct a key previously returned by [`Self::to_opaque`].
+    ///
+    /// Arbitrary values are safe to construct but will not resolve unless they
+    /// identify a live node in the current document.
+    pub fn from_opaque(value: u64) -> Self {
+        KeyData::from_ffi(value).into()
+    }
 }
 
 /// The type-specific data for a node.
@@ -488,6 +506,15 @@ impl Node {
 mod tests {
     use super::*;
     use crate::path::PathData;
+    use slotmap::SlotMap;
+
+    #[test]
+    fn opaque_node_ids_round_trip_without_exposing_key_layout() {
+        let mut nodes: SlotMap<NodeId, ()> = SlotMap::with_key();
+        let id = nodes.insert(());
+
+        assert_eq!(NodeId::from_opaque(id.to_opaque()), id);
+    }
 
     #[test]
     fn test_create_group() {

@@ -623,6 +623,9 @@ pub struct Editor {
     /// Live numeric property edit, kept outside document history until commit.
     numeric_property_scrub: Option<NumericPropertyScrubState>,
 
+    /// Whether subsequent compatible nudges belong to the current key-repeat sequence.
+    nudge_sequence_active: bool,
+
     /// Per-editor identity carried by opaque numeric property scrub tokens.
     numeric_property_scrub_owner: Arc<()>,
 
@@ -657,6 +660,7 @@ impl Editor {
             tool: Tool::Select,
             creation_styles: CreationStyleDefaults::default(),
             numeric_property_scrub: None,
+            nudge_sequence_active: false,
             numeric_property_scrub_owner: Arc::new(()),
             next_numeric_property_scrub_id: 1,
             drag: DragState::None,
@@ -718,6 +722,10 @@ impl Editor {
     pub fn execute_action(&mut self, action: EditorAction) -> bool {
         if !self.can_execute(action) {
             return false;
+        }
+
+        if action.nudge_spec().is_none() {
+            self.finish_nudge_sequence();
         }
 
         if !matches!(action, EditorAction::Undo | EditorAction::Redo) {
@@ -1544,6 +1552,58 @@ impl Editor {
         self.needs_redraw = true;
     }
 
+    /// Set a layer's visibility to an explicit value with undo support.
+    pub fn set_layer_visible(&mut self, id: NodeId, visible: bool) -> bool {
+        let Some(before) = self
+            .document
+            .get(id)
+            .filter(|node| !node.deleted)
+            .map(|node| node.visible)
+        else {
+            return false;
+        };
+        if id == self.document.root || before == visible {
+            return false;
+        }
+        self.settle_interaction();
+        let command = Command::new("Change Visibility").with_patch(Patch::SetVisible {
+            id,
+            before,
+            after: visible,
+        });
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.prune_selection();
+        self.needs_redraw = true;
+        true
+    }
+
+    /// Set a layer's locked state to an explicit value with undo support.
+    pub fn set_layer_locked(&mut self, id: NodeId, locked: bool) -> bool {
+        let Some(before) = self
+            .document
+            .get(id)
+            .filter(|node| !node.deleted)
+            .map(|node| node.locked)
+        else {
+            return false;
+        };
+        if id == self.document.root || before == locked {
+            return false;
+        }
+        self.settle_interaction();
+        let command = Command::new("Change Lock").with_patch(Patch::SetLocked {
+            id,
+            before,
+            after: locked,
+        });
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.prune_selection();
+        self.needs_redraw = true;
+        true
+    }
+
     /// Select a node from the layer panel, or toggle it in a multi-selection.
     pub fn select_layer(&mut self, id: NodeId, toggle_selection: bool) {
         if !self.document.is_effectively_editable(id) {
@@ -1556,6 +1616,24 @@ impl Editor {
             self.selection.select(id);
         }
         self.needs_redraw = true;
+    }
+
+    /// Replace the selection with the supplied editable layer IDs.
+    pub fn set_layer_selection(&mut self, ids: impl IntoIterator<Item = NodeId>) -> bool {
+        let ids = ids
+            .into_iter()
+            .filter(|id| self.document.is_effectively_editable(*id))
+            .collect::<Vec<_>>();
+        let before = self.selection.to_vec();
+        let mut after = Selection::new();
+        after.set(ids);
+        if before == after.to_vec() {
+            return false;
+        }
+        self.settle_interaction();
+        self.selection = after;
+        self.needs_redraw = true;
+        true
     }
 
     /// Rename a layer with undo support.
@@ -4841,6 +4919,11 @@ impl Editor {
         self.translate_selection(delta, "Nudge");
     }
 
+    /// End the current repeated-key nudge sequence.
+    pub fn finish_nudge_sequence(&mut self) {
+        self.nudge_sequence_active = false;
+    }
+
     fn translate_selection(&mut self, delta: Vec2, description: &'static str) -> bool {
         if !delta.is_finite() || delta.length_squared() <= f32::EPSILON {
             return false;
@@ -4873,8 +4956,15 @@ impl Editor {
             }
 
             // Record in history
-            self.history
-                .push(Command::new(description).with_patches(patches));
+            let command = Command::new(description).with_patches(patches);
+            if description == "Nudge" && self.nudge_sequence_active {
+                self.history.push_or_coalesce_transforms(command);
+            } else {
+                self.history.push(command);
+            }
+            if description == "Nudge" {
+                self.nudge_sequence_active = true;
+            }
 
             self.document.dirty.transforms = true;
             self.document.dirty.bounds = true;
@@ -6108,6 +6198,22 @@ impl Editor {
         &self.document
     }
 
+    /// Return a live node's world transform for inspection surfaces.
+    pub fn layer_world_transform(&mut self, id: NodeId) -> Option<Affine2> {
+        if self.document.get(id).is_none_or(|node| node.deleted) {
+            return None;
+        }
+        Some(self.document.world_transform(id))
+    }
+
+    /// Return a live node's world bounds for inspection surfaces.
+    pub fn layer_world_bounds(&mut self, id: NodeId) -> Option<Rect> {
+        if self.document.get(id).is_none_or(|node| node.deleted) {
+            return None;
+        }
+        self.document.world_bounds(id)
+    }
+
     /// Install platform-shaped text layouts before building bounds and display geometry.
     pub fn set_text_layouts(&mut self, layouts: HashMap<NodeId, crate::text::TextLayout>) {
         self.document.set_text_layouts(layouts);
@@ -6839,6 +6945,68 @@ impl Editor {
         TransformComponents::from_affine(self.document.world_transform(id))
     }
 
+    /// Return the primary value represented by a numeric inspector control.
+    pub fn numeric_property_value(&mut self, target: NumericPropertyTarget) -> Option<f32> {
+        let id = self.selection.primary()?;
+        match target {
+            NumericPropertyTarget::WorldX if self.selection.len() == 1 => {
+                Some(self.selected_transform_components()?.translation.x)
+            }
+            NumericPropertyTarget::WorldY if self.selection.len() == 1 => {
+                Some(self.selected_transform_components()?.translation.y)
+            }
+            NumericPropertyTarget::WorldX => Some(self.selection_world_bounds()?.min.x),
+            NumericPropertyTarget::WorldY => Some(self.selection_world_bounds()?.min.y),
+            NumericPropertyTarget::Opacity => self.document.get(id).map(|node| node.style.opacity),
+            NumericPropertyTarget::StrokeWidth => self
+                .document
+                .get(id)
+                .and_then(|node| node.style.stroke.as_ref().map(|stroke| stroke.width)),
+            NumericPropertyTarget::TextSize => {
+                self.document.get(id).and_then(|node| match &node.kind {
+                    NodeKind::Text(text) => Some(text.font_size),
+                    _ => None,
+                })
+            }
+            NumericPropertyTarget::AutoLayoutSpacing => self
+                .selected_group_layout()?
+                .as_auto()
+                .map(|layout| layout.spacing),
+            NumericPropertyTarget::AutoLayoutPadding => self
+                .selected_group_layout()?
+                .as_auto()
+                .and_then(|layout| layout.padding.uniform_value()),
+        }
+        .filter(|value| value.is_finite())
+    }
+
+    /// Set a numeric inspector property to an absolute value.
+    pub fn set_numeric_property(&mut self, target: NumericPropertyTarget, value: f32) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        match target {
+            NumericPropertyTarget::WorldX | NumericPropertyTarget::WorldY => {
+                let Some(current) = self.numeric_property_value(target) else {
+                    return false;
+                };
+                let delta = match target {
+                    NumericPropertyTarget::WorldX => Vec2::new(value - current, 0.0),
+                    NumericPropertyTarget::WorldY => Vec2::new(0.0, value - current),
+                    _ => unreachable!(),
+                };
+                self.move_selection_by(delta)
+            }
+            NumericPropertyTarget::Opacity => self.set_selected_opacity(value),
+            NumericPropertyTarget::StrokeWidth => self.set_selected_stroke_width(value),
+            NumericPropertyTarget::TextSize => self.set_selected_text_size(value),
+            NumericPropertyTarget::AutoLayoutSpacing => self.set_selected_group_spacing(value),
+            NumericPropertyTarget::AutoLayoutPadding => {
+                self.set_selected_group_uniform_padding(value)
+            }
+        }
+    }
+
     /// Change the selected group between free, horizontal, and vertical layout.
     ///
     /// Crossing the free/automatic boundary bakes or removes derived layout
@@ -7045,6 +7213,16 @@ impl Editor {
         })
     }
 
+    /// Set or remove the stroke for every independently selected layer.
+    pub fn set_selected_stroke(&mut self, paint: Option<Paint>) -> bool {
+        self.update_selected_styles("Change Stroke", move |style| match &paint {
+            Some(paint) => {
+                style.stroke.get_or_insert_with(|| Stroke::black(1.0)).paint = paint.clone();
+            }
+            None => style.stroke = None,
+        })
+    }
+
     /// Normalize stroke presence across every independently selected layer.
     ///
     /// If every selected layer has a stroke, all strokes are removed. A mixed
@@ -7077,6 +7255,20 @@ impl Editor {
         self.update_selected_styles("Change Stroke Width", |style| {
             let stroke = style.stroke.get_or_insert_with(|| Stroke::black(1.0));
             stroke.width = (stroke.width + delta).clamp(0.1, 1000.0);
+        })
+    }
+
+    /// Set selected stroke widths, creating a default stroke when absent.
+    pub fn set_selected_stroke_width(&mut self, width: f32) -> bool {
+        if !width.is_finite() {
+            return false;
+        }
+        let width = width.clamp(0.1, 1000.0);
+        self.update_selected_styles("Change Stroke Width", |style| {
+            style
+                .stroke
+                .get_or_insert_with(|| Stroke::black(width))
+                .width = width;
         })
     }
 
@@ -7115,6 +7307,16 @@ impl Editor {
     pub fn adjust_selected_text_size(&mut self, delta: f32) -> bool {
         self.update_selected_text("Change Text Size", |text| {
             text.font_size = (text.font_size + delta).clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE);
+        })
+    }
+
+    /// Set the selected text size as one undoable property edit.
+    pub fn set_selected_text_size(&mut self, size: f32) -> bool {
+        if !size.is_finite() {
+            return false;
+        }
+        self.update_selected_text("Change Text Size", |text| {
+            text.font_size = size.clamp(MIN_TEXT_DIMENSION, MAX_TEXT_FONT_SIZE);
         })
     }
 
@@ -8248,6 +8450,27 @@ mod tests {
     }
 
     #[test]
+    fn absolute_numeric_position_moves_multi_selection_from_its_bounds() {
+        let (mut editor, ids) = editor_with_named_shapes(&["First", "Second"]);
+        editor.document.get_mut(ids[0]).unwrap().transform =
+            Affine2::from_translation(Vec2::new(10.0, 20.0));
+        editor.document.get_mut(ids[1]).unwrap().transform =
+            Affine2::from_translation(Vec2::new(40.0, 30.0));
+        editor.document.dirty.mark_all_dirty();
+        editor.selection.set(ids);
+
+        assert_eq!(
+            editor.numeric_property_value(NumericPropertyTarget::WorldX),
+            Some(10.0)
+        );
+        assert!(editor.set_numeric_property(NumericPropertyTarget::WorldX, 100.0));
+        assert_eq!(editor.selection_world_bounds().unwrap().min.x, 100.0);
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(editor.selection_world_bounds().unwrap().min.x, 10.0);
+    }
+
+    #[test]
     fn mixed_stroke_toggle_normalizes_presence_instead_of_inverting_each_layer() {
         let (mut editor, ids) = editor_with_named_shapes(&["Stroked", "Plain"]);
         editor.document.get_mut(ids[0]).unwrap().style.stroke = Some(Stroke::black(3.0));
@@ -8970,6 +9193,39 @@ mod tests {
             let after = editor.document.world_transform(shape).translation;
             assert!((after - before - expected_delta).length() < 0.0001);
         }
+    }
+
+    #[test]
+    fn repeated_nudges_share_one_undo_step() {
+        let mut editor = Editor::new();
+        let shape = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+
+        assert!(editor.execute_action(EditorAction::NudgeRight));
+        assert!(editor.execute_action(EditorAction::NudgeRight));
+        assert!(editor.execute_action(EditorAction::NudgeDownLarge));
+        assert_eq!(editor.history.undo_count(), 1);
+        assert_eq!(
+            editor.document.world_transform(shape).translation,
+            Vec2::new(2.0, 10.0)
+        );
+
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert_eq!(
+            editor.document.world_transform(shape).translation,
+            Vec2::ZERO
+        );
+
+        assert!(editor.execute_action(EditorAction::Redo));
+        editor.finish_nudge_sequence();
+        assert!(editor.execute_action(EditorAction::NudgeLeft));
+        assert_eq!(editor.history.undo_count(), 2);
     }
 
     #[test]

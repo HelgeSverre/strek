@@ -50,9 +50,76 @@ on strekState()
     return my runStrek({"state"})
 end strekState
 
+on strekDocument()
+    return my runStrek({"document"})
+end strekDocument
+
+on strekActivate()
+    return my runStrek({"activate"})
+end strekActivate
+
+on strekNew(discardChanges)
+    if discardChanges then
+        return my runStrek({"new", "--discard"})
+    end if
+    return my runStrek({"new"})
+end strekNew
+
+on strekOpen(documentPath, discardChanges)
+    if discardChanges then
+        return my runStrek({"open", documentPath, "--discard"})
+    end if
+    return my runStrek({"open", documentPath})
+end strekOpen
+
+on strekSave(documentPath)
+    return my runStrek({"save", documentPath})
+end strekSave
+
+on strekExport(formatName, outputPath)
+    if outputPath is missing value then
+        return my runStrek({"export", formatName})
+    end if
+    return my runStrek({"export", formatName, outputPath})
+end strekExport
+
 on strekAction(commandId)
     return my runStrek({"action", commandId})
 end strekAction
+
+on strekSelect(selectionMode, layerIds)
+    set commandArguments to {"select", selectionMode}
+    repeat with layerId in layerIds
+        set end of commandArguments to layerId as text
+    end repeat
+    return my runStrek(commandArguments)
+end strekSelect
+
+on strekColor(targetName, colorValue)
+    if colorValue is missing value then set colorValue to "none"
+    return my runStrek({"color", targetName, colorValue})
+end strekColor
+
+on strekProperty(targetName, propertyValue)
+    return my runStrek({"property", targetName, my invariantNumber(propertyValue)})
+end strekProperty
+
+on strekLayer(layerId, nameValue, visibleValue, lockedValue)
+    set commandArguments to {"layer", layerId}
+    if nameValue is not missing value then
+        set end of commandArguments to "--name"
+        set end of commandArguments to nameValue
+    end if
+    if visibleValue is not missing value then
+        set end of commandArguments to "--visible"
+        set end of commandArguments to visibleValue as text
+    end if
+    if lockedValue is not missing value then
+        set end of commandArguments to "--locked"
+        set end of commandArguments to lockedValue as text
+    end if
+    return my runStrek(commandArguments)
+end strekLayer
 
 on strekPointer(phase, x, y)
     set xText to my invariantNumber(x)

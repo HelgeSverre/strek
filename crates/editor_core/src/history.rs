@@ -78,6 +78,33 @@ impl History {
         }
     }
 
+    /// Push a transform command, merging it into the immediately preceding
+    /// compatible command with the same description when possible.
+    pub(crate) fn push_or_coalesce_transforms(&mut self, cmd: Command) {
+        if cmd.is_empty() {
+            return;
+        }
+
+        let merged = self.redo_stack.is_empty()
+            && self.undo_stack.last_mut().is_some_and(|entry| {
+                entry.command.description == cmd.description
+                    && entry.command.coalesce_transforms(&cmd)
+            });
+        if !merged {
+            self.push(cmd);
+            return;
+        }
+
+        let after_revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        let entry = self
+            .undo_stack
+            .last_mut()
+            .expect("a merged command has a history entry");
+        entry.after_revision = after_revision;
+        self.current_revision = after_revision;
+    }
+
     /// Undo the last command.
     /// Returns true if a command was undone.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
@@ -240,6 +267,66 @@ mod tests {
         history.push(cmd2);
 
         assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn compatible_transform_commands_coalesce_into_one_undo_step() {
+        let mut doc = Document::new();
+        let mut history = History::new();
+        let id = doc
+            .add_child(
+                doc.root,
+                Node::shape("Rect", PathData::rect(0.0, 0.0, 10.0, 10.0)),
+            )
+            .unwrap();
+        let first = Affine2::from_translation(Vec2::X);
+        let second = Affine2::from_translation(Vec2::new(2.0, 0.0));
+
+        let first_command = Command::new("Nudge").with_patch(Patch::SetTransform {
+            id,
+            before: Affine2::IDENTITY,
+            after: first,
+        });
+        first_command.apply(&mut doc);
+        history.push_or_coalesce_transforms(first_command);
+
+        let second_command = Command::new("Nudge").with_patch(Patch::SetTransform {
+            id,
+            before: first,
+            after: second,
+        });
+        second_command.apply(&mut doc);
+        history.push_or_coalesce_transforms(second_command);
+
+        assert_eq!(history.undo_count(), 1);
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.get(id).unwrap().transform, Affine2::IDENTITY);
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.get(id).unwrap().transform, second);
+    }
+
+    #[test]
+    fn incompatible_transform_commands_start_a_new_undo_step() {
+        let mut history = History::new();
+        let first_id = crate::node::NodeId::default();
+        let second_id = crate::node::NodeId::from_opaque(2);
+
+        history.push_or_coalesce_transforms(Command::new("Nudge").with_patch(
+            Patch::SetTransform {
+                id: first_id,
+                before: Affine2::IDENTITY,
+                after: Affine2::from_translation(Vec2::X),
+            },
+        ));
+        history.push_or_coalesce_transforms(Command::new("Nudge").with_patch(
+            Patch::SetTransform {
+                id: second_id,
+                before: Affine2::IDENTITY,
+                after: Affine2::from_translation(Vec2::X),
+            },
+        ));
+
+        assert_eq!(history.undo_count(), 2);
     }
 
     #[test]

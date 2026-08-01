@@ -475,6 +475,58 @@ impl Command {
     pub fn is_empty(&self) -> bool {
         self.patches.is_empty()
     }
+
+    /// Extend a transform-only command with the final state from a newer one.
+    ///
+    /// Commands can only be coalesced when they affect the same nodes in the
+    /// same order and every newer `before` value continues from the current
+    /// `after` value. The original `before` values are retained for undo.
+    pub(crate) fn coalesce_transforms(&mut self, newer: &Self) -> bool {
+        if self.patches.is_empty() || self.patches.len() != newer.patches.len() {
+            return false;
+        }
+        let compatible = self
+            .patches
+            .iter()
+            .zip(&newer.patches)
+            .all(|(current, newer)| {
+                matches!(
+                    (current, newer),
+                    (
+                        Patch::SetTransform {
+                            id: current_id,
+                            after: current_after,
+                            ..
+                        },
+                        Patch::SetTransform {
+                            id: newer_id,
+                            before: newer_before,
+                            ..
+                        }
+                    ) if current_id == newer_id && current_after == newer_before
+                )
+            });
+        if !compatible {
+            return false;
+        }
+
+        for (current, newer) in self.patches.iter_mut().zip(&newer.patches) {
+            let (
+                Patch::SetTransform {
+                    after: current_after,
+                    ..
+                },
+                Patch::SetTransform {
+                    after: newer_after, ..
+                },
+            ) = (current, newer)
+            else {
+                unreachable!("compatibility check only accepts transform patches");
+            };
+            *current_after = *newer_after;
+        }
+        true
+    }
 }
 
 #[cfg(test)]

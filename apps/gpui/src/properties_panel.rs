@@ -41,6 +41,7 @@ pub(crate) struct PropertiesSnapshot {
     text: Option<TextData>,
     frame: Option<FrameData>,
     color_input: Option<ColorInputSnapshot>,
+    numeric_input: Option<NumericInputSnapshot>,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,13 @@ pub(crate) struct ColorInputSnapshot {
     pub invalid: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct NumericInputSnapshot {
+    pub target: NumericPropertyTarget,
+    pub value: String,
+    pub invalid: bool,
+}
+
 pub(crate) fn numeric_property_delta(
     target: NumericPropertyTarget,
     pointer_delta: f32,
@@ -107,6 +115,7 @@ fn numeric_property_element_id(target: NumericPropertyTarget) -> &'static str {
 pub(crate) fn snapshot(
     editor: &mut Editor,
     color_input: Option<ColorInputSnapshot>,
+    numeric_input: Option<NumericInputSnapshot>,
 ) -> PropertiesSnapshot {
     let bounds = editor.selection_world_bounds();
     let selected = editor.selection().iter().collect::<Vec<_>>();
@@ -181,6 +190,7 @@ pub(crate) fn snapshot(
         text,
         frame,
         color_input,
+        numeric_input,
     }
 }
 
@@ -241,6 +251,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
     let opacity = style.and_then(|style| style.opacity.uniform()).copied();
     let transform = snapshot.transform;
     let group_layout = snapshot.group_layout.clone();
+    let numeric_input = snapshot.numeric_input.as_ref();
 
     div()
         .id("properties-panel")
@@ -281,6 +292,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         "Move right",
                         NumericPropertyTarget::WorldX,
                         &editor_entity,
+                        numeric_input,
                     ))
                     .child(numeric_stepper(
                         "Y",
@@ -289,6 +301,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         "Move down",
                         NumericPropertyTarget::WorldY,
                         &editor_entity,
+                        numeric_input,
                     ))
                     .child(readonly_pair(
                         "W",
@@ -322,7 +335,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
             )
         })
         .when_some(group_layout, |panel, layout| {
-            panel.child(layout_section(layout, &editor_entity))
+            panel.child(layout_section(layout, &editor_entity, numeric_input))
         })
         .child(
             section("Appearance")
@@ -335,6 +348,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                     "Increase opacity",
                     NumericPropertyTarget::Opacity,
                     &editor_entity,
+                    numeric_input,
                 ))
                 .child(property_label("Fill"))
                 .child(color_value_editor(
@@ -441,6 +455,8 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                                 .then_some(stroke_width)
                                 .flatten()
                                 .map(|_| (NumericPropertyTarget::StrokeWidth, &editor_entity)),
+                            numeric_input
+                                .filter(|input| input.target == NumericPropertyTarget::StrokeWidth),
                         ))
                         .child(numeric_property_button(
                             "stroke-up",
@@ -479,6 +495,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         "Increase font size",
                         NumericPropertyTarget::TextSize,
                         &editor_entity,
+                        numeric_input,
                     ))
                     .child(action_stepper(
                         "Weight",
@@ -562,7 +579,11 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
         .into_any_element()
 }
 
-fn layout_section(layout: Layout, editor_entity: &WeakEntity<Strek>) -> gpui::Div {
+fn layout_section(
+    layout: Layout,
+    editor_entity: &WeakEntity<Strek>,
+    numeric_input: Option<&NumericInputSnapshot>,
+) -> gpui::Div {
     let (mode, auto_layout) = match layout {
         Layout::Free => (None, None),
         Layout::Auto(layout) => (Some(layout.direction), Some(layout)),
@@ -610,6 +631,7 @@ fn layout_section(layout: Layout, editor_entity: &WeakEntity<Strek>) -> gpui::Di
                     "Increase layout spacing",
                     NumericPropertyTarget::AutoLayoutSpacing,
                     editor_entity,
+                    numeric_input,
                 ))
                 .child(numeric_stepper(
                     "Padding",
@@ -620,6 +642,7 @@ fn layout_section(layout: Layout, editor_entity: &WeakEntity<Strek>) -> gpui::Di
                     "Increase uniform padding",
                     NumericPropertyTarget::AutoLayoutPadding,
                     editor_entity,
+                    numeric_input,
                 ))
         })
 }
@@ -776,7 +799,7 @@ fn action_stepper<A: Action + Clone, B: Action + Clone>(
     stepper_row(
         label,
         property_button("decrease", "−", decrease_tooltip, decrease).into_any_element(),
-        numeric_value(value, None),
+        numeric_value(value, None, None),
         property_button("increase", "+", increase_tooltip, increase).into_any_element(),
     )
 }
@@ -788,6 +811,7 @@ fn numeric_stepper(
     increase_tooltip: &'static str,
     target: NumericPropertyTarget,
     editor_entity: &WeakEntity<Strek>,
+    numeric_input: Option<&NumericInputSnapshot>,
 ) -> impl IntoElement {
     stepper_row(
         label,
@@ -800,7 +824,11 @@ fn numeric_stepper(
             editor_entity,
         )
         .into_any_element(),
-        numeric_value(value, Some((target, editor_entity))),
+        numeric_value(
+            value,
+            Some((target, editor_entity)),
+            numeric_input.filter(|input| input.target == target),
+        ),
         numeric_property_button(
             "increase",
             "+",
@@ -835,7 +863,33 @@ fn stepper_row(
 fn numeric_value(
     value: String,
     scrub: Option<(NumericPropertyTarget, &WeakEntity<Strek>)>,
+    input: Option<&NumericInputSnapshot>,
 ) -> AnyElement {
+    if let Some(input) = input {
+        return div()
+            .id(numeric_property_element_id(input.target))
+            .flex_1()
+            .h(px(26.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(SURFACE_RAISED))
+            .border_1()
+            .border_color(rgb(if input.invalid { 0xf24822 } else { ACCENT }))
+            .rounded(px(4.0))
+            .text_size(px(10.0))
+            .text_color(rgb(TEXT))
+            .cursor_text()
+            .child(input.value.clone())
+            .tooltip(editor_tooltip(
+                "Type a value and press Enter; Escape cancels",
+                None,
+            ))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .into_any_element();
+    }
+
     let value = div()
         .flex_1()
         .h(px(26.0))
@@ -856,18 +910,26 @@ fn numeric_value(
         .id(numeric_property_element_id(target))
         .cursor_col_resize()
         .tooltip(editor_tooltip(
-            "Drag horizontally to adjust; hold Shift for coarse clean numbers; Escape cancels",
+            "Drag horizontally to adjust; double-click to type; hold Shift for coarse clean numbers; Escape cancels",
             None,
         ))
         .on_mouse_down(MouseButton::Left, {
             let editor_entity = editor_entity.clone();
             move |event, window, cx| {
-                let pointer_x = event.position.x.0;
-                editor_entity
-                    .update(cx, |editor, cx| {
-                        editor.begin_numeric_property_scrub(target, pointer_x, window, cx);
-                    })
-                    .ok();
+                if event.click_count >= 2 {
+                    editor_entity
+                        .update(cx, |editor, cx| {
+                            editor.start_numeric_property_input(target, window, cx);
+                        })
+                        .ok();
+                } else {
+                    let pointer_x = event.position.x.0;
+                    editor_entity
+                        .update(cx, |editor, cx| {
+                            editor.begin_numeric_property_scrub(target, pointer_x, window, cx);
+                        })
+                        .ok();
+                }
                 cx.stop_propagation();
             }
         })
@@ -1218,7 +1280,7 @@ mod tests {
         assert!(editor.set_selected_text_font_weight(650));
         assert!(editor.set_selected_text_italic(true));
 
-        let typography = snapshot(&mut editor, None).text.unwrap().font;
+        let typography = snapshot(&mut editor, None, None).text.unwrap().font;
 
         assert_eq!(typography.family, "monospace");
         assert_eq!(typography.weight, 700);
@@ -1248,12 +1310,16 @@ mod tests {
         editor.selection.select(red);
         editor.selection.add(blue);
 
-        assert!(snapshot(&mut editor, None).style.unwrap().fill.is_mixed());
+        assert!(snapshot(&mut editor, None, None)
+            .style
+            .unwrap()
+            .fill
+            .is_mixed());
 
         editor.document.get_mut(blue).unwrap().style =
             editor.document.get(red).unwrap().style.clone();
         assert!(matches!(
-            snapshot(&mut editor, None).style.unwrap().fill,
+            snapshot(&mut editor, None, None).style.unwrap().fill,
             SelectionValue::Uniform(Some(_))
         ));
     }
@@ -1282,7 +1348,7 @@ mod tests {
         editor.selection.select(first);
         editor.selection.add(second);
 
-        let style = snapshot(&mut editor, None).style.unwrap();
+        let style = snapshot(&mut editor, None, None).style.unwrap();
         assert!(matches!(style.fill, SelectionValue::Uniform(Some(_))));
         assert!(matches!(
             style.stroke_enabled,
@@ -1323,7 +1389,7 @@ mod tests {
             .unwrap();
         editor.selection.select(group);
 
-        let snapshot = snapshot(&mut editor, None);
+        let snapshot = snapshot(&mut editor, None, None);
 
         let Some(Layout::Auto(snapshot_layout)) = snapshot.group_layout else {
             panic!("single group should expose auto-layout properties");

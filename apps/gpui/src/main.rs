@@ -23,6 +23,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::Engine as _;
 use editor_core::{
     Editor, EditorAction, NodeId, NodeKind, NumericAdjustmentDirection, NumericAdjustmentMode,
     NumericPropertyScrubSession, NumericPropertyTarget,
@@ -38,6 +39,9 @@ use gpui::{
 const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
 const MAX_AUTOMATION_SELECTED_LAYERS: usize = 10_000;
 const MAX_AUTOMATION_SELECTED_LAYER_BYTES: usize = 256 * 1024;
+const MAX_AUTOMATION_DOCUMENT_LAYERS: usize = 10_000;
+const MAX_AUTOMATION_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
+const MAX_INLINE_AUTOMATION_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 static OBJECT_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ARTWORK_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -272,6 +276,14 @@ struct ZoomInput {
     invalid: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NumericPropertyInput {
+    target: NumericPropertyTarget,
+    value: String,
+    replace_on_type: bool,
+    invalid: bool,
+}
+
 #[derive(Debug)]
 struct ActiveNumericPropertyScrub {
     session: NumericPropertyScrubSession,
@@ -316,6 +328,7 @@ struct Strek {
     command_palette: Option<Entity<command_palette::CommandPalette>>,
     property_color_input: Option<PropertyColorInput>,
     zoom_input: Option<ZoomInput>,
+    numeric_property_input: Option<NumericPropertyInput>,
     numeric_property_scrub: Option<ActiveNumericPropertyScrub>,
     focus_handle: FocusHandle,
     show_layers_panel: bool,
@@ -345,6 +358,7 @@ impl Strek {
             command_palette: None,
             property_color_input: None,
             zoom_input: None,
+            numeric_property_input: None,
             numeric_property_scrub: None,
             focus_handle: cx.focus_handle(),
             show_layers_panel: true,
@@ -393,6 +407,160 @@ impl Strek {
 
         let result = match request {
             AutomationRequest::State => Ok("state read".to_owned()),
+            AutomationRequest::Document => {
+                let state = self.automation_state(window);
+                return match self.automation_document() {
+                    Ok(document) => {
+                        let mut response =
+                            automation::AutomationResponse::success(state, "document read");
+                        response.document = Some(document);
+                        response
+                    }
+                    Err(error) => automation::AutomationResponse::error(state, error),
+                };
+            }
+            AutomationRequest::NewDocument { discard_changes } => {
+                if self.file_operation != FileOperation::Idle {
+                    Err("wait for the current file operation to finish".to_owned())
+                } else if self.document_is_dirty() && !discard_changes {
+                    Err("the document has unsaved changes; set discard_changes to true to replace it"
+                        .to_owned())
+                } else {
+                    self.reset_document();
+                    cx.notify();
+                    Ok("created a new document".to_owned())
+                }
+            }
+            AutomationRequest::OpenDocument {
+                path,
+                discard_changes,
+            } => {
+                if self.file_operation != FileOperation::Idle {
+                    Err("wait for the current file operation to finish".to_owned())
+                } else if self.document_is_dirty() && !discard_changes {
+                    Err("the document has unsaved changes; set discard_changes to true to replace it"
+                        .to_owned())
+                } else {
+                    let path = match automation_absolute_path(&path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return automation::AutomationResponse::error(
+                                self.automation_state(window),
+                                error,
+                            );
+                        }
+                    };
+                    match document_io::read_document(&path) {
+                        Ok(document_io::OpenedDocument::Native(document)) => {
+                            self.replace_document(document, path.clone());
+                            cx.notify();
+                            Ok(format!("opened {}", path.display()))
+                        }
+                        Ok(document_io::OpenedDocument::ImportedSvg(document)) => {
+                            self.replace_imported_document(document, path.clone());
+                            cx.notify();
+                            Ok(format!("imported {}", path.display()))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            }
+            AutomationRequest::SaveDocument { path } => {
+                if self.file_operation != FileOperation::Idle {
+                    Err("wait for the current file operation to finish".to_owned())
+                } else {
+                    self.settle_for_document_io();
+                    let path = match automation_absolute_path(&path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return automation::AutomationResponse::error(
+                                self.automation_state(window),
+                                error,
+                            );
+                        }
+                    };
+                    let path = if let Some(source) = self.document_origin.import_source_path() {
+                        document_io::normalize_imported_document_path(path, source)
+                    } else {
+                        Ok(document_io::normalize_document_path(path))
+                    };
+                    match path.and_then(|path| {
+                        let json = document_io::serialize_document(self.editor.document())?;
+                        document_io::write_document(&path, &json)?;
+                        Ok(path)
+                    }) {
+                        Ok(path) => {
+                            let revision = self.editor.current_revision();
+                            self.editor.mark_revision_saved(revision);
+                            self.document_origin = DocumentOrigin::Native(path.clone());
+                            self.recent_files.record(&path);
+                            cx.notify();
+                            Ok(format!("saved {}", path.display()))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            }
+            AutomationRequest::Export { format, path } => {
+                if self.file_operation != FileOperation::Idle {
+                    return automation::AutomationResponse::error(
+                        self.automation_state(window),
+                        "wait for the current file operation to finish",
+                    );
+                }
+                self.settle_for_document_io();
+                let Some(snapshot) = self.editor.artwork_snapshot() else {
+                    return automation::AutomationResponse::error(
+                        self.automation_state(window),
+                        "add visible artwork before exporting",
+                    );
+                };
+                let export_format = automation_export_format(format);
+                if let Some(path) = path {
+                    let path = match automation_absolute_path(&path) {
+                        Ok(path) => export::normalize_path(path, export_format),
+                        Err(error) => {
+                            return automation::AutomationResponse::error(
+                                self.automation_state(window),
+                                error,
+                            );
+                        }
+                    };
+                    let result = export::write_export(&path, export_format, &snapshot)
+                        .map(|()| format!("exported {}", path.display()))
+                        .map_err(|error| error.to_string());
+                    let state = self.automation_state(window);
+                    return match result {
+                        Ok(message) => automation::AutomationResponse::success(state, message),
+                        Err(error) => automation::AutomationResponse::error(state, error),
+                    };
+                }
+                let result = export::encode_artwork(export_format, &snapshot)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        if bytes.len() > MAX_INLINE_AUTOMATION_ARTIFACT_BYTES {
+                            return Err(format!(
+                                "encoded artifact is {} bytes; inline limit is {MAX_INLINE_AUTOMATION_ARTIFACT_BYTES} bytes, so export it to a path instead",
+                                bytes.len()
+                            ));
+                        }
+                        Ok(bytes)
+                    });
+                let state = self.automation_state(window);
+                return match result {
+                    Ok(bytes) => {
+                        let mut response =
+                            automation::AutomationResponse::success(state, "encoded artwork");
+                        response.artifact = Some(automation::AutomationArtifact {
+                            format: automation_artifact_name(format).to_owned(),
+                            media_type: automation_artifact_media_type(format).to_owned(),
+                            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        });
+                        response
+                    }
+                    Err(error) => automation::AutomationResponse::error(state, error),
+                };
+            }
             AutomationRequest::Action { id } => {
                 let Some(spec) = commands::command(&id) else {
                     return automation::AutomationResponse::error(
@@ -421,6 +589,78 @@ impl Strek {
                     Ok(format!("performed `{id}`"))
                 }
             }
+            AutomationRequest::Select { ids, mode } => {
+                match self.automation_selection(&ids, mode) {
+                    Ok(()) => {
+                        cx.notify();
+                        Ok(format!("updated selection using {mode:?} mode"))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            AutomationRequest::SetColor { target, color } => {
+                self.numeric_property_input = None;
+                if self.editor.selection().is_empty() {
+                    Err("select at least one layer before setting a color".to_owned())
+                } else {
+                    let paint = color
+                        .as_deref()
+                        .map(|color| {
+                            color_picker::parse_hex_paint(color).ok_or_else(|| {
+                                "color must be a 3, 4, 6, or 8 digit hexadecimal value".to_owned()
+                            })
+                        })
+                        .transpose();
+                    match paint {
+                        Ok(paint) => {
+                            match target {
+                                automation::ColorTarget::Fill => {
+                                    self.editor.set_selected_fill(paint);
+                                }
+                                automation::ColorTarget::Stroke => {
+                                    self.editor.set_selected_stroke(paint);
+                                }
+                            }
+                            cx.notify();
+                            Ok(format!("set selection {target:?} color"))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+            }
+            AutomationRequest::SetNumericProperty { target, value } => {
+                self.numeric_property_input = None;
+                let target = automation_numeric_property(target);
+                if !value.is_finite() {
+                    Err("numeric property value must be finite".to_owned())
+                } else if self.editor.selection().is_empty() {
+                    Err("select at least one layer before setting a property".to_owned())
+                } else if self.editor.set_numeric_property(target, value)
+                    || self
+                        .editor
+                        .numeric_property_value(target)
+                        .is_some_and(|current| (current - value).abs() <= f32::EPSILON)
+                {
+                    cx.notify();
+                    Ok(format!("set selection {target:?} to {value}"))
+                } else {
+                    Err(format!(
+                        "{target:?} is not available for the current selection"
+                    ))
+                }
+            }
+            AutomationRequest::SetLayerProperties {
+                ids,
+                name,
+                visible,
+                locked,
+            } => match self.set_automation_layer_properties(&ids, name, visible, locked) {
+                Ok(()) => {
+                    cx.notify();
+                    Ok("updated layer properties".to_owned())
+                }
+                Err(error) => Err(error),
+            },
             AutomationRequest::Pointer {
                 phase,
                 x,
@@ -694,6 +934,189 @@ impl Strek {
         }
     }
 
+    fn automation_document(&mut self) -> Result<automation::AutomationDocument, String> {
+        let root = self.editor.document().root;
+        let ids = std::iter::once(root)
+            .chain(self.editor.document().descendants(root))
+            .take(MAX_AUTOMATION_DOCUMENT_LAYERS + 1)
+            .collect::<Vec<_>>();
+        if ids.len() > MAX_AUTOMATION_DOCUMENT_LAYERS {
+            return Err(format!(
+                "document contains more than {MAX_AUTOMATION_DOCUMENT_LAYERS} automation-visible layers"
+            ));
+        }
+
+        let mut layers = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some((parent, children, name, kind, visible, locked, opacity, fill, stroke)) =
+                self.editor.document().get(id).and_then(|node| {
+                    (!node.deleted).then(|| {
+                        (
+                            node.parent,
+                            node.children.clone(),
+                            node.name.clone(),
+                            automation_node_kind(&node.kind).to_owned(),
+                            node.visible,
+                            node.locked,
+                            node.style.opacity,
+                            node.style.fill.as_ref().map(color_picker::format_paint),
+                            node.style
+                                .stroke
+                                .as_ref()
+                                .map(|stroke| automation::AutomationStroke {
+                                    color: color_picker::format_paint(&stroke.paint),
+                                    width: stroke.width,
+                                }),
+                        )
+                    })
+                })
+            else {
+                continue;
+            };
+            let world = self
+                .editor
+                .layer_world_transform(id)
+                .unwrap_or(glam::Affine2::IDENTITY);
+            let world_bounds =
+                self.editor
+                    .layer_world_bounds(id)
+                    .map(|bounds| automation::AutomationBounds {
+                        x: bounds.min.x,
+                        y: bounds.min.y,
+                        width: bounds.width(),
+                        height: bounds.height(),
+                    });
+            layers.push(automation::AutomationLayer {
+                id: automation_node_id(id),
+                parent_id: parent.map(automation_node_id),
+                child_ids: children.into_iter().map(automation_node_id).collect(),
+                name,
+                kind,
+                visible,
+                locked,
+                selected: self.editor.selection().contains(id),
+                opacity,
+                fill,
+                stroke,
+                world_bounds,
+                world_transform: [
+                    world.matrix2.x_axis.x,
+                    world.matrix2.x_axis.y,
+                    world.matrix2.y_axis.x,
+                    world.matrix2.y_axis.y,
+                    world.translation.x,
+                    world.translation.y,
+                ],
+            });
+        }
+
+        let document = automation::AutomationDocument {
+            root_id: automation_node_id(root),
+            layers,
+        };
+        let encoded_size = serde_json::to_vec(&document)
+            .map_err(|error| format!("could not encode document inspection: {error}"))?
+            .len();
+        if encoded_size > MAX_AUTOMATION_DOCUMENT_BYTES {
+            return Err(format!(
+                "document inspection is {encoded_size} bytes; limit is {MAX_AUTOMATION_DOCUMENT_BYTES} bytes"
+            ));
+        }
+        Ok(document)
+    }
+
+    fn automation_selection(
+        &mut self,
+        ids: &[String],
+        mode: automation::SelectionMode,
+    ) -> Result<(), String> {
+        self.numeric_property_input = None;
+        let ids = ids
+            .iter()
+            .map(|id| parse_automation_node_id(self.editor.document(), id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.contains(&self.editor.document().root) {
+            return Err("the document root cannot be selected".to_owned());
+        }
+        if !matches!(mode, automation::SelectionMode::Remove) {
+            if let Some(id) = ids
+                .iter()
+                .find(|id| !self.editor.document().is_effectively_editable(**id))
+            {
+                return Err(format!(
+                    "layer `{}` cannot be selected because it or an ancestor is hidden or locked",
+                    automation_node_id(*id)
+                ));
+            }
+        }
+        let mut selection = match mode {
+            automation::SelectionMode::Replace => Vec::new(),
+            automation::SelectionMode::Add
+            | automation::SelectionMode::Remove
+            | automation::SelectionMode::Toggle => self.editor.selection().to_vec(),
+        };
+        match mode {
+            automation::SelectionMode::Replace | automation::SelectionMode::Add => {
+                selection.extend(ids);
+            }
+            automation::SelectionMode::Remove => {
+                selection.retain(|selected| !ids.contains(selected));
+            }
+            automation::SelectionMode::Toggle => {
+                for id in ids {
+                    if selection.contains(&id) {
+                        selection.retain(|selected| *selected != id);
+                    } else {
+                        selection.push(id);
+                    }
+                }
+            }
+        }
+        self.editor.set_layer_selection(selection);
+        Ok(())
+    }
+
+    fn set_automation_layer_properties(
+        &mut self,
+        ids: &[String],
+        name: Option<String>,
+        visible: Option<bool>,
+        locked: Option<bool>,
+    ) -> Result<(), String> {
+        self.numeric_property_input = None;
+        if ids.is_empty() {
+            return Err("provide at least one layer ID".to_owned());
+        }
+        if name.is_some() && ids.len() != 1 {
+            return Err("name can only be set for one layer at a time".to_owned());
+        }
+        if name.is_none() && visible.is_none() && locked.is_none() {
+            return Err("provide name, visible, or locked".to_owned());
+        }
+        let ids = ids
+            .iter()
+            .map(|id| parse_automation_node_id(self.editor.document(), id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.contains(&self.editor.document().root) {
+            return Err("the document root properties cannot be changed".to_owned());
+        }
+        if let (Some(id), Some(name)) = (ids.first(), name) {
+            if name.trim().is_empty() {
+                return Err("layer name cannot be empty".to_owned());
+            }
+            self.editor.rename_layer(*id, &name);
+        }
+        for id in ids {
+            if let Some(visible) = visible {
+                self.editor.set_layer_visible(id, visible);
+            }
+            if let Some(locked) = locked {
+                self.editor.set_layer_locked(id, locked);
+            }
+        }
+        Ok(())
+    }
+
     fn document_name(&self) -> String {
         self.source_document_path()
             .and_then(Path::file_name)
@@ -888,6 +1311,7 @@ impl Strek {
         self.command_palette = None;
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
@@ -914,6 +1338,7 @@ impl Strek {
         self.command_palette = None;
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
@@ -1663,6 +2088,7 @@ impl Strek {
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         let scrub_cancelled = self.cancel_numeric_property_scrub();
         let menu_closed = self.dismiss_menus();
         let executed = self.editor.execute_action(action);
@@ -1957,6 +2383,7 @@ impl Strek {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.property_color_input = None;
+        self.numeric_property_input = None;
         self.dismiss_menus();
         self.zoom_input = Some(ZoomInput {
             value: toolbar::format_zoom_percentage(self.editor.view().zoom),
@@ -1976,6 +2403,7 @@ impl Strek {
         self.cancel_numeric_property_scrub();
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.finish_layer_rename(true, cx);
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
@@ -1995,6 +2423,7 @@ impl Strek {
         self.cancel_numeric_property_scrub();
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.finish_layer_rename(true, cx);
         if self.editor.cancel_pointer_interaction() {
             self.current_cursor = convert_cursor(self.editor.cursor());
@@ -2057,6 +2486,7 @@ impl Strek {
         };
         self.property_color_input = None;
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.dismiss_menus();
         self.numeric_property_scrub = Some(ActiveNumericPropertyScrub {
             session,
@@ -2151,6 +2581,33 @@ impl Strek {
         }
     }
 
+    fn start_numeric_property_input(
+        &mut self,
+        target: NumericPropertyTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_operation == FileOperation::Opening {
+            return;
+        }
+        self.cancel_numeric_property_scrub();
+        self.finish_layer_rename(true, cx);
+        let Some(value) = self.editor.numeric_property_value(target) else {
+            return;
+        };
+        self.property_color_input = None;
+        self.zoom_input = None;
+        self.dismiss_menus();
+        self.numeric_property_input = Some(NumericPropertyInput {
+            target,
+            value: format_numeric_property_input(target, value),
+            replace_on_type: true,
+            invalid: false,
+        });
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
     fn cancel_numeric_property_scrub(&mut self) -> bool {
         let Some(scrub) = self.numeric_property_scrub.take() else {
             return false;
@@ -2161,6 +2618,7 @@ impl Strek {
 
     fn settle_for_document_io(&mut self) {
         self.cancel_numeric_property_scrub();
+        self.numeric_property_input = None;
         self.editor.settle_for_document_io();
     }
 
@@ -2463,6 +2921,7 @@ impl Strek {
             self.current_cursor = convert_cursor(self.editor.cursor());
         }
         self.zoom_input = None;
+        self.numeric_property_input = None;
         self.property_color_input = Some(PropertyColorInput {
             scope,
             target,
@@ -2925,7 +3384,10 @@ impl Strek {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.property_color_input.take().is_some() || self.zoom_input.take().is_some() {
+        if self.property_color_input.take().is_some()
+            || self.zoom_input.take().is_some()
+            || self.numeric_property_input.take().is_some()
+        {
             cx.notify();
         }
     }
@@ -3263,12 +3725,104 @@ impl Strek {
         cx.stop_propagation();
     }
 
+    fn handle_numeric_property_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let primary = if cfg!(target_os = "macos") {
+            event.keystroke.modifiers.platform
+        } else {
+            event.keystroke.modifiers.control
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.numeric_property_input = None;
+                cx.notify();
+            }
+            "enter" => {
+                let Some(input) = self.numeric_property_input.as_ref() else {
+                    return;
+                };
+                let Some(value) = parse_numeric_property_input(input.target, &input.value) else {
+                    if let Some(input) = &mut self.numeric_property_input {
+                        input.invalid = true;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                };
+                let target = input.target;
+                if !numeric_property_input_value_is_valid(target, value) {
+                    if let Some(input) = &mut self.numeric_property_input {
+                        input.invalid = true;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                self.numeric_property_input = None;
+                self.editor.set_numeric_property(target, value);
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if let Some(input) = &mut self.numeric_property_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                    } else {
+                        input.value.pop();
+                    }
+                    input.replace_on_type = false;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "a" if primary => {
+                if let Some(input) = &mut self.numeric_property_input {
+                    input.replace_on_type = true;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "v" if primary => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if let Some(input) = &mut self.numeric_property_input {
+                        input.value = sanitize_numeric_property_input(&text);
+                        input.replace_on_type = false;
+                        input.invalid = false;
+                        cx.notify();
+                    }
+                }
+            }
+            _ if !primary
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt =>
+            {
+                let Some(text) = event.keystroke.key_char.as_deref() else {
+                    cx.stop_propagation();
+                    return;
+                };
+                if let Some(input) = &mut self.numeric_property_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                        input.replace_on_type = false;
+                    }
+                    append_numeric_property_input(&mut input.value, text);
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.file_operation == FileOperation::Opening {
             return;
         }
         if self.zoom_input.is_some() {
             self.handle_zoom_key(event, cx);
+            return;
+        }
+        if self.numeric_property_input.is_some() {
+            self.handle_numeric_property_key(event, cx);
             return;
         }
         if self.property_color_input.is_some() {
@@ -3296,6 +3850,13 @@ impl Strek {
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.file_operation == FileOperation::Opening {
+            return;
+        }
+        if matches!(
+            event.keystroke.key.as_str(),
+            "left" | "right" | "up" | "down"
+        ) {
+            self.editor.finish_nudge_sequence();
             return;
         }
         if event.keystroke.key != "space" {
@@ -3354,7 +3915,8 @@ impl Render for Strek {
             self.command_palette.is_some()
                 || self.layer_name_input.is_some()
                 || self.property_color_input.is_some()
-                || self.zoom_input.is_some(),
+                || self.zoom_input.is_some()
+                || self.numeric_property_input.is_some(),
             self.open_menu.is_some() || self.layer_context_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
@@ -3447,7 +4009,15 @@ impl Render for Strek {
             };
             input.picker.snapshot(title)
         });
-        let properties_snapshot = properties_panel::snapshot(&mut self.editor, color_input);
+        let numeric_input = self.numeric_property_input.as_ref().map(|input| {
+            properties_panel::NumericInputSnapshot {
+                target: input.target,
+                value: input.value.clone(),
+                invalid: input.invalid,
+            }
+        });
+        let properties_snapshot =
+            properties_panel::snapshot(&mut self.editor, color_input, numeric_input);
         let zoom_input = self
             .zoom_input
             .as_ref()
@@ -3900,6 +4470,55 @@ fn append_zoom_input(value: &mut String, text: &str) {
     }
 }
 
+fn format_numeric_property_input(target: NumericPropertyTarget, value: f32) -> String {
+    let displayed = match target {
+        NumericPropertyTarget::Opacity => value * 100.0,
+        _ => value,
+    };
+    properties_panel::format_number(displayed)
+}
+
+fn parse_numeric_property_input(target: NumericPropertyTarget, value: &str) -> Option<f32> {
+    let parsed: f32 = value
+        .trim()
+        .trim_end_matches('%')
+        .trim()
+        .replace(',', ".")
+        .parse()
+        .ok()?;
+    let value = match target {
+        NumericPropertyTarget::Opacity => parsed / 100.0,
+        _ => parsed,
+    };
+    value.is_finite().then_some(value)
+}
+
+fn numeric_property_input_value_is_valid(target: NumericPropertyTarget, value: f32) -> bool {
+    value.is_finite()
+        && (!matches!(
+            target,
+            NumericPropertyTarget::AutoLayoutSpacing | NumericPropertyTarget::AutoLayoutPadding
+        ) || value >= 0.0)
+}
+
+fn sanitize_numeric_property_input(value: &str) -> String {
+    let mut sanitized = String::with_capacity(16);
+    append_numeric_property_input(&mut sanitized, value);
+    sanitized
+}
+
+fn append_numeric_property_input(value: &mut String, text: &str) {
+    for character in text.chars() {
+        if character.is_ascii_digit() && value.len() < 16 {
+            value.push(character);
+        } else if matches!(character, '.' | ',') && !value.contains('.') && value.len() < 16 {
+            value.push('.');
+        } else if character == '-' && value.is_empty() {
+            value.push(character);
+        }
+    }
+}
+
 fn canvas_viewport_width(
     window_width: f32,
     show_layers_panel: bool,
@@ -3927,6 +4546,86 @@ fn automation_bounds(bounds: Bounds<gpui::Pixels>) -> automation::AutomationBoun
         y: bounds.origin.y.0,
         width: bounds.size.width.0,
         height: bounds.size.height.0,
+    }
+}
+
+fn automation_node_id(id: NodeId) -> String {
+    format!("node-{:016x}", id.to_opaque())
+}
+
+fn automation_absolute_path(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    path.is_absolute()
+        .then_some(path)
+        .ok_or_else(|| format!("automation paths must be absolute; received `{value}`"))
+}
+
+fn parse_automation_node_id(
+    document: &editor_core::Document,
+    value: &str,
+) -> Result<NodeId, String> {
+    let encoded = value
+        .strip_prefix("node-")
+        .ok_or_else(|| format!("invalid layer ID `{value}`"))?;
+    let opaque =
+        u64::from_str_radix(encoded, 16).map_err(|_| format!("invalid layer ID `{value}`"))?;
+    let id = NodeId::from_opaque(opaque);
+    document
+        .get(id)
+        .filter(|node| !node.deleted)
+        .map(|_| id)
+        .ok_or_else(|| format!("layer `{value}` does not exist in the current document"))
+}
+
+fn automation_node_kind(kind: &NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Group => "group",
+        NodeKind::Frame(_) => "frame",
+        NodeKind::Shape(_) => "shape",
+        NodeKind::Text(_) => "text",
+    }
+}
+
+fn automation_numeric_property(property: automation::NumericProperty) -> NumericPropertyTarget {
+    match property {
+        automation::NumericProperty::WorldX => NumericPropertyTarget::WorldX,
+        automation::NumericProperty::WorldY => NumericPropertyTarget::WorldY,
+        automation::NumericProperty::Opacity => NumericPropertyTarget::Opacity,
+        automation::NumericProperty::StrokeWidth => NumericPropertyTarget::StrokeWidth,
+        automation::NumericProperty::TextSize => NumericPropertyTarget::TextSize,
+        automation::NumericProperty::LayoutSpacing => NumericPropertyTarget::AutoLayoutSpacing,
+        automation::NumericProperty::LayoutPadding => NumericPropertyTarget::AutoLayoutPadding,
+    }
+}
+
+fn automation_export_format(format: automation::ArtifactFormat) -> export::ExportFormat {
+    match format {
+        automation::ArtifactFormat::Svg => export::ExportFormat::Svg,
+        automation::ArtifactFormat::SvgOutlined => export::ExportFormat::SvgOutlined,
+        automation::ArtifactFormat::Png => export::ExportFormat::Png,
+        automation::ArtifactFormat::Jpeg => export::ExportFormat::Jpeg,
+        automation::ArtifactFormat::WebP => export::ExportFormat::WebP,
+    }
+}
+
+fn automation_artifact_name(format: automation::ArtifactFormat) -> &'static str {
+    match format {
+        automation::ArtifactFormat::Svg => "svg",
+        automation::ArtifactFormat::SvgOutlined => "svg_outlined",
+        automation::ArtifactFormat::Png => "png",
+        automation::ArtifactFormat::Jpeg => "jpeg",
+        automation::ArtifactFormat::WebP => "webp",
+    }
+}
+
+fn automation_artifact_media_type(format: automation::ArtifactFormat) -> &'static str {
+    match format {
+        automation::ArtifactFormat::Svg | automation::ArtifactFormat::SvgOutlined => {
+            "image/svg+xml"
+        }
+        automation::ArtifactFormat::Png => "image/png",
+        automation::ArtifactFormat::Jpeg => "image/jpeg",
+        automation::ArtifactFormat::WebP => "image/webp",
     }
 }
 
@@ -4398,5 +5097,39 @@ mod layout_tests {
         assert_eq!(parse_zoom_percentage(" 125.5% "), Some(125.5));
         assert_eq!(parse_zoom_percentage("0"), None);
         assert_eq!(parse_zoom_percentage("nan"), None);
+    }
+
+    #[test]
+    fn numeric_property_input_uses_display_units_and_signed_decimals() {
+        assert_eq!(
+            format_numeric_property_input(NumericPropertyTarget::Opacity, 0.5),
+            "50"
+        );
+        assert_eq!(
+            parse_numeric_property_input(NumericPropertyTarget::Opacity, "50%"),
+            Some(0.5)
+        );
+        assert_eq!(
+            parse_numeric_property_input(NumericPropertyTarget::WorldX, "-12,5"),
+            Some(-12.5)
+        );
+        assert_eq!(sanitize_numeric_property_input(" -12,5px "), "-12.5");
+        assert!(!numeric_property_input_value_is_valid(
+            NumericPropertyTarget::AutoLayoutSpacing,
+            -1.0
+        ));
+        assert_eq!(
+            parse_numeric_property_input(NumericPropertyTarget::TextSize, "NaN"),
+            None
+        );
+    }
+
+    #[test]
+    fn automation_file_paths_are_unambiguous() {
+        assert_eq!(
+            automation_absolute_path("/tmp/logo.svg").unwrap(),
+            PathBuf::from("/tmp/logo.svg")
+        );
+        assert!(automation_absolute_path("logo.svg").is_err());
     }
 }
