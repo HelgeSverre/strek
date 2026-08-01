@@ -72,13 +72,14 @@ enum ColorPickerKeyboardFocus {
     Channel(usize),
     Alpha,
     SavedSearch,
+    SavedColor(usize),
     Preset,
     Cancel,
     Apply,
 }
 
 impl ColorPickerKeyboardFocus {
-    const ORDER: [Self; 11] = [
+    const FIXED_ORDER: [Self; 11] = [
         Self::Hex,
         Self::Wheel,
         Self::Model,
@@ -92,23 +93,37 @@ impl ColorPickerKeyboardFocus {
         Self::Apply,
     ];
 
-    fn next(self, reverse: bool) -> Self {
-        let index = Self::ORDER
+    fn next(self, reverse: bool, saved_color_count: usize) -> Self {
+        let mut order = Self::FIXED_ORDER.to_vec();
+        if saved_color_count > 0 {
+            let preset = order
+                .iter()
+                .position(|candidate| *candidate == Self::Preset)
+                .unwrap_or(order.len());
+            order.insert(preset, Self::SavedColor(0));
+        }
+        let normalized = match self {
+            Self::SavedColor(_) if saved_color_count > 0 => Self::SavedColor(0),
+            Self::SavedColor(_) => Self::SavedSearch,
+            focus => focus,
+        };
+        let index = order
             .iter()
-            .position(|candidate| *candidate == self)
+            .position(|candidate| *candidate == normalized)
             .unwrap_or_default();
         let next = if reverse {
-            index.checked_sub(1).unwrap_or(Self::ORDER.len() - 1)
+            index.checked_sub(1).unwrap_or(order.len() - 1)
         } else {
-            (index + 1) % Self::ORDER.len()
+            (index + 1) % order.len()
         };
-        Self::ORDER[next]
+        order[next]
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorPickerKeyboardAction {
     Updated,
+    ApplySavedColor { id: u64, index: usize },
     Commit,
     Dismiss,
 }
@@ -144,9 +159,10 @@ pub(crate) struct ColorPickerSnapshot {
     invalid: bool,
     keyboard_focus: ColorPickerKeyboardFocus,
     preset_index: usize,
-    saved_colors: Vec<SavedColorOption>,
+    saved_color_groups: Vec<SavedColorGroupOption>,
     has_saved_colors: bool,
     saved_search: String,
+    save_feedback: Option<SavedColorFeedback>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,16 +171,35 @@ pub(crate) struct SavedColorOption {
     pub name: Option<SharedString>,
     pub rgba: [f32; 4],
     pub value: SharedString,
+    pub keyboard_index: usize,
+    pub exact_match: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SavedColorGroupOption {
+    pub name: SharedString,
+    pub colors: Vec<SavedColorOption>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SavedColorFeedback {
+    pub id: u64,
+    pub message: SharedString,
 }
 
 impl ColorPickerSnapshot {
     pub(crate) fn with_saved_colors(
         mut self,
-        saved_colors: Vec<SavedColorOption>,
+        saved_color_groups: Vec<SavedColorGroupOption>,
         has_saved_colors: bool,
     ) -> Self {
-        self.saved_colors = saved_colors;
+        self.saved_color_groups = saved_color_groups;
         self.has_saved_colors = has_saved_colors;
+        self
+    }
+
+    pub(crate) fn with_save_feedback(mut self, feedback: Option<SavedColorFeedback>) -> Self {
+        self.save_feedback = feedback;
         self
     }
 }
@@ -226,9 +261,10 @@ impl ColorPickerState {
             invalid: self.invalid,
             keyboard_focus: self.keyboard_focus,
             preset_index: self.preset_index,
-            saved_colors: Vec::new(),
+            saved_color_groups: Vec::new(),
             has_saved_colors: false,
             saved_search: self.saved_search.clone(),
+            save_feedback: None,
         }
     }
 
@@ -259,6 +295,10 @@ impl ColorPickerState {
         self.sync_hex_from_paint();
     }
 
+    pub(crate) fn focus_saved_color(&mut self, index: usize) {
+        self.keyboard_focus = ColorPickerKeyboardFocus::SavedColor(index);
+    }
+
     pub(crate) fn accepts_text_input(&self) -> bool {
         self.keyboard_focus == ColorPickerKeyboardFocus::Hex
     }
@@ -284,6 +324,11 @@ impl ColorPickerState {
         self.saved_search = text.to_owned();
     }
 
+    pub(crate) fn reveal_saved_color(&mut self, query: &str) {
+        self.saved_search = query.to_owned();
+        self.keyboard_focus = ColorPickerKeyboardFocus::SavedColor(0);
+    }
+
     pub(crate) fn backspace_saved_search(&mut self) {
         self.saved_search.pop();
     }
@@ -292,11 +337,16 @@ impl ColorPickerState {
         self.saved_search.clear();
     }
 
-    pub(crate) fn focus_next(&mut self, reverse: bool) {
-        self.keyboard_focus = self.keyboard_focus.next(reverse);
+    pub(crate) fn focus_next(&mut self, reverse: bool, saved_color_count: usize) {
+        self.keyboard_focus = self.keyboard_focus.next(reverse, saved_color_count);
     }
 
-    pub(crate) fn handle_arrow(&mut self, key: &str, coarse: bool) -> bool {
+    pub(crate) fn handle_arrow(
+        &mut self,
+        key: &str,
+        coarse: bool,
+        saved_color_count: usize,
+    ) -> bool {
         let direction = match key {
             "left" | "down" => -1.0,
             "right" | "up" => 1.0,
@@ -353,15 +403,27 @@ impl ColorPickerState {
                 self.set_preset(self.preset_index);
                 self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
             }
+            ColorPickerKeyboardFocus::SavedColor(index) if saved_color_count > 0 => {
+                let next = if direction < 0.0 {
+                    index.checked_sub(1).unwrap_or(saved_color_count - 1)
+                } else {
+                    (index + 1) % saved_color_count
+                };
+                self.keyboard_focus = ColorPickerKeyboardFocus::SavedColor(next);
+            }
             ColorPickerKeyboardFocus::Hex
             | ColorPickerKeyboardFocus::SavedSearch
+            | ColorPickerKeyboardFocus::SavedColor(_)
             | ColorPickerKeyboardFocus::Cancel
             | ColorPickerKeyboardFocus::Apply => return false,
         }
         true
     }
 
-    pub(crate) fn activate_focused(&mut self) -> ColorPickerKeyboardAction {
+    pub(crate) fn activate_focused(
+        &mut self,
+        saved_color_ids: &[u64],
+    ) -> ColorPickerKeyboardAction {
         match self.keyboard_focus {
             ColorPickerKeyboardFocus::Cancel => ColorPickerKeyboardAction::Dismiss,
             ColorPickerKeyboardFocus::Apply | ColorPickerKeyboardFocus::Hex => {
@@ -372,6 +434,11 @@ impl ColorPickerState {
                 self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
                 ColorPickerKeyboardAction::Updated
             }
+            ColorPickerKeyboardFocus::SavedColor(index) => saved_color_ids
+                .get(index)
+                .copied()
+                .map(|id| ColorPickerKeyboardAction::ApplySavedColor { id, index })
+                .unwrap_or(ColorPickerKeyboardAction::Updated),
             ColorPickerKeyboardFocus::Wheel
             | ColorPickerKeyboardFocus::Model
             | ColorPickerKeyboardFocus::Channel(_)
@@ -665,21 +732,8 @@ pub(crate) fn render(
     );
     let opaque = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 1.0);
     let transparent = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 0.0);
-    let saved_query = snapshot.saved_search.trim().to_lowercase();
-    let visible_saved_colors = snapshot
-        .saved_colors
-        .iter()
-        .filter(|color| {
-            saved_query.is_empty()
-                || color.value.to_lowercase().contains(&saved_query)
-                || color
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| name.to_lowercase().contains(&saved_query))
-        })
-        .take(128)
-        .cloned()
-        .collect::<Vec<_>>();
+    let keyboard_focus = snapshot.keyboard_focus;
+    let saved_colors_empty = snapshot.saved_color_groups.is_empty();
 
     anchored()
         .anchor(Corner::TopRight)
@@ -797,6 +851,34 @@ pub(crate) fn render(
                             |editor, window, cx| editor.show_color_library_from_picker(window, cx),
                         )),
                 )
+                .when_some(snapshot.save_feedback.clone(), |picker, feedback| {
+                    let color_id = feedback.id;
+                    picker.child(
+                        div()
+                            .min_h(px(25.0))
+                            .px(px(7.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(SURFACE_RAISED))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(9.0))
+                                    .text_color(rgb(TEXT))
+                                    .child(feedback.message),
+                            )
+                            .child(picker_link_button(
+                                "color-picker-rename-saved-color",
+                                "Rename",
+                                editor_entity.clone(),
+                                move |editor, window, cx| {
+                                    editor.rename_picker_saved_color(color_id, window, cx);
+                                },
+                            )),
+                    )
+                })
                 .child(
                     div()
                         .id("color-picker-saved-search")
@@ -841,9 +923,9 @@ pub(crate) fn render(
                 .child(
                     div()
                         .flex()
-                        .flex_wrap()
-                        .gap(px(5.0))
-                        .when(visible_saved_colors.is_empty(), |saved| {
+                        .flex_col()
+                        .gap(px(7.0))
+                        .when(saved_colors_empty, |saved| {
                             saved.child(div().text_size(px(9.0)).text_color(rgb(MUTED)).child(
                                 if !snapshot.has_saved_colors {
                                     "Save a color to reuse it throughout this document."
@@ -852,8 +934,29 @@ pub(crate) fn render(
                                 },
                             ))
                         })
-                        .children(visible_saved_colors.into_iter().map(|color| {
-                            saved_color_swatch(color, editor_entity.clone()).into_any_element()
+                        .children(snapshot.saved_color_groups.into_iter().map(|group| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(MUTED))
+                                        .child(group.name),
+                                )
+                                .child(div().flex().flex_wrap().gap(px(5.0)).children(
+                                    group.colors.into_iter().map(|color| {
+                                        let focused = keyboard_focus
+                                            == ColorPickerKeyboardFocus::SavedColor(
+                                                color.keyboard_index,
+                                            );
+                                        saved_color_swatch(color, focused, editor_entity.clone())
+                                            .into_any_element()
+                                    }),
+                                ))
+                                .into_any_element()
                         })),
                 )
                 .child(
@@ -1190,9 +1293,11 @@ fn preset_swatch(
 
 fn saved_color_swatch(
     color: SavedColorOption,
+    keyboard_focused: bool,
     editor_entity: WeakEntity<Strek>,
 ) -> impl IntoElement {
     let id = color.id;
+    let keyboard_index = color.keyboard_index;
     let label = color.name.clone().unwrap_or_else(|| color.value.clone());
     let paint = Paint::Solid(color.rgba);
     div()
@@ -1205,7 +1310,11 @@ fn saved_color_swatch(
         .gap(px(4.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(if keyboard_focused || color.exact_match {
+            ACCENT
+        } else {
+            BORDER
+        }))
         .cursor_pointer()
         .hover(|style| style.border_color(rgb(ACCENT)).bg(rgb(SURFACE_HOVER)))
         .child(
@@ -1229,7 +1338,7 @@ fn saved_color_swatch(
         .on_click(move |_, _, cx| {
             editor_entity
                 .update(cx, |editor, cx| {
-                    editor.select_color_picker_saved_color(id, cx);
+                    let _ = editor.select_color_picker_saved_color(id, keyboard_index, cx);
                 })
                 .ok();
             cx.stop_propagation();
@@ -1913,15 +2022,32 @@ mod tests {
     #[test]
     fn keyboard_navigation_adjusts_controls_and_can_return_to_hex() {
         let mut picker = ColorPickerState::new(Paint::black());
-        picker.focus_next(false);
+        picker.focus_next(false, 0);
 
         assert_eq!(picker.keyboard_focus, ColorPickerKeyboardFocus::Wheel);
-        assert!(picker.handle_arrow("up", false));
+        assert!(picker.handle_arrow("up", false, 0));
         assert!((picker.hsv[1] - 0.01).abs() < 0.000_1);
-        assert!(picker.handle_arrow("right", false));
+        assert!(picker.handle_arrow("right", false, 0));
         assert!((picker.hsv[0] - 1.0).abs() < 0.000_1);
 
         picker.focus_hex_input();
         assert!(picker.accepts_text_input());
+    }
+
+    #[test]
+    fn keyboard_navigation_applies_visible_saved_colors() {
+        let mut picker = ColorPickerState::new(Paint::black());
+        for _ in 0..8 {
+            picker.focus_next(false, 2);
+        }
+        assert_eq!(
+            picker.keyboard_focus,
+            ColorPickerKeyboardFocus::SavedColor(0)
+        );
+        assert!(picker.handle_arrow("right", false, 2));
+        assert_eq!(
+            picker.activate_focused(&[11, 22]),
+            ColorPickerKeyboardAction::ApplySavedColor { id: 22, index: 1 }
+        );
     }
 }

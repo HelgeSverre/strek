@@ -7,16 +7,19 @@
 use std::{cell::Cell, collections::HashSet, ops::Range, rc::Rc};
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size, AnyElement, App, Bounds,
-    ClipboardItem, Context, CursorStyle, DragMoveEvent, Element, ElementId, ElementInputHandler,
-    Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
-    IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window,
+    actions, anchored, deferred, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, Element,
+    ElementId, ElementInputHandler, Entity, EntityId, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, IntoElement, KeyBinding, KeyDownEvent, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::assets::{icon, Icon};
+use crate::{
+    assets::{icon, Icon},
+    toolbar,
+};
 
 const SURFACE: u32 = 0x202124;
 const SURFACE_RAISED: u32 = 0x292a2e;
@@ -161,9 +164,23 @@ pub(crate) struct ColorLibrarySection {
 }
 
 /// Read-only panel input. The core remains authoritative for all document data.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ColorLibrarySnapshot {
     pub sections: Vec<ColorLibrarySection>,
+    pub quick_add_enabled: bool,
+    pub quick_add_group: Option<ColorLibraryGroupId>,
+    pub quick_add_destination: SharedString,
+}
+
+impl Default for ColorLibrarySnapshot {
+    fn default() -> Self {
+        Self {
+            sections: Vec::new(),
+            quick_add_enabled: false,
+            quick_add_group: None,
+            quick_add_destination: "Ungrouped".into(),
+        }
+    }
 }
 
 /// Workspace-owned placement restored independently from the document.
@@ -221,7 +238,9 @@ pub(crate) struct ColorLibraryPanelPresentation {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ColorLibraryPanelEvent {
     Dismiss,
-    QuickAdd,
+    QuickAdd {
+        group: Option<ColorLibraryGroupId>,
+    },
     AddGroup,
     RenameGroup {
         group: ColorLibraryGroupId,
@@ -260,11 +279,25 @@ pub(crate) enum ColorLibraryPanelEvent {
         section: ColorLibrarySectionId,
         before: Option<ColorLibraryColorId>,
     },
+    MoveColorToSection {
+        color: ColorLibraryColorId,
+        section: ColorLibrarySectionId,
+    },
     MoveGroupBefore {
         group: ColorLibraryGroupId,
         before: ColorLibraryGroupId,
     },
+    MoveGroupBy {
+        group: ColorLibraryGroupId,
+        direction: MoveDirection,
+    },
     PresentationChanged(ColorLibraryPanelPresentation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,13 +317,27 @@ enum PanelFocus {
     Collapse(ColorLibrarySectionId),
     GroupName(ColorLibraryGroupId),
     Sort(ColorLibrarySectionId),
+    QuickAddTo(ColorLibrarySectionId),
+    MoveGroupUp(ColorLibraryGroupId),
+    MoveGroupDown(ColorLibraryGroupId),
     RemoveGroup(ColorLibraryGroupId),
     Swatch(ColorLibraryColorId),
     Order(ColorLibraryColorId),
     Name(ColorLibraryColorId),
     Value(ColorLibraryColorId),
     Duplicate(ColorLibraryColorId),
+    Move(ColorLibraryColorId),
+    MoveTo(ColorLibraryColorId, ColorLibrarySectionId),
     Remove(ColorLibraryColorId),
+}
+
+struct HeaderButtonSpec {
+    id: &'static str,
+    label: SharedString,
+    focus: PanelFocus,
+    enabled: bool,
+    tooltip: &'static str,
+    event: ColorLibraryPanelEvent,
 }
 
 /// Stateful GPUI view for the modeless Color Library panel.
@@ -302,6 +349,7 @@ pub(crate) struct ColorLibraryPanel {
     search_input: Entity<PanelTextInput>,
     editing: Option<(EditTarget, Entity<PanelTextInput>)>,
     sort_menu: Option<ColorLibrarySectionId>,
+    move_menu: Option<ColorLibraryColorId>,
     focus_handle: FocusHandle,
     keyboard_focus: PanelFocus,
 }
@@ -353,6 +401,7 @@ impl ColorLibraryPanel {
             search_input,
             editing: None,
             sort_menu: None,
+            move_menu: None,
             focus_handle: cx.focus_handle(),
             keyboard_focus: PanelFocus::default(),
         }
@@ -360,6 +409,34 @@ impl ColorLibraryPanel {
 
     pub(crate) fn focus(&self, window: &mut Window) {
         self.focus_handle.focus(window);
+    }
+
+    pub(crate) fn begin_color_rename(
+        &mut self,
+        color: ColorLibraryColorId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((section, row)) = self.snapshot.sections.iter().find_map(|section| {
+            section
+                .rows
+                .iter()
+                .find(|row| row.id == color)
+                .map(|row| (section.id, row))
+        }) else {
+            return false;
+        };
+        let value = row
+            .name
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        self.search_query.clear();
+        self.search_input.update(cx, |input, cx| input.clear(cx));
+        self.collapsed_sections.remove(&section);
+        self.keyboard_focus = PanelFocus::Name(color);
+        self.begin_edit(EditTarget::ColorName(color), value, window, cx);
+        true
     }
 
     pub(crate) fn presentation(&self) -> ColorLibraryPanelPresentation {
@@ -378,6 +455,12 @@ impl ColorLibraryPanel {
             .is_some_and(|(target, _)| !self.contains_edit_target(*target))
         {
             self.editing = None;
+        }
+        if self
+            .move_menu
+            .is_some_and(|color| self.row(color).is_none())
+        {
+            self.move_menu = None;
         }
         self.normalize_keyboard_focus();
         cx.notify();
@@ -409,18 +492,28 @@ impl ColorLibraryPanel {
     }
 
     fn focus_targets(&self) -> Vec<PanelFocus> {
-        let mut targets = vec![
-            PanelFocus::QuickAdd,
-            PanelFocus::AddGroup,
-            PanelFocus::Close,
-        ];
+        let mut targets = Vec::new();
+        if self.snapshot.quick_add_enabled {
+            targets.push(PanelFocus::QuickAdd);
+        }
+        targets.extend([PanelFocus::AddGroup, PanelFocus::Close]);
         for section in self.visible_sections() {
             targets.push(PanelFocus::Collapse(section.id));
             if let Some(group) = section.id.group() {
                 targets.push(PanelFocus::GroupName(group));
             }
             targets.push(PanelFocus::Sort(section.id));
+            if self.snapshot.quick_add_enabled {
+                targets.push(PanelFocus::QuickAddTo(section.id));
+            }
             if let Some(group) = section.id.group() {
+                let (can_move_up, can_move_down) = self.group_move_availability(group);
+                if can_move_up {
+                    targets.push(PanelFocus::MoveGroupUp(group));
+                }
+                if can_move_down {
+                    targets.push(PanelFocus::MoveGroupDown(group));
+                }
                 targets.push(PanelFocus::RemoveGroup(group));
             }
             if !self.collapsed_sections.contains(&section.id) {
@@ -431,8 +524,20 @@ impl ColorLibraryPanel {
                         PanelFocus::Name(row.id),
                         PanelFocus::Value(row.id),
                         PanelFocus::Duplicate(row.id),
-                        PanelFocus::Remove(row.id),
                     ]);
+                    if self.snapshot.sections.len() > 1 {
+                        targets.push(PanelFocus::Move(row.id));
+                        if self.move_menu == Some(row.id) {
+                            targets.extend(
+                                self.snapshot
+                                    .sections
+                                    .iter()
+                                    .filter(|destination| destination.id != section.id)
+                                    .map(|destination| PanelFocus::MoveTo(row.id, destination.id)),
+                            );
+                        }
+                    }
+                    targets.push(PanelFocus::Remove(row.id));
                 }
             }
         }
@@ -472,6 +577,10 @@ impl ColorLibraryPanel {
             "down" if self.editing.is_none() => self.focus_relative(false, window, cx),
             "up" if self.editing.is_none() => self.focus_relative(true, window, cx),
             "enter" | "space" if self.editing.is_none() => self.activate_keyboard_focus(window, cx),
+            "escape" if self.move_menu.take().is_some() => {
+                self.normalize_keyboard_focus();
+                cx.notify();
+            }
             "escape" if self.sort_menu.take().is_some() => cx.notify(),
             "escape" if self.editing.is_none() => cx.emit(ColorLibraryPanelEvent::Dismiss),
             _ => return,
@@ -481,7 +590,12 @@ impl ColorLibraryPanel {
 
     fn activate_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.keyboard_focus {
-            PanelFocus::QuickAdd => cx.emit(ColorLibraryPanelEvent::QuickAdd),
+            PanelFocus::QuickAdd if self.snapshot.quick_add_enabled => {
+                cx.emit(ColorLibraryPanelEvent::QuickAdd {
+                    group: self.snapshot.quick_add_group,
+                });
+            }
+            PanelFocus::QuickAdd => {}
             PanelFocus::AddGroup => cx.emit(ColorLibraryPanelEvent::AddGroup),
             PanelFocus::Close => cx.emit(ColorLibraryPanelEvent::Dismiss),
             PanelFocus::Collapse(section) => self.toggle_collapsed(section, cx),
@@ -501,6 +615,20 @@ impl ColorLibraryPanel {
                 }
             }
             PanelFocus::Sort(section) => self.toggle_sort_menu(section, cx),
+            PanelFocus::QuickAddTo(section) if self.snapshot.quick_add_enabled => {
+                cx.emit(ColorLibraryPanelEvent::QuickAdd {
+                    group: section.group(),
+                });
+            }
+            PanelFocus::QuickAddTo(_) => {}
+            PanelFocus::MoveGroupUp(group) => cx.emit(ColorLibraryPanelEvent::MoveGroupBy {
+                group,
+                direction: MoveDirection::Up,
+            }),
+            PanelFocus::MoveGroupDown(group) => cx.emit(ColorLibraryPanelEvent::MoveGroupBy {
+                group,
+                direction: MoveDirection::Down,
+            }),
             PanelFocus::RemoveGroup(group) => {
                 cx.emit(ColorLibraryPanelEvent::RemoveGroup { group })
             }
@@ -541,8 +669,33 @@ impl ColorLibraryPanel {
             PanelFocus::Duplicate(color) => {
                 cx.emit(ColorLibraryPanelEvent::DuplicateColor { color })
             }
+            PanelFocus::Move(color) => {
+                self.move_menu = (self.move_menu != Some(color)).then_some(color);
+                self.sort_menu = None;
+                self.normalize_keyboard_focus();
+                cx.notify();
+            }
+            PanelFocus::MoveTo(color, section) => {
+                self.move_menu = None;
+                self.keyboard_focus = PanelFocus::Move(color);
+                cx.emit(ColorLibraryPanelEvent::MoveColorToSection { color, section });
+                cx.notify();
+            }
             PanelFocus::Remove(color) => cx.emit(ColorLibraryPanelEvent::RemoveColor { color }),
         }
+    }
+
+    fn group_move_availability(&self, group: ColorLibraryGroupId) -> (bool, bool) {
+        let groups = self
+            .snapshot
+            .sections
+            .iter()
+            .filter_map(|section| section.id.group())
+            .collect::<Vec<_>>();
+        let Some(index) = groups.iter().position(|candidate| *candidate == group) else {
+            return (false, false);
+        };
+        (index > 0, index + 1 < groups.len())
     }
 
     fn row(&self, id: ColorLibraryColorId) -> Option<&ColorLibraryRow> {
@@ -678,6 +831,7 @@ impl ColorLibraryPanel {
 
     fn toggle_sort_menu(&mut self, section: ColorLibrarySectionId, cx: &mut Context<Self>) {
         self.sort_menu = (self.sort_menu != Some(section)).then_some(section);
+        self.move_menu = None;
         cx.notify();
     }
 
@@ -777,45 +931,62 @@ impl ColorLibraryPanel {
                     .child("Color Library"),
             )
             .child(self.header_button(
-                "color-library-quick-add",
-                "Save color",
-                PanelFocus::QuickAdd,
-                ColorLibraryPanelEvent::QuickAdd,
+                HeaderButtonSpec {
+                    id: "color-library-quick-add",
+                    label: format!("Save to {}", self.snapshot.quick_add_destination).into(),
+                    focus: PanelFocus::QuickAdd,
+                    enabled: self.snapshot.quick_add_enabled,
+                    tooltip: "Save current color to the displayed section",
+                    event: ColorLibraryPanelEvent::QuickAdd {
+                        group: self.snapshot.quick_add_group,
+                    },
+                },
                 cx,
             ))
             .child(self.header_button(
-                "color-library-add-group",
-                "Add group",
-                PanelFocus::AddGroup,
-                ColorLibraryPanelEvent::AddGroup,
+                HeaderButtonSpec {
+                    id: "color-library-add-group",
+                    label: "Add group".into(),
+                    focus: PanelFocus::AddGroup,
+                    enabled: true,
+                    tooltip: "Add color group",
+                    event: ColorLibraryPanelEvent::AddGroup,
+                },
                 cx,
             ))
             .child(self.header_icon_button(
                 "color-library-close",
                 Icon::Close,
                 PanelFocus::Close,
+                "Close Color Library",
                 ColorLibraryPanelEvent::Dismiss,
                 cx,
             ))
     }
 
-    fn header_button(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        focus: PanelFocus,
-        event: ColorLibraryPanelEvent,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        small_button(id, label, self.keyboard_focus == focus).on_click(cx.listener(
-            move |panel, _, window, cx| {
-                panel.keyboard_focus = focus;
+    fn header_button(&self, spec: HeaderButtonSpec, cx: &mut Context<Self>) -> AnyElement {
+        let button = small_button(spec.id, spec.label, self.keyboard_focus == spec.focus).tooltip(
+            toolbar::editor_tooltip(
+                if spec.enabled {
+                    spec.tooltip
+                } else {
+                    "Select a filled layer or choose a picker color first"
+                },
+                None,
+            ),
+        );
+        if !spec.enabled {
+            return button.opacity(0.45).cursor_default().into_any_element();
+        }
+        button
+            .on_click(cx.listener(move |panel, _, window, cx| {
+                panel.keyboard_focus = spec.focus;
                 panel.focus_handle.focus(window);
-                cx.emit(event.clone());
+                cx.emit(spec.event.clone());
                 cx.stop_propagation();
                 cx.notify();
-            },
-        ))
+            }))
+            .into_any_element()
     }
 
     fn header_icon_button(
@@ -823,18 +994,19 @@ impl ColorLibraryPanel {
         id: &'static str,
         icon_kind: Icon,
         focus: PanelFocus,
+        tooltip: &'static str,
         event: ColorLibraryPanelEvent,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        small_icon_button(id, icon_kind, self.keyboard_focus == focus).on_click(cx.listener(
-            move |panel, _, window, cx| {
+        small_icon_button(id, icon_kind, self.keyboard_focus == focus, tooltip).on_click(
+            cx.listener(move |panel, _, window, cx| {
                 panel.keyboard_focus = focus;
                 panel.focus_handle.focus(window);
                 cx.emit(event.clone());
                 cx.stop_propagation();
                 cx.notify();
-            },
-        ))
+            }),
+        )
     }
 
     fn render_search(&self) -> impl IntoElement {
@@ -936,6 +1108,9 @@ impl ColorLibraryPanel {
             group_id.and_then(|group| self.inline_input(EditTarget::GroupName(group)));
         let group_name = section.name.clone();
         let group_drag = group_id.map(|group| ColorGroupDrag { group });
+        let (can_move_group_up, can_move_group_down) = group_id
+            .map(|group| self.group_move_availability(group))
+            .unwrap_or_default();
         let group_name_element: AnyElement = if let Some(input) = editing_name {
             div().flex_1().child(input).into_any_element()
         } else if let Some(group) = group_id {
@@ -988,6 +1163,11 @@ impl ColorLibraryPanel {
                         Icon::ChevronDown
                     },
                     self.keyboard_focus == PanelFocus::Collapse(section_id),
+                    if collapsed {
+                        "Expand section"
+                    } else {
+                        "Collapse section"
+                    },
                 )
                 .on_click(cx.listener(move |panel, _, window, cx| {
                     panel.keyboard_focus = PanelFocus::Collapse(section_id);
@@ -1025,12 +1205,79 @@ impl ColorLibraryPanel {
                     cx.stop_propagation();
                 })),
             )
+            .child(
+                small_icon_button(
+                    SharedString::from(format!("save-to-{}", section_id.key())),
+                    Icon::Plus,
+                    self.keyboard_focus == PanelFocus::QuickAddTo(section_id),
+                    if self.snapshot.quick_add_enabled {
+                        "Save current color to this section"
+                    } else {
+                        "Select a filled layer or choose a picker color first"
+                    },
+                )
+                .when(!self.snapshot.quick_add_enabled, |button| {
+                    button.opacity(0.45).cursor_default()
+                })
+                .when(self.snapshot.quick_add_enabled, |button| {
+                    button.on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.keyboard_focus = PanelFocus::QuickAddTo(section_id);
+                        panel.focus_handle.focus(window);
+                        cx.emit(ColorLibraryPanelEvent::QuickAdd {
+                            group: section_id.group(),
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                }),
+            )
+            .when_some(group_id.filter(|_| can_move_group_up), |header, group| {
+                header.child(
+                    small_icon_button(
+                        SharedString::from(format!("move-group-up-{}", group.0)),
+                        Icon::ArrowUp,
+                        self.keyboard_focus == PanelFocus::MoveGroupUp(group),
+                        "Move group up",
+                    )
+                    .on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.keyboard_focus = PanelFocus::MoveGroupUp(group);
+                        panel.focus_handle.focus(window);
+                        cx.emit(ColorLibraryPanelEvent::MoveGroupBy {
+                            group,
+                            direction: MoveDirection::Up,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+                )
+            })
+            .when_some(group_id.filter(|_| can_move_group_down), |header, group| {
+                header.child(
+                    small_icon_button(
+                        SharedString::from(format!("move-group-down-{}", group.0)),
+                        Icon::ArrowDown,
+                        self.keyboard_focus == PanelFocus::MoveGroupDown(group),
+                        "Move group down",
+                    )
+                    .on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.keyboard_focus = PanelFocus::MoveGroupDown(group);
+                        panel.focus_handle.focus(window);
+                        cx.emit(ColorLibraryPanelEvent::MoveGroupBy {
+                            group,
+                            direction: MoveDirection::Down,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+                )
+            })
             .when_some(group_id, |header, group| {
                 header.child(
                     small_icon_button(
                         SharedString::from(format!("remove-group-{}", group.0)),
                         Icon::Close,
                         self.keyboard_focus == PanelFocus::RemoveGroup(group),
+                        "Remove group",
                     )
                     .on_click(cx.listener(move |panel, _, window, cx| {
                         panel.keyboard_focus = PanelFocus::RemoveGroup(group);
@@ -1109,10 +1356,28 @@ impl ColorLibraryPanel {
         let name = row.fallback_name();
         let value = row.value.clone();
         let one_based_order = row.manual_order + 1;
+        let can_move_color = self
+            .snapshot
+            .sections
+            .iter()
+            .any(|destination| destination.id != section);
+        let move_destinations = if self.move_menu == Some(color) {
+            self.snapshot
+                .sections
+                .iter()
+                .filter(|destination| destination.id != section)
+                .map(|destination| (destination.id, destination.name.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let move_menu_width = 176.0_f32.min((self.geometry.width - 16.0).max(1.0));
+        let move_menu_height = (self.geometry.height - 16.0).max(1.0);
 
         div()
             .id(SharedString::from(format!("saved-color-{}", color.0)))
             .h(px(34.0))
+            .relative()
             .flex()
             .items_center()
             .gap(px(5.0))
@@ -1242,6 +1507,7 @@ impl ColorLibraryPanel {
                     SharedString::from(format!("saved-color-duplicate-{}", color.0)),
                     Icon::Copy,
                     self.keyboard_focus == PanelFocus::Duplicate(color),
+                    "Duplicate saved color",
                 )
                 .on_click(cx.listener(move |panel, _, window, cx| {
                     panel.keyboard_focus = PanelFocus::Duplicate(color);
@@ -1251,11 +1517,31 @@ impl ColorLibraryPanel {
                     cx.notify();
                 })),
             )
+            .when(can_move_color, |row| {
+                row.child(
+                    small_icon_button(
+                        SharedString::from(format!("saved-color-move-{}", color.0)),
+                        Icon::ChevronRight,
+                        self.keyboard_focus == PanelFocus::Move(color),
+                        "Move saved color to another group",
+                    )
+                    .on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.keyboard_focus = PanelFocus::Move(color);
+                        panel.focus_handle.focus(window);
+                        panel.move_menu = (panel.move_menu != Some(color)).then_some(color);
+                        panel.sort_menu = None;
+                        panel.normalize_keyboard_focus();
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+                )
+            })
             .child(
                 small_icon_button(
                     SharedString::from(format!("saved-color-remove-{}", color.0)),
                     Icon::Close,
                     self.keyboard_focus == PanelFocus::Remove(color),
+                    "Remove saved color",
                 )
                 .on_click(cx.listener(move |panel, _, window, cx| {
                     panel.keyboard_focus = PanelFocus::Remove(color);
@@ -1265,6 +1551,95 @@ impl ColorLibraryPanel {
                     cx.notify();
                 })),
             )
+            .when(can_move_color && self.move_menu == Some(color), |row| {
+                row.child(
+                    deferred(
+                        anchored()
+                            .anchor(Corner::TopRight)
+                            .offset(point(px(self.geometry.width - 36.0), px(30.0)))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "saved-color-move-menu-{}",
+                                        color.0
+                                    )))
+                                    .debug_selector(|| "COLOR_LIBRARY_MOVE_MENU".to_owned())
+                                    .w(px(move_menu_width))
+                                    .max_h(px(move_menu_height))
+                                    .overflow_y_scroll()
+                                    .p(px(5.0))
+                                    .flex()
+                                    .flex_col()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(SURFACE))
+                                    .shadow_lg()
+                                    .occlude()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(
+                                        div()
+                                            .px(px(7.0))
+                                            .py(px(4.0))
+                                            .text_size(px(9.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgb(MUTED))
+                                            .child("MOVE TO"),
+                                    )
+                                    .children(move_destinations.into_iter().map(
+                                        |(destination, destination_name)| {
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "saved-color-move-{}-to-{}",
+                                                    color.0,
+                                                    destination.key()
+                                                )))
+                                                .h(px(26.0))
+                                                .flex_none()
+                                                .px(px(7.0))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(4.0))
+                                                .border_1()
+                                                .border_color(rgb(
+                                                    if self.keyboard_focus
+                                                        == PanelFocus::MoveTo(color, destination)
+                                                    {
+                                                        ACCENT
+                                                    } else {
+                                                        SURFACE
+                                                    },
+                                                ))
+                                                .text_size(px(10.0))
+                                                .text_color(rgb(TEXT))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                                                .child(destination_name)
+                                                .on_click(cx.listener(
+                                                    move |panel, _, window, cx| {
+                                                        panel.move_menu = None;
+                                                        panel.keyboard_focus =
+                                                            PanelFocus::Move(color);
+                                                        panel.focus_handle.focus(window);
+                                                        cx.emit(
+                                                            ColorLibraryPanelEvent::MoveColorToSection {
+                                                                color,
+                                                                section: destination,
+                                                            },
+                                                        );
+                                                        cx.stop_propagation();
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                        },
+                                    )),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            })
     }
 
     fn inline_input(&self, target: EditTarget) -> Option<Entity<PanelTextInput>> {
@@ -1479,8 +1854,11 @@ fn small_icon_button(
     id: impl Into<ElementId>,
     icon_kind: Icon,
     focused: bool,
+    tooltip: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
-    small_button(id, "", focused).child(icon(icon_kind, 13.0, rgb(TEXT)))
+    small_button(id, "", focused)
+        .child(icon(icon_kind, 13.0, rgb(TEXT)))
+        .tooltip(toolbar::editor_tooltip(tooltip, None))
 }
 
 fn sort_button(
@@ -2280,6 +2658,131 @@ fn utf8_offset_from_utf16(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn live_panel_updates_quick_add_keyboard_eligibility(cx: &mut gpui::TestAppContext) {
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            ColorLibraryPanel::new(
+                ColorLibrarySnapshot::default(),
+                ColorLibraryPanelPresentation::default(),
+                window,
+                cx,
+            )
+        });
+
+        panel.update(cx, |panel, cx| {
+            assert!(!panel.focus_targets().contains(&PanelFocus::QuickAdd));
+            panel.set_snapshot(
+                ColorLibrarySnapshot {
+                    quick_add_enabled: true,
+                    ..ColorLibrarySnapshot::default()
+                },
+                cx,
+            );
+            assert!(panel.focus_targets().contains(&PanelFocus::QuickAdd));
+        });
+    }
+
+    #[gpui::test]
+    fn move_controls_are_reachable_without_dragging(cx: &mut gpui::TestAppContext) {
+        let snapshot = ColorLibrarySnapshot {
+            sections: vec![
+                section(),
+                ColorLibrarySection {
+                    id: ColorLibrarySectionId::Group(ColorLibraryGroupId(8)),
+                    name: "Accent".into(),
+                    sort: ColorLibrarySort::default(),
+                    rows: Vec::new(),
+                },
+                ColorLibrarySection {
+                    id: ColorLibrarySectionId::Ungrouped,
+                    name: "Ungrouped".into(),
+                    sort: ColorLibrarySort::default(),
+                    rows: Vec::new(),
+                },
+            ],
+            ..ColorLibrarySnapshot::default()
+        };
+        let (panel, cx) = cx.add_window_view(move |window, cx| {
+            ColorLibraryPanel::new(
+                snapshot,
+                ColorLibraryPanelPresentation::default(),
+                window,
+                cx,
+            )
+        });
+
+        panel.update(cx, |panel, _| {
+            panel.move_menu = Some(ColorLibraryColorId(1));
+            let targets = panel.focus_targets();
+            assert!(targets.contains(&PanelFocus::Move(ColorLibraryColorId(1))));
+            assert!(targets.contains(&PanelFocus::MoveTo(
+                ColorLibraryColorId(1),
+                ColorLibrarySectionId::Group(ColorLibraryGroupId(8))
+            )));
+            assert!(targets.contains(&PanelFocus::MoveGroupDown(ColorLibraryGroupId(7))));
+            assert!(targets.contains(&PanelFocus::MoveGroupUp(ColorLibraryGroupId(8))));
+        });
+    }
+
+    #[gpui::test]
+    fn move_menu_stays_inside_the_window_near_the_panel_bottom(cx: &mut gpui::TestAppContext) {
+        let mut sections = vec![ColorLibrarySection {
+            id: ColorLibrarySectionId::Group(ColorLibraryGroupId(7)),
+            name: "Brand".into(),
+            sort: ColorLibrarySort::default(),
+            rows: vec![
+                row(1, Some("One"), "#111111"),
+                row(2, Some("Two"), "#222222"),
+                row(3, Some("Three"), "#333333"),
+            ],
+        }];
+        sections.extend((8..24).map(|id| ColorLibrarySection {
+            id: ColorLibrarySectionId::Group(ColorLibraryGroupId(id)),
+            name: format!("Destination {id}").into(),
+            sort: ColorLibrarySort::default(),
+            rows: Vec::new(),
+        }));
+        sections.push(ColorLibrarySection {
+            id: ColorLibrarySectionId::Ungrouped,
+            name: "Ungrouped".into(),
+            sort: ColorLibrarySort::default(),
+            rows: Vec::new(),
+        });
+        let snapshot = ColorLibrarySnapshot {
+            sections,
+            ..ColorLibrarySnapshot::default()
+        };
+        let presentation = ColorLibraryPanelPresentation {
+            geometry: ColorLibraryPanelGeometry {
+                left: 8.0,
+                top: 8.0,
+                width: MIN_WIDTH,
+                height: MIN_HEIGHT,
+            },
+            collapsed_sections: HashSet::new(),
+        };
+        let (panel, cx) = cx.add_window_view(move |window, cx| {
+            ColorLibraryPanel::new(snapshot, presentation, window, cx)
+        });
+        cx.simulate_resize(size(px(400.0), px(260.0)));
+        panel.update(cx, |panel, cx| {
+            panel.move_menu = Some(ColorLibraryColorId(3));
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx.debug_bounds("COLOR_LIBRARY_MOVE_MENU").unwrap();
+        let viewport = cx.update(|window, _| Bounds {
+            origin: Point::default(),
+            size: window.viewport_size(),
+        });
+        assert!(bounds.left() >= viewport.left());
+        assert!(bounds.top() >= viewport.top());
+        assert!(bounds.right() <= viewport.right());
+        assert!(bounds.bottom() <= viewport.bottom());
+    }
 
     fn row(id: u64, name: Option<&str>, value: &str) -> ColorLibraryRow {
         ColorLibraryRow {

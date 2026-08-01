@@ -34,8 +34,17 @@ unicode-segmentation = { workspace = true }
 core-foundation = "0.10"
 core-graphics = "0.24"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "v0.179.4", features = ["test-support"] }
 
 [[bin]]
 name = "strek"

@@ -202,6 +202,7 @@ impl FromStr for SelectionMode {
 pub(crate) enum ColorTarget {
     Fill,
     Stroke,
+    FrameBackground,
 }
 
 impl FromStr for ColorTarget {
@@ -211,8 +212,9 @@ impl FromStr for ColorTarget {
         match value {
             "fill" => Ok(Self::Fill),
             "stroke" => Ok(Self::Stroke),
+            "frame_background" | "frame-background" => Ok(Self::FrameBackground),
             _ => Err(format!(
-                "unknown color target `{value}`; use fill or stroke"
+                "unknown color target `{value}`; use fill, stroke, or frame-background"
             )),
         }
     }
@@ -361,6 +363,7 @@ pub(crate) enum UiTarget {
     DesignPanel,
     FillColorPicker,
     StrokeColorPicker,
+    FrameBackgroundColorPicker,
     ColorLibrary,
     PrecisionControls,
 }
@@ -376,10 +379,13 @@ impl FromStr for UiTarget {
             "design_panel" | "design-panel" => Ok(Self::DesignPanel),
             "fill_color_picker" | "fill-color-picker" => Ok(Self::FillColorPicker),
             "stroke_color_picker" | "stroke-color-picker" => Ok(Self::StrokeColorPicker),
+            "frame_background_color_picker" | "frame-background-color-picker" => {
+                Ok(Self::FrameBackgroundColorPicker)
+            }
             "color_library" | "color-library" => Ok(Self::ColorLibrary),
             "precision_controls" | "precision-controls" => Ok(Self::PrecisionControls),
             _ => Err(format!(
-                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, design-panel, fill-color-picker, stroke-color-picker, color-library, or precision-controls"
+                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, design-panel, fill-color-picker, stroke-color-picker, frame-background-color-picker, color-library, or precision-controls"
             )),
         }
     }
@@ -918,22 +924,62 @@ struct QueuedConnection {
 }
 
 impl PendingRequest {
-    pub(crate) fn respond_with(
+    pub(crate) fn begin(self) -> Option<(AutomationRequest, AutomationResponder)> {
+        if Instant::now() >= self.deadline {
+            self.lifecycle.cancel_pending();
+            return None;
+        }
+        if !self.lifecycle.begin_execution() {
+            return None;
+        }
+
+        let responder = AutomationResponder {
+            sender: self.responder,
+            lifecycle: self.lifecycle,
+        };
+        Some((self.request, responder))
+    }
+
+    #[cfg(test)]
+    fn respond_with(
         self,
         make_response: impl FnOnce(AutomationRequest) -> AutomationResponse,
     ) -> bool {
-        if Instant::now() >= self.deadline {
-            self.lifecycle.cancel_pending();
+        let Some((request, responder)) = self.begin() else {
             return false;
-        }
-        if !self.lifecycle.begin_execution() {
-            return false;
-        }
-        let response = make_response(self.request);
-        let sent = self.responder.send(response).is_ok();
+        };
+        responder.respond(make_response(request))
+    }
+}
+
+pub(crate) struct AutomationResponder {
+    sender: SyncSender<AutomationResponse>,
+    lifecycle: Arc<RequestLifecycle>,
+}
+
+impl AutomationResponder {
+    pub(crate) fn respond(self, response: AutomationResponse) -> bool {
+        let sent = self.sender.send(response).is_ok();
         self.lifecycle.complete();
         sent
     }
+}
+
+#[cfg(test)]
+pub(crate) fn pending_request_for_test(
+    request: AutomationRequest,
+) -> (PendingRequest, mpsc::Receiver<AutomationResponse>) {
+    let (responder, response) = mpsc::sync_channel(1);
+    let lifecycle = Arc::new(RequestLifecycle::pending());
+    (
+        PendingRequest {
+            request,
+            responder,
+            deadline: Instant::now() + RESPONSE_TIMEOUT,
+            lifecycle,
+        },
+        response,
+    )
 }
 
 pub(crate) fn start_server() -> io::Result<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>> {
@@ -1430,12 +1476,16 @@ fn parse_bool(value: String, name: &str) -> Result<bool, String> {
 }
 
 pub(crate) fn capture_screenshot() -> Result<Vec<u8>, String> {
-    let response = request(AutomationRequest::Activate)?.into_result()?;
+    let response = request(screenshot_state_request())?.into_result()?;
     let state = response
         .state
         .ok_or_else(|| "Strek did not return window state".to_owned())?;
     std::thread::sleep(Duration::from_millis(75));
     capture_window(state.process_id, state.window)
+}
+
+fn screenshot_state_request() -> AutomationRequest {
+    AutomationRequest::State
 }
 
 #[cfg(target_os = "macos")]
@@ -1603,6 +1653,17 @@ mod tests {
                 visible: true
             })
         ));
+
+        let mut args = ["frame-background-color-picker", "show"]
+            .into_iter()
+            .map(str::to_owned);
+        assert!(matches!(
+            parse_request("ui".to_owned(), &mut args),
+            Ok(AutomationRequest::SetUi {
+                target: UiTarget::FrameBackgroundColorPicker,
+                visible: true
+            })
+        ));
     }
 
     #[test]
@@ -1629,6 +1690,17 @@ mod tests {
             parse_request("color".to_owned(), &mut args),
             Ok(AutomationRequest::SetColor {
                 target: ColorTarget::Fill,
+                color: Some(color)
+            }) if color == "#336699cc"
+        ));
+
+        let mut args = ["frame-background", "#336699cc"]
+            .into_iter()
+            .map(str::to_owned);
+        assert!(matches!(
+            parse_request("color".to_owned(), &mut args),
+            Ok(AutomationRequest::SetColor {
+                target: ColorTarget::FrameBackground,
                 color: Some(color)
             }) if color == "#336699cc"
         ));
@@ -1661,6 +1733,14 @@ mod tests {
                 format: ArtifactFormat::Svg,
                 path: Some(path)
             }) if path == "/tmp/logo.svg"
+        ));
+    }
+
+    #[test]
+    fn screenshots_read_window_state_without_activating_the_application() {
+        assert!(matches!(
+            screenshot_state_request(),
+            AutomationRequest::State
         ));
     }
 

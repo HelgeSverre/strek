@@ -12,17 +12,19 @@ use serde_json::{json, Map, Value};
 use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight, Backspace,
-    BringForward, BringToFront, ClearGuides, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete,
-    DeselectAll, DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector,
-    EllipseTool, ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing,
-    FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument,
-    OpenKeyboardShortcuts, Paste, PenTool, QuitApplication, RectangleTool, Redo, ReversePath,
-    SaveCurrentColor, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward,
-    SendToBack, ShowCommandPalette, SplitPath, TextLarger, TextSmaller, TextTool,
-    ToggleColorLibrary, ToggleDesignPanel, ToggleFrameBackground, ToggleGrid, ToggleGuideLock,
-    ToggleGuides, ToggleLayerPanel, TogglePathClosed, TogglePrecisionMenu, ToggleRulers,
-    ToggleSnapGrid, ToggleSnapGuides, ToggleSnapObjects, ToggleSnapping, Undo, Ungroup, ZoomIn,
-    ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    BringForward, BringToFront, ClearGuides, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut,
+    DecreaseGridMajorInterval, DecreaseGridSpacing, DecreaseSnapTolerance, Delete, DeselectAll,
+    DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector, EllipseTool,
+    ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool,
+    Group, IncreaseGridMajorInterval, IncreaseGridSpacing, IncreaseSnapTolerance, InvertSelection,
+    JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts, Paste, PenTool,
+    QuitApplication, RectangleTool, Redo, ReversePath, SaveCurrentColor, SaveDocument,
+    SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath,
+    TextLarger, TextSmaller, TextTool, ToggleColorLibrary, ToggleDesignPanel,
+    ToggleFrameBackground, ToggleGrid, ToggleGuideLock, ToggleGuides, ToggleLayerPanel,
+    TogglePathClosed, TogglePrecisionMenu, ToggleRulers, ToggleSnapGrid, ToggleSnapGuides,
+    ToggleSnapObjects, ToggleSnapping, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll,
+    ZoomToFit, ZoomToSelection,
 };
 
 const KEYMAP_VERSION: u64 = 1;
@@ -62,6 +64,12 @@ pub(crate) enum AppCommand {
     ToggleSnapObjects,
     ToggleSnapGuides,
     ToggleSnapGrid,
+    DecreaseSnapTolerance,
+    IncreaseSnapTolerance,
+    DecreaseGridSpacing,
+    IncreaseGridSpacing,
+    DecreaseGridMajorInterval,
+    IncreaseGridMajorInterval,
     ClearGuides,
     SaveCurrentColor,
     ShowCommandPalette,
@@ -637,6 +645,54 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         ToggleSnapGrid
     ),
     app_command!(
+        "view.snap_tolerance_decrease",
+        "Decrease Snap Tolerance",
+        "Decrease the snapping tolerance by one pixel",
+        "View",
+        [],
+        DecreaseSnapTolerance
+    ),
+    app_command!(
+        "view.snap_tolerance_increase",
+        "Increase Snap Tolerance",
+        "Increase the snapping tolerance by one pixel",
+        "View",
+        [],
+        IncreaseSnapTolerance
+    ),
+    app_command!(
+        "view.grid_spacing_decrease",
+        "Decrease Grid Spacing",
+        "Decrease document grid spacing by the current precision step",
+        "View",
+        [],
+        DecreaseGridSpacing
+    ),
+    app_command!(
+        "view.grid_spacing_increase",
+        "Increase Grid Spacing",
+        "Increase document grid spacing by the current precision step",
+        "View",
+        [],
+        IncreaseGridSpacing
+    ),
+    app_command!(
+        "view.grid_major_interval_decrease",
+        "Decrease Grid Major Interval",
+        "Draw major grid lines more frequently",
+        "View",
+        [],
+        DecreaseGridMajorInterval
+    ),
+    app_command!(
+        "view.grid_major_interval_increase",
+        "Increase Grid Major Interval",
+        "Draw major grid lines less frequently",
+        "View",
+        [],
+        IncreaseGridMajorInterval
+    ),
+    app_command!(
         "view.clear_guides",
         "Clear Guides",
         "Remove all document guides as one undoable edit",
@@ -1039,6 +1095,12 @@ pub(crate) fn action_for(target: CommandTarget) -> Box<dyn Action> {
             AppCommand::ToggleSnapObjects => Box::new(ToggleSnapObjects),
             AppCommand::ToggleSnapGuides => Box::new(ToggleSnapGuides),
             AppCommand::ToggleSnapGrid => Box::new(ToggleSnapGrid),
+            AppCommand::DecreaseSnapTolerance => Box::new(DecreaseSnapTolerance),
+            AppCommand::IncreaseSnapTolerance => Box::new(IncreaseSnapTolerance),
+            AppCommand::DecreaseGridSpacing => Box::new(DecreaseGridSpacing),
+            AppCommand::IncreaseGridSpacing => Box::new(IncreaseGridSpacing),
+            AppCommand::DecreaseGridMajorInterval => Box::new(DecreaseGridMajorInterval),
+            AppCommand::IncreaseGridMajorInterval => Box::new(IncreaseGridMajorInterval),
             AppCommand::ClearGuides => Box::new(ClearGuides),
             AppCommand::SaveCurrentColor => Box::new(SaveCurrentColor),
             AppCommand::ShowCommandPalette => Box::new(ShowCommandPalette),
@@ -1095,6 +1157,12 @@ fn contexts_for(target: CommandTarget) -> &'static [&'static str] {
             | AppCommand::ToggleSnapObjects
             | AppCommand::ToggleSnapGuides
             | AppCommand::ToggleSnapGrid
+            | AppCommand::DecreaseSnapTolerance
+            | AppCommand::IncreaseSnapTolerance
+            | AppCommand::DecreaseGridSpacing
+            | AppCommand::IncreaseGridSpacing
+            | AppCommand::DecreaseGridMajorInterval
+            | AppCommand::IncreaseGridMajorInterval
             | AppCommand::ClearGuides
             | AppCommand::SaveCurrentColor,
         ) => &[EDITOR_CONTEXT, TEXT_CONTEXT, MENU_CONTEXT],

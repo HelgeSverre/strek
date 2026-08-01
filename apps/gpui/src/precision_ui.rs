@@ -33,10 +33,10 @@ pub(crate) const MAX_GRID_LINES_PER_AXIS: usize = 2_048;
 pub(crate) const MAX_RULER_TICKS_PER_AXIS: usize = 2_048;
 pub(crate) const MAX_GUIDE_LINES: usize = 10_000;
 
-const MIN_TOLERANCE_PX: f32 = 1.0;
-const MAX_TOLERANCE_PX: f32 = 32.0;
-const MIN_GRID_SPACING: f32 = 0.1;
-const MAX_GRID_SPACING: f32 = 100_000.0;
+pub(crate) const MIN_TOLERANCE_PX: f32 = 1.0;
+pub(crate) const MAX_TOLERANCE_PX: f32 = 32.0;
+pub(crate) const MIN_GRID_SPACING: f32 = 0.1;
+pub(crate) const MAX_GRID_SPACING: f32 = 100_000.0;
 
 /// A coarse snapping category exposed by the V1 precision popover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -662,7 +662,7 @@ fn separator() -> impl IntoElement {
     div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(BORDER))
 }
 
-fn grid_spacing_step(spacing: f32) -> f32 {
+pub(crate) fn grid_spacing_step(spacing: f32) -> f32 {
     match spacing.abs() {
         value if value < 2.0 => 0.1,
         value if value < 20.0 => 1.0,

@@ -238,10 +238,21 @@ fn paths_refer_to_same_file(first: &Path, second: &Path) -> bool {
         return true;
     }
 
-    let (Ok(first), Ok(second)) = (first.metadata(), second.metadata()) else {
-        return false;
-    };
-    same_file_metadata(&first, &second)
+    #[cfg(windows)]
+    {
+        return matches!(
+            (windows_file_identity(first), windows_file_identity(second)),
+            (Ok(first), Ok(second)) if first == second
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let (Ok(first), Ok(second)) = (first.metadata(), second.metadata()) else {
+            return false;
+        };
+        same_file_metadata(&first, &second)
+    }
 }
 
 #[cfg(unix)]
@@ -252,19 +263,28 @@ fn same_file_metadata(first: &fs::Metadata, second: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn same_file_metadata(first: &fs::Metadata, second: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
+fn windows_file_identity(path: &Path) -> io::Result<(u32, u64)> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
 
-    matches!(
-        (
-            first.volume_serial_number(),
-            first.file_index(),
-            second.volume_serial_number(),
-            second.file_index(),
-        ),
-        (Some(first_volume), Some(first_index), Some(second_volume), Some(second_index))
-            if first_volume == second_volume && first_index == second_index
-    )
+    let file = File::open(path)?;
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` owns a valid handle for the duration of the call, and
+    // `information` points to writable storage for the requested structure.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: a successful `GetFileInformationByHandle` call initialized the structure.
+    let information = unsafe { information.assume_init() };
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok((information.dwVolumeSerialNumber, file_index))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -305,23 +325,24 @@ impl RecentFiles {
         &self.paths
     }
 
-    /// Move a path to the front and persist the updated list.
+    /// Move a path to the front of the in-memory list.
     pub fn record(&mut self, path: &Path) {
         record_recent_path(&mut self.paths, path);
-        if let Err(error) = self.persist() {
-            log::warn!("could not persist recent files: {error}");
-        }
     }
 
-    /// Remove a path that failed to open.
+    /// Remove a path that failed to open from the in-memory list.
     pub fn remove(&mut self, path: &Path) {
         self.paths.retain(|candidate| candidate != path);
-        if let Err(error) = self.persist() {
+    }
+
+    /// Persist the current snapshot. Call from a background executor.
+    pub fn persist(&self) {
+        if let Err(error) = self.write() {
             log::warn!("could not persist recent files: {error}");
         }
     }
 
-    fn persist(&self) -> io::Result<()> {
+    fn write(&self) -> io::Result<()> {
         let Some(path) = recent_files_path() else {
             return Ok(());
         };
@@ -417,10 +438,56 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    if destination.exists() {
-        fs::remove_file(destination)?;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let destination_exists = destination.exists();
+    let source_wide = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    if destination_exists {
+        // SAFETY: Both paths are valid, nul-terminated UTF-16 buffers that stay
+        // alive for the duration of the call. The optional pointers are null.
+        let replaced = unsafe {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                source_wide.as_ptr(),
+                ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        if replaced == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    } else {
+        // SAFETY: Both paths are valid, nul-terminated UTF-16 buffers that stay
+        // alive for the duration of the call.
+        let moved = unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
-    fs::rename(source, destination)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -453,6 +520,40 @@ mod tests {
         };
 
         assert_eq!(restored.descendants(restored.root).count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_replaces_existing_contents() {
+        let directory = temporary_test_directory("atomic-replace");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("preferences.json");
+        fs::write(&path, b"old contents").unwrap();
+
+        write_atomic(&path, b"new contents").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new contents");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn failed_atomic_replace_preserves_the_existing_windows_file() {
+        let directory = temporary_test_directory("atomic-replace-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("preferences.json");
+        fs::write(&path, b"old contents").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        assert!(write_atomic(&path, b"new contents").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old contents");
+
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

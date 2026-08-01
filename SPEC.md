@@ -107,6 +107,7 @@ strek/
 │   │       ├── layout.rs         # Auto-layout types and engine
 │   │       ├── transform.rs      # Affine transforms, view
 │   │       ├── cache.rs          # Derived data caching
+│   │       ├── color_library.rs  # Saved Colors and groups
 │   │       ├── selection.rs      # Selection state
 │   │       ├── command.rs        # Command/patch system
 │   │       ├── history.rs        # Undo/redo stack
@@ -114,7 +115,11 @@ strek/
 │   │       ├── layers.rs         # Layer-panel projection
 │   │       ├── render.rs         # Document-to-display-list conversion
 │   │       ├── snap.rs           # Snapping and alignment
-│   │       └── transaction.rs    # Reversible pointer transactions
+│   │       ├── precision.rs      # Grid and guide data
+│   │       ├── property_scrub.rs # Numeric property scrubbing
+│   │       ├── transaction.rs    # Reversible pointer transactions
+│   │       └── editor/
+│   │           └── color_library_commands.rs
 │   │
 │   ├── editor_render/            # Display list IR (backend-agnostic)
 │   │   ├── Cargo.toml
@@ -131,15 +136,25 @@ strek/
         ├── Cargo.toml
         └── src/
             ├── main.rs           # GPUI shell and event routing
+            ├── assets.rs
+            ├── automation.rs     # Semantic automation protocol
+            ├── automation_controller.rs
+            ├── automation_io.rs  # Background file/export automation
             ├── canvas.rs         # GPUI display-list renderer
+            ├── color_library_panel.rs
+            ├── color_picker.rs
             ├── commands.rs       # Command registry and keymap
             ├── command_palette.rs
             ├── document_io.rs
             ├── export.rs
             ├── layer_panel.rs
+            ├── mcp.rs
+            ├── precision_ui.rs
             ├── properties_panel.rs
+            ├── status_bar.rs
             ├── text_input.rs
-            └── toolbar.rs
+            ├── toolbar.rs
+            └── workspace_preferences.rs
 ```
 
 ### Cargo Workspace Configuration
@@ -1273,67 +1288,39 @@ display list.
 
 ### 14.1 Native Format (JSON)
 
-Simple JSON serialization of the document:
+The current native format is version 3. `nodes` is the serialized slot-map
+sequence, including its sentinel slot; node IDs use `{ "idx", "version" }`
+objects. An empty document serializes as:
 
 ```json
 {
-  "version": 2,
-  "root": "node_0",
-  "nodes": {
-    "node_0": {
-      "name": "Root",
-      "parent": null,
-      "children": ["node_1"],
-      "kind": "Group",
-      "transform": [1, 0, 0, 1, 0, 0],
-      "style": { "fill": null, "stroke": null, "opacity": 1 },
-      "layout": "Free",
-      "visible": true,
-      "locked": false
-    },
-    "node_1": {
-      "name": "Icon 24x24",
-      "parent": "node_0",
-      "children": ["node_2"],
-      "kind": {
-        "Frame": {
-          "width": 24,
-          "height": 24,
-          "background": { "Solid": [1.0, 1.0, 1.0, 1.0] }
-        }
+  "version": 3,
+  "nodes": [
+    { "value": null, "version": 0 },
+    {
+      "value": {
+        "name": "Root",
+        "parent": null,
+        "children": [],
+        "kind": "Group",
+        "transform": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "style": {
+          "fill": { "Solid": [0.0, 0.0, 0.0, 1.0] },
+          "stroke": null,
+          "opacity": 1.0
+        },
+        "layout": "Free",
+        "visible": true,
+        "locked": false,
+        "deleted": false
       },
-      "transform": [1, 0, 0, 1, 0, 0],
-      "style": { "fill": null, "stroke": null, "opacity": 1 },
-      "layout": "Free",
-      "visible": true,
-      "locked": false
-    },
-    "node_2": {
-      "name": "Rectangle",
-      "parent": "node_1",
-      "children": [],
-      "kind": {
-        "Shape": {
-          "commands": [
-            { "MoveTo": [0, 0] },
-            { "LineTo": [100, 0] },
-            { "LineTo": [100, 100] },
-            { "LineTo": [0, 100] },
-            "Close"
-          ]
-        }
-      },
-      "transform": [1, 0, 0, 1, 50, 50],
-      "style": {
-        "fill": { "Solid": [0.2, 0.4, 0.8, 1.0] },
-        "stroke": null,
-        "opacity": 1
-      },
-      "layout": "Free",
-      "visible": true,
-      "locked": false
+      "version": 1
     }
-  }
+  ],
+  "root": { "idx": 1, "version": 1 },
+  "grid": { "spacing": 10.0, "major_every": 5 },
+  "guides": [],
+  "color_library": { "groups": [], "colors": [] }
 }
 ```
 
@@ -1758,8 +1745,8 @@ Group and Saved Color mutations are document edits and are undoable. The chosen
 sort mode is saved because it defines the library's authored organization.
 Manual order is retained while another sort mode is active.
 
-The Color Library ships in the native version 3 metadata migration
-as precision aids. Version 1 and 2 files receive an empty library. Validation
+The Color Library ships in native format version 3 alongside precision
+metadata. Version 1 and 2 files receive an empty library. Validation
 limits are 256 groups, 10,000 Saved Colors, and 256 UTF-8 bytes per name, with
 valid IDs, group references, orders, and normalized finite color components.
 SVG import starts with an empty library; export does not serialize the library.
@@ -1909,5 +1896,5 @@ serde = "1.0"           # Serialization
 serde_json = "1.0"      # JSON format
 
 # Product frontend
-gpui = "0.1"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "v0.179.4" }
 ```

@@ -18,8 +18,8 @@ use crate::{
     PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite, PropertyRotateLeft,
     PropertyRotateRight, PropertyToggleStroke, SetLayoutFree, SetLayoutHorizontal,
     SetLayoutVertical, SetTextFamilyMonospace, SetTextFamilySerif, SetTextFamilySystem,
-    StartFillColorInput, StartStrokeColorInput, Strek, TextWeightDown, TextWeightUp,
-    ToggleFrameBackground, ToggleTextItalic,
+    StartFillColorInput, StartFrameBackgroundColorInput, StartStrokeColorInput, Strek,
+    TextWeightDown, TextWeightUp, ToggleFrameBackground, ToggleTextItalic,
 };
 
 const SURFACE: u32 = 0x202124;
@@ -77,6 +77,7 @@ impl<T> SelectionValue<T> {
 pub(crate) enum ColorTarget {
     Fill,
     Stroke,
+    FrameBackground,
 }
 
 #[derive(Debug, Clone)]
@@ -565,14 +566,26 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         "H",
                         format_number(frame.height),
                     ))
+                    .child(property_label("Background"))
+                    .child(color_value_editor(
+                        "frame-background-color",
+                        frame.background.as_ref(),
+                        false,
+                        snapshot
+                            .color_input
+                            .as_ref()
+                            .filter(|input| input.target == ColorTarget::FrameBackground),
+                        "Edit frame background color",
+                        StartFrameBackgroundColorInput,
+                    ))
                     .child(div().px(px(10.0)).pb(px(10.0)).child(property_button(
-                        "frame-background",
+                        "frame-background-toggle",
                         if frame.background.is_some() {
-                            "White background"
+                            "Make transparent"
                         } else {
-                            "Transparent background"
+                            "Use white background"
                         },
-                        "Toggle frame background",
+                        "Toggle frame transparency",
                         ToggleFrameBackground,
                     ))),
             )
