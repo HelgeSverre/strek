@@ -13,6 +13,7 @@
 
 pub mod action;
 pub mod cache;
+pub mod color_library;
 pub mod command;
 pub mod editor;
 pub mod history;
@@ -21,6 +22,7 @@ pub mod layers;
 pub mod layout;
 pub mod node;
 pub mod path;
+pub mod precision;
 mod property_scrub;
 pub mod render;
 pub mod selection;
@@ -34,6 +36,11 @@ pub use action::{
     ActionCategory, ActionMeta, EditorAction, NudgeDirection, NudgeDistance, Shortcut,
 };
 pub use cache::{Cache, DirtyFlags};
+pub use color_library::{
+    ColorGroup, ColorGroupId, ColorLibrary, ColorLibraryError, ColorSortMode, RgbaColor,
+    SavedColor, SavedColorId, SortDirection, MAX_COLOR_GROUPS, MAX_COLOR_NAME_BYTES,
+    MAX_SAVED_COLORS,
+};
 pub use command::{Command, Patch};
 pub use editor::{
     AnchorRef, ArtworkSnapshot, CreationStyleDefaults, Editor, EditorClipboard, GroupLayoutMode,
@@ -47,6 +54,7 @@ pub use node::{
     FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData, TextSizing,
 };
 pub use path::{HandleMode, PathAnchor, PathCmd, PathContour, PathData, Rect};
+pub use precision::{GridSettings, Guide, GuideAxis, GuideId, PrecisionError, MAX_GUIDES};
 pub use property_scrub::{
     NumericAdjustmentDirection, NumericAdjustmentMode, NumericPropertyScrubSession,
     NumericPropertyTarget,
@@ -54,6 +62,7 @@ pub use property_scrub::{
 pub use selection::{Selection, SelectionAction};
 pub use snap::{
     AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult,
+    SnapSettings, SnapSettingsError, SnapTarget, MAX_SNAP_TOLERANCE, MIN_SNAP_TOLERANCE,
 };
 pub use style::{Paint, Stroke, Style};
 pub use text::{
@@ -80,11 +89,23 @@ pub struct SavedDocument {
 
     /// Root node ID
     pub root: NodeId,
+
+    /// Document-owned square grid definition.
+    #[serde(default)]
+    pub grid: GridSettings,
+
+    /// Persistent ruler guides.
+    #[serde(default)]
+    pub guides: Vec<Guide>,
+
+    /// Document-local, unlinked saved colors.
+    #[serde(default)]
+    pub color_library: ColorLibrary,
 }
 
 impl SavedDocument {
     /// Current file format version
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 3;
 }
 
 /// Error returned while decoding a saved document.
@@ -98,6 +119,12 @@ pub enum DocumentLoadError {
 /// Structural reason a serialized document cannot be loaded safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentValidationError {
+    InvalidPrecisionData {
+        reason: PrecisionError,
+    },
+    InvalidColorLibrary {
+        reason: ColorLibraryError,
+    },
     TooManyNodes {
         count: usize,
         limit: usize,
@@ -170,6 +197,12 @@ pub enum DocumentValidationError {
 impl fmt::Display for DocumentValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPrecisionData { reason } => {
+                write!(formatter, "invalid precision data: {reason}")
+            }
+            Self::InvalidColorLibrary { reason } => {
+                write!(formatter, "invalid color library: {reason}")
+            }
             Self::TooManyNodes { count, limit } => {
                 write!(formatter, "document contains {count} nodes; limit is {limit}")
             }
@@ -288,6 +321,15 @@ pub struct Document {
     /// Root node ID (always a Group)
     pub root: NodeId,
 
+    /// Document-owned square grid definition.
+    pub grid: GridSettings,
+
+    /// Persistent document-wide ruler guides.
+    pub guides: Vec<Guide>,
+
+    /// Document-local, copy-by-value saved colors.
+    pub color_library: ColorLibrary,
+
     /// Cached derived data
     pub cache: Cache,
 
@@ -297,6 +339,10 @@ pub struct Document {
     /// Platform-shaped text layouts keyed by node. This is derived runtime data
     /// and is intentionally excluded from the saved document.
     text_layouts: HashMap<NodeId, text::TextLayout>,
+
+    next_guide_id: u64,
+    next_color_group_id: u64,
+    next_saved_color_id: u64,
 }
 
 impl Document {
@@ -308,10 +354,34 @@ impl Document {
         Self {
             nodes,
             root,
+            grid: GridSettings::default(),
+            guides: Vec::new(),
+            color_library: ColorLibrary::default(),
             cache: Cache::new(),
             dirty: DirtyFlags::all_dirty(),
             text_layouts: HashMap::new(),
+            next_guide_id: 1,
+            next_color_group_id: 1,
+            next_saved_color_id: 1,
         }
+    }
+
+    pub(crate) fn allocate_guide_id(&mut self) -> Result<GuideId, PrecisionError> {
+        take_next_id(&mut self.next_guide_id)
+            .map(GuideId::from_raw)
+            .ok_or(PrecisionError::IdSpaceExhausted)
+    }
+
+    pub(crate) fn allocate_color_group_id(&mut self) -> Result<ColorGroupId, ColorLibraryError> {
+        take_next_id(&mut self.next_color_group_id)
+            .map(ColorGroupId::from_raw)
+            .ok_or(ColorLibraryError::IdSpaceExhausted)
+    }
+
+    pub(crate) fn allocate_saved_color_id(&mut self) -> Result<SavedColorId, ColorLibraryError> {
+        take_next_id(&mut self.next_saved_color_id)
+            .map(SavedColorId::from_raw)
+            .ok_or(ColorLibraryError::IdSpaceExhausted)
     }
 
     /// Get a reference to a node by ID.
@@ -322,6 +392,11 @@ impl Document {
     /// Get a mutable reference to a node by ID.
     pub fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         self.nodes.get_mut(id)
+    }
+
+    /// Find a persistent guide by stable ID.
+    pub fn guide(&self, id: GuideId) -> Option<&Guide> {
+        self.guides.iter().find(|guide| guide.id == id)
     }
 
     /// Add a new node as a child of the given parent.
@@ -990,6 +1065,8 @@ impl Document {
             points.extend(self.snap_points(id));
         }
 
+        points.extend(self.guides.iter().copied().map(snap::SnapPoint::from_guide));
+
         points
     }
 
@@ -1375,6 +1452,9 @@ impl Document {
             version: SavedDocument::CURRENT_VERSION,
             nodes,
             root,
+            grid: self.grid,
+            guides: self.guides.clone(),
+            color_library: self.color_library.clone(),
         }
     }
 
@@ -1386,27 +1466,59 @@ impl Document {
     }
 
     /// Create a document from a saved format after validating its live scene graph.
-    pub fn from_saved(saved: SavedDocument) -> Result<Self, DocumentLoadError> {
+    pub fn from_saved(mut saved: SavedDocument) -> Result<Self, DocumentLoadError> {
         if saved.version > SavedDocument::CURRENT_VERSION {
             return Err(DocumentLoadError::UnsupportedVersion {
                 version: saved.version,
                 current: SavedDocument::CURRENT_VERSION,
             });
         }
+        if saved.version < 3 {
+            saved.grid = GridSettings::default();
+            saved.guides.clear();
+            saved.color_library = ColorLibrary::default();
+        }
         Self::validate_saved_graph(&saved)
             .map_err(|reason| DocumentLoadError::InvalidDocument { reason })?;
+
+        let next_guide_id = next_stable_id(saved.guides.iter().map(|guide| guide.id.get()));
+        let next_color_group_id = next_stable_id(
+            saved
+                .color_library
+                .groups
+                .iter()
+                .map(|group| group.id.get()),
+        );
+        let next_saved_color_id = next_stable_id(
+            saved
+                .color_library
+                .colors
+                .iter()
+                .map(|color| color.id.get()),
+        );
 
         Ok(Self {
             nodes: saved.nodes,
             root: saved.root,
+            grid: saved.grid,
+            guides: saved.guides,
+            color_library: saved.color_library,
             cache: Cache::new(),
             dirty: DirtyFlags::all_dirty(),
             text_layouts: HashMap::new(),
+            next_guide_id,
+            next_color_group_id,
+            next_saved_color_id,
         })
     }
 
     fn validate_saved_graph(saved: &SavedDocument) -> Result<(), DocumentValidationError> {
         Self::validate_saved_complexity(saved, DocumentComplexityLimits::DEFAULT)?;
+        Self::validate_precision_data(saved)?;
+        saved
+            .color_library
+            .validate()
+            .map_err(|reason| DocumentValidationError::InvalidColorLibrary { reason })?;
 
         let root = saved
             .nodes
@@ -1582,6 +1694,38 @@ impl Document {
         Ok(())
     }
 
+    fn validate_precision_data(saved: &SavedDocument) -> Result<(), DocumentValidationError> {
+        saved
+            .grid
+            .validate()
+            .map_err(|reason| DocumentValidationError::InvalidPrecisionData { reason })?;
+        if saved.guides.len() > MAX_GUIDES {
+            return Err(DocumentValidationError::InvalidPrecisionData {
+                reason: PrecisionError::TooManyGuides,
+            });
+        }
+
+        let mut ids = HashSet::with_capacity(saved.guides.len());
+        for guide in &saved.guides {
+            if guide.id.get() == 0 {
+                return Err(DocumentValidationError::InvalidPrecisionData {
+                    reason: PrecisionError::InvalidGuideId,
+                });
+            }
+            if !guide.position.is_finite() {
+                return Err(DocumentValidationError::InvalidPrecisionData {
+                    reason: PrecisionError::InvalidGuidePosition,
+                });
+            }
+            if !ids.insert(guide.id) {
+                return Err(DocumentValidationError::InvalidPrecisionData {
+                    reason: PrecisionError::DuplicateGuideId(guide.id),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_saved_complexity(
         saved: &SavedDocument,
         limits: DocumentComplexityLimits,
@@ -1653,11 +1797,23 @@ impl Document {
 
     /// Deserialize document from JSON string.
     pub fn from_json(json: &str) -> Result<Self, DocumentLoadError> {
+        #[derive(Default, Deserialize)]
+        struct ColorLibraryHeader {
+            #[serde(default)]
+            groups: Vec<IgnoredAny>,
+            #[serde(default)]
+            colors: Vec<IgnoredAny>,
+        }
+
         #[derive(Deserialize)]
         struct StorageHeader {
             version: u32,
             #[serde(default)]
             nodes: Vec<IgnoredAny>,
+            #[serde(default)]
+            guides: Vec<IgnoredAny>,
+            #[serde(default)]
+            color_library: ColorLibraryHeader,
         }
         let header: StorageHeader = serde_json::from_str(json)?;
         if header.version > SavedDocument::CURRENT_VERSION {
@@ -1671,6 +1827,27 @@ impl Document {
             DocumentComplexityLimits::DEFAULT.nodes.saturating_add(1),
         )
         .map_err(|reason| DocumentLoadError::InvalidDocument { reason })?;
+        if header.guides.len() > MAX_GUIDES {
+            return Err(DocumentLoadError::InvalidDocument {
+                reason: DocumentValidationError::InvalidPrecisionData {
+                    reason: PrecisionError::TooManyGuides,
+                },
+            });
+        }
+        if header.color_library.groups.len() > MAX_COLOR_GROUPS {
+            return Err(DocumentLoadError::InvalidDocument {
+                reason: DocumentValidationError::InvalidColorLibrary {
+                    reason: ColorLibraryError::TooManyGroups,
+                },
+            });
+        }
+        if header.color_library.colors.len() > MAX_SAVED_COLORS {
+            return Err(DocumentLoadError::InvalidDocument {
+                reason: DocumentValidationError::InvalidColorLibrary {
+                    reason: ColorLibraryError::TooManyColors,
+                },
+            });
+        }
         let saved: SavedDocument = serde_json::from_str(json)?;
         Self::from_saved(saved)
     }
@@ -1680,6 +1857,16 @@ impl Default for Document {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn next_stable_id(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().unwrap_or(0).checked_add(1).unwrap_or(0)
+}
+
+fn take_next_id(next: &mut u64) -> Option<u64> {
+    let current = (*next != 0).then_some(*next)?;
+    *next = current.checked_add(1).unwrap_or(0);
+    Some(current)
 }
 
 /// Transform a rectangle by an affine transform (returns axis-aligned bounding box).
@@ -2471,6 +2658,89 @@ mod tests {
         assert!(text_node.is_text());
     }
 
+    #[test]
+    fn version_three_metadata_round_trips() {
+        let mut editor = Editor::new();
+        editor
+            .set_grid_settings(GridSettings::new(12.0, 3).unwrap())
+            .unwrap();
+        let guide = editor.add_guide(GuideAxis::Horizontal, 42.5).unwrap();
+        let group = editor.add_color_group("Brand").unwrap();
+        let color = editor
+            .add_saved_color(
+                Some(group),
+                Some("Ink"),
+                RgbaColor::new(0.1, 0.2, 0.3, 0.8).unwrap(),
+            )
+            .unwrap();
+
+        let json = editor.document.to_json().unwrap();
+        let restored = Document::from_json(&json).unwrap();
+        assert_eq!(restored.grid, GridSettings::new(12.0, 3).unwrap());
+        assert_eq!(
+            restored.guides,
+            vec![Guide {
+                id: guide,
+                axis: GuideAxis::Horizontal,
+                position: 42.5
+            }]
+        );
+        assert_eq!(
+            restored.color_library.color(color).unwrap().name.as_deref(),
+            Some("Ink")
+        );
+        assert_eq!(restored.to_saved().version, SavedDocument::CURRENT_VERSION);
+    }
+
+    #[test]
+    fn invalid_precision_and_color_metadata_is_rejected() {
+        let doc = Document::new();
+        let mut invalid_grid = doc.to_saved();
+        invalid_grid.grid.spacing = f32::NAN;
+        assert!(matches!(
+            invalid_saved_reason(invalid_grid),
+            DocumentValidationError::InvalidPrecisionData {
+                reason: PrecisionError::InvalidGridSpacing
+            }
+        ));
+
+        let mut duplicate_guides = doc.to_saved();
+        let id = GuideId::from_raw(1);
+        duplicate_guides.guides = vec![
+            Guide {
+                id,
+                axis: GuideAxis::Horizontal,
+                position: 1.0,
+            },
+            Guide {
+                id,
+                axis: GuideAxis::Vertical,
+                position: 2.0,
+            },
+        ];
+        assert!(matches!(
+            invalid_saved_reason(duplicate_guides),
+            DocumentValidationError::InvalidPrecisionData {
+                reason: PrecisionError::DuplicateGuideId(found)
+            } if found == id
+        ));
+
+        let mut invalid_library = doc.to_saved();
+        invalid_library.color_library.colors.push(SavedColor {
+            id: SavedColorId::from_raw(1),
+            group_id: Some(ColorGroupId::from_raw(999)),
+            name: None,
+            rgba: RgbaColor::new(0.0, 0.0, 0.0, 1.0).unwrap(),
+            manual_order: 0,
+        });
+        assert!(matches!(
+            invalid_saved_reason(invalid_library),
+            DocumentValidationError::InvalidColorLibrary {
+                reason: ColorLibraryError::GroupNotFound(_)
+            }
+        ));
+    }
+
     fn invalid_saved_reason(saved: SavedDocument) -> DocumentValidationError {
         match Document::from_saved(saved) {
             Err(DocumentLoadError::InvalidDocument { reason }) => reason,
@@ -2752,6 +3022,10 @@ mod tests {
         }
         let mut saved: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
         saved["version"] = serde_json::json!(1);
+        let object = saved.as_object_mut().unwrap();
+        object.remove("grid");
+        object.remove("guides");
+        object.remove("color_library");
         remove_sizing(&mut saved);
         let json = serde_json::to_string(&saved).unwrap();
 
@@ -2762,6 +3036,26 @@ mod tests {
         };
         assert_eq!(text.content, "Hello");
         assert_eq!(text.sizing, TextSizing::AutoWidth);
+        assert_eq!(restored.grid, GridSettings::default());
+        assert!(restored.guides.is_empty());
+        assert_eq!(restored.color_library, ColorLibrary::default());
+    }
+
+    #[test]
+    fn version_two_documents_receive_version_three_metadata_defaults() {
+        let doc = Document::new();
+        let mut saved: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        saved["version"] = serde_json::json!(2);
+        let object = saved.as_object_mut().unwrap();
+        object.remove("grid");
+        object.remove("guides");
+        object.remove("color_library");
+
+        let restored = Document::from_json(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(restored.grid, GridSettings::default());
+        assert!(restored.guides.is_empty());
+        assert_eq!(restored.color_library, ColorLibrary::default());
+        assert_eq!(restored.to_saved().version, 3);
     }
 
     #[test]

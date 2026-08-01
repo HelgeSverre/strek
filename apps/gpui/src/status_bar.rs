@@ -66,7 +66,7 @@ pub fn render_status_bar(
         InteractionKind::CreatingFrame => "Drawing artboard · release to adopt enclosed objects",
         InteractionKind::Pen => "Building path · Enter finishes · Backspace removes last anchor",
         InteractionKind::CreatingText => "Drawing text box",
-        InteractionKind::TextEditing => "Editing text · ⌘Enter commits · Esc cancels",
+        InteractionKind::TextEditing => "Editing text · Cmd+Enter commits · Esc cancels",
         InteractionKind::VectorEditing => "Editing vector · Enter commits · Delete removes anchors",
         InteractionKind::Panning => "Panning canvas · release Space to return",
     };

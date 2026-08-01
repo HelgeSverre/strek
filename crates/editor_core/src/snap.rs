@@ -4,9 +4,87 @@
 //! for aligning nodes during drag operations.
 
 use glam::Vec2;
+use std::fmt;
 
 use crate::node::NodeId;
 use crate::path::Rect;
+use crate::precision::{Guide, GuideAxis, GuideId};
+
+/// Coarse category used to enable and prioritize snap targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapTarget {
+    Object,
+    Guide,
+    Grid,
+}
+
+/// Minimum configurable screen-space snapping tolerance.
+pub const MIN_SNAP_TOLERANCE: f32 = 1.0;
+/// Maximum configurable screen-space snapping tolerance.
+pub const MAX_SNAP_TOLERANCE: f32 = 32.0;
+
+/// Workspace-owned snapping preferences exposed by the editor core.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapSettings {
+    pub enabled: bool,
+    pub objects: bool,
+    pub guides: bool,
+    pub grid: bool,
+    pub tolerance: f32,
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            objects: true,
+            guides: true,
+            grid: false,
+            tolerance: 8.0,
+        }
+    }
+}
+
+impl SnapSettings {
+    pub(crate) fn validate(self) -> Result<(), SnapSettingsError> {
+        if self.tolerance.is_finite()
+            && (MIN_SNAP_TOLERANCE..=MAX_SNAP_TOLERANCE).contains(&self.tolerance)
+        {
+            Ok(())
+        } else {
+            Err(SnapSettingsError::InvalidTolerance)
+        }
+    }
+}
+
+/// Invalid workspace snapping preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapSettingsError {
+    InvalidTolerance,
+}
+
+impl fmt::Display for SnapSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTolerance => write!(
+                formatter,
+                "snap tolerance must be finite and between {MIN_SNAP_TOLERANCE} and {MAX_SNAP_TOLERANCE} screen pixels"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapSettingsError {}
+
+impl SnapTarget {
+    const fn tie_priority(self) -> u8 {
+        match self {
+            Self::Guide => 3,
+            Self::Object => 2,
+            Self::Grid => 1,
+        }
+    }
+}
 
 /// The kind of snap point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,19 +105,30 @@ pub enum SnapKind {
     Corner,
     /// Text baseline
     Baseline,
+    /// Horizontal ruler guide (affects Y position)
+    GuideHorizontal,
+    /// Vertical ruler guide (affects X position)
+    GuideVertical,
 }
 
 impl SnapKind {
     /// Check if this is a horizontal snap (affects X position).
     pub fn is_horizontal(&self) -> bool {
-        matches!(self, SnapKind::Left | SnapKind::CenterX | SnapKind::Right)
+        matches!(
+            self,
+            SnapKind::Left | SnapKind::CenterX | SnapKind::Right | SnapKind::GuideVertical
+        )
     }
 
     /// Check if this is a vertical snap (affects Y position).
     pub fn is_vertical(&self) -> bool {
         matches!(
             self,
-            SnapKind::Top | SnapKind::CenterY | SnapKind::Bottom | SnapKind::Baseline
+            SnapKind::Top
+                | SnapKind::CenterY
+                | SnapKind::Bottom
+                | SnapKind::Baseline
+                | SnapKind::GuideHorizontal
         )
     }
 }
@@ -55,6 +144,12 @@ pub struct SnapPoint {
 
     /// The node this snap point belongs to (None for guides/grid).
     pub node_id: Option<NodeId>,
+
+    /// Coarse target category. Source points use `Object`.
+    pub target: SnapTarget,
+
+    /// Stable guide identity when this point represents a guide.
+    pub guide_id: Option<GuideId>,
 }
 
 impl SnapPoint {
@@ -64,6 +159,23 @@ impl SnapPoint {
             position,
             kind,
             node_id,
+            target: SnapTarget::Object,
+            guide_id: None,
+        }
+    }
+
+    /// Create a target point for a persistent horizontal or vertical guide.
+    pub fn from_guide(guide: Guide) -> Self {
+        let (position, kind) = match guide.axis {
+            GuideAxis::Horizontal => (Vec2::new(0.0, guide.position), SnapKind::GuideHorizontal),
+            GuideAxis::Vertical => (Vec2::new(guide.position, 0.0), SnapKind::GuideVertical),
+        };
+        Self {
+            position,
+            kind,
+            node_id: None,
+            target: SnapTarget::Guide,
+            guide_id: Some(guide.id),
         }
     }
 
@@ -139,6 +251,12 @@ pub struct SnapMatch {
 
     /// The node that was snapped to (None for guides/grid).
     pub target_node: Option<NodeId>,
+
+    /// Stable guide matched by the operation, if any.
+    pub target_guide: Option<GuideId>,
+
+    /// Coarse category that won target selection.
+    pub target: SnapTarget,
 }
 
 /// Configuration for snapping behavior.
@@ -153,6 +271,9 @@ pub struct SnapConfig {
     /// Snap to other nodes.
     pub snap_to_nodes: bool,
 
+    /// Snap to persistent ruler guides.
+    pub snap_to_guides: bool,
+
     /// Snap to grid (if grid is enabled).
     pub snap_to_grid: bool,
 
@@ -166,6 +287,7 @@ impl Default for SnapConfig {
             enabled: true,
             threshold: 8.0,
             snap_to_nodes: true,
+            snap_to_guides: true,
             snap_to_grid: false,
             grid_spacing: 10.0,
         }
@@ -207,19 +329,42 @@ impl SnapEngine {
         drag_offset: Vec2,
         zoom: f32,
     ) -> SnapResult {
-        if !self.config.enabled {
+        self.find_snap_with_bypass(source_points, drag_offset, zoom, false)
+    }
+
+    /// Find a snap while allowing a pointer modifier to temporarily bypass snapping.
+    pub fn find_snap_with_bypass(
+        &self,
+        source_points: &[SnapPoint],
+        drag_offset: Vec2,
+        zoom: f32,
+        bypass: bool,
+    ) -> SnapResult {
+        if !self.config.enabled || bypass {
             return SnapResult::none(drag_offset);
         }
 
-        let threshold = self.config.threshold / zoom;
-        let mut best_snap_x: Option<(f32, SnapMatch)> = None; // (distance, match)
-        let mut best_snap_y: Option<(f32, SnapMatch)> = None;
+        let zoom = zoom.abs().max(f32::EPSILON);
+        let threshold = self.config.threshold;
+        if !threshold.is_finite() || threshold <= 0.0 {
+            return SnapResult::none(drag_offset);
+        }
+        let mut best_snap_x: Option<SnapCandidate> = None;
+        let mut best_snap_y: Option<SnapCandidate> = None;
 
         // Check each source point against each target
         for source in source_points {
             let source_pos = source.position + drag_offset;
 
             for target in &self.targets {
+                let category_enabled = match target.target {
+                    SnapTarget::Object => self.config.snap_to_nodes,
+                    SnapTarget::Guide => self.config.snap_to_guides,
+                    SnapTarget::Grid => self.config.snap_to_grid,
+                };
+                if !category_enabled {
+                    continue;
+                }
                 // Skip self-snapping
                 if source.node_id.is_some() && source.node_id == target.node_id {
                     continue;
@@ -227,77 +372,100 @@ impl SnapEngine {
 
                 // Check horizontal snap (X alignment)
                 if source.kind.is_horizontal() && target.kind.is_horizontal() {
-                    let dist = (source_pos.x - target.position.x).abs();
-                    if dist < threshold && (best_snap_x.is_none() || dist < best_snap_x.unwrap().0)
-                    {
-                        best_snap_x = Some((
-                            dist,
-                            SnapMatch {
-                                value: target.position.x,
-                                kind: target.kind,
-                                source_kind: source.kind,
-                                target_node: target.node_id,
+                    let distance_screen = (source_pos.x - target.position.x).abs() * zoom;
+                    if distance_screen < threshold {
+                        choose_candidate(
+                            &mut best_snap_x,
+                            SnapCandidate {
+                                distance_screen,
+                                correction: target.position.x - source.position.x,
+                                snap_match: SnapMatch {
+                                    value: target.position.x,
+                                    kind: target.kind,
+                                    source_kind: source.kind,
+                                    target_node: target.node_id,
+                                    target_guide: target.guide_id,
+                                    target: target.target,
+                                },
                             },
-                        ));
+                        );
                     }
                 }
 
                 // Check vertical snap (Y alignment)
                 if source.kind.is_vertical() && target.kind.is_vertical() {
-                    let dist = (source_pos.y - target.position.y).abs();
-                    if dist < threshold && (best_snap_y.is_none() || dist < best_snap_y.unwrap().0)
-                    {
-                        best_snap_y = Some((
-                            dist,
-                            SnapMatch {
-                                value: target.position.y,
-                                kind: target.kind,
-                                source_kind: source.kind,
-                                target_node: target.node_id,
+                    let distance_screen = (source_pos.y - target.position.y).abs() * zoom;
+                    if distance_screen < threshold {
+                        choose_candidate(
+                            &mut best_snap_y,
+                            SnapCandidate {
+                                distance_screen,
+                                correction: target.position.y - source.position.y,
+                                snap_match: SnapMatch {
+                                    value: target.position.y,
+                                    kind: target.kind,
+                                    source_kind: source.kind,
+                                    target_node: target.node_id,
+                                    target_guide: target.guide_id,
+                                    target: target.target,
+                                },
                             },
-                        ));
+                        );
                     }
                 }
             }
         }
 
         // Also check grid snapping
-        if self.config.snap_to_grid {
+        if self.config.snap_to_grid
+            && self.config.grid_spacing.is_finite()
+            && self.config.grid_spacing > 0.0
+        {
             for source in source_points {
                 let source_pos = source.position + drag_offset;
 
                 // Snap X to grid
                 let grid_x =
                     (source_pos.x / self.config.grid_spacing).round() * self.config.grid_spacing;
-                let dist_x = (source_pos.x - grid_x).abs();
-                if dist_x < threshold && (best_snap_x.is_none() || dist_x < best_snap_x.unwrap().0)
-                {
-                    best_snap_x = Some((
-                        dist_x,
-                        SnapMatch {
-                            value: grid_x,
-                            kind: source.kind,
-                            source_kind: source.kind,
-                            target_node: None,
+                let distance_screen = (source_pos.x - grid_x).abs() * zoom;
+                if distance_screen < threshold {
+                    choose_candidate(
+                        &mut best_snap_x,
+                        SnapCandidate {
+                            distance_screen,
+                            correction: grid_x - source.position.x,
+                            snap_match: SnapMatch {
+                                value: grid_x,
+                                kind: source.kind,
+                                source_kind: source.kind,
+                                target_node: None,
+                                target_guide: None,
+                                target: SnapTarget::Grid,
+                            },
                         },
-                    ));
+                    );
                 }
 
                 // Snap Y to grid
                 let grid_y =
                     (source_pos.y / self.config.grid_spacing).round() * self.config.grid_spacing;
-                let dist_y = (source_pos.y - grid_y).abs();
-                if dist_y < threshold && (best_snap_y.is_none() || dist_y < best_snap_y.unwrap().0)
-                {
-                    best_snap_y = Some((
-                        dist_y,
-                        SnapMatch {
-                            value: grid_y,
-                            kind: source.kind,
-                            source_kind: source.kind,
-                            target_node: None,
+                let distance_screen = (source_pos.y - grid_y).abs() * zoom;
+                if distance_screen < threshold {
+                    choose_candidate(
+                        &mut best_snap_y,
+                        SnapCandidate {
+                            distance_screen,
+                            correction: grid_y - source.position.y,
+                            snap_match: SnapMatch {
+                                value: grid_y,
+                                kind: source.kind,
+                                source_kind: source.kind,
+                                target_node: None,
+                                target_guide: None,
+                                target: SnapTarget::Grid,
+                            },
                         },
-                    ));
+                    );
                 }
             }
         }
@@ -305,30 +473,40 @@ impl SnapEngine {
         // Calculate final snapped position
         let mut snapped_offset = drag_offset;
 
-        if let Some((_, ref snap)) = best_snap_x {
-            // Find the source point that triggered this snap
-            for source in source_points {
-                if source.kind == snap.source_kind {
-                    snapped_offset.x = snap.value - source.position.x;
-                    break;
-                }
-            }
+        if let Some(candidate) = best_snap_x {
+            snapped_offset.x = candidate.correction;
         }
 
-        if let Some((_, ref snap)) = best_snap_y {
-            for source in source_points {
-                if source.kind == snap.source_kind {
-                    snapped_offset.y = snap.value - source.position.y;
-                    break;
-                }
-            }
+        if let Some(candidate) = best_snap_y {
+            snapped_offset.y = candidate.correction;
         }
 
         SnapResult {
             position: snapped_offset,
-            snap_x: best_snap_x.map(|(_, m)| m),
-            snap_y: best_snap_y.map(|(_, m)| m),
+            snap_x: best_snap_x.map(|candidate| candidate.snap_match),
+            snap_y: best_snap_y.map(|candidate| candidate.snap_match),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapCandidate {
+    distance_screen: f32,
+    correction: f32,
+    snap_match: SnapMatch,
+}
+
+fn choose_candidate(best: &mut Option<SnapCandidate>, candidate: SnapCandidate) {
+    const EFFECTIVE_TIE_SCREEN_PX: f32 = 0.001;
+    let replace = best.is_none_or(|current| {
+        candidate.distance_screen + EFFECTIVE_TIE_SCREEN_PX < current.distance_screen
+            || ((candidate.distance_screen - current.distance_screen).abs()
+                <= EFFECTIVE_TIE_SCREEN_PX
+                && candidate.snap_match.target.tie_priority()
+                    > current.snap_match.target.tie_priority())
+    });
+    if replace {
+        *best = Some(candidate);
     }
 }
 
@@ -494,6 +672,89 @@ mod tests {
         // Should snap the right edge (50) to the left edge (100)
         // So offset should be 50 (to move right edge from 50 to 100)
         assert!(result.snap_x.is_some());
+    }
+
+    #[test]
+    fn guide_wins_effective_ties_then_object_then_grid() {
+        let mut engine = SnapEngine::new();
+        engine.config.snap_to_grid = true;
+        engine.config.grid_spacing = 10.0;
+        let object = SnapPoint::new(Vec2::new(10.0, 0.0), SnapKind::Left, None);
+        let guide = SnapPoint::from_guide(Guide {
+            id: GuideId::from_raw(1),
+            axis: GuideAxis::Vertical,
+            position: 10.0,
+        });
+        engine.set_targets(vec![object, guide]);
+
+        let source = [SnapPoint::new(Vec2::ZERO, SnapKind::Left, None)];
+        let result = engine.find_snap(&source, Vec2::new(9.0, 0.0), 1.0);
+        assert_eq!(result.snap_x.unwrap().target, SnapTarget::Guide);
+
+        engine.config.snap_to_guides = false;
+        let result = engine.find_snap(&source, Vec2::new(9.0, 0.0), 1.0);
+        assert_eq!(result.snap_x.unwrap().target, SnapTarget::Object);
+
+        engine.config.snap_to_nodes = false;
+        let result = engine.find_snap(&source, Vec2::new(9.0, 0.0), 1.0);
+        assert_eq!(result.snap_x.unwrap().target, SnapTarget::Grid);
+    }
+
+    #[test]
+    fn categories_and_temporary_bypass_are_independent() {
+        let mut engine = SnapEngine::new();
+        engine.set_targets(vec![SnapPoint::from_guide(Guide {
+            id: GuideId::from_raw(1),
+            axis: GuideAxis::Horizontal,
+            position: 20.0,
+        })]);
+        let source = [SnapPoint::new(Vec2::ZERO, SnapKind::Top, None)];
+
+        assert!(engine
+            .find_snap(&source, Vec2::new(0.0, 16.0), 1.0)
+            .has_snap());
+        assert!(!engine
+            .find_snap_with_bypass(&source, Vec2::new(0.0, 16.0), 1.0, true)
+            .has_snap());
+        engine.config.snap_to_guides = false;
+        assert!(!engine
+            .find_snap(&source, Vec2::new(0.0, 16.0), 1.0)
+            .has_snap());
+    }
+
+    #[test]
+    fn tolerance_remains_in_screen_pixels_across_zoom() {
+        let mut engine = SnapEngine::new();
+        engine.set_targets(vec![SnapPoint::new(
+            Vec2::new(10.0, 0.0),
+            SnapKind::Left,
+            None,
+        )]);
+        let source = [SnapPoint::new(Vec2::ZERO, SnapKind::Left, None)];
+
+        assert!(engine
+            .find_snap(&source, Vec2::new(6.1, 0.0), 2.0)
+            .has_snap());
+        assert!(!engine
+            .find_snap(&source, Vec2::new(5.9, 0.0), 2.0)
+            .has_snap());
+    }
+
+    #[test]
+    fn winning_source_point_supplies_the_exact_correction() {
+        let mut engine = SnapEngine::new();
+        engine.set_targets(vec![SnapPoint::new(
+            Vec2::new(30.0, 0.0),
+            SnapKind::Left,
+            None,
+        )]);
+        let sources = [
+            SnapPoint::new(Vec2::new(0.0, 0.0), SnapKind::Left, None),
+            SnapPoint::new(Vec2::new(20.0, 0.0), SnapKind::Left, None),
+        ];
+
+        let result = engine.find_snap(&sources, Vec2::new(8.0, 0.0), 1.0);
+        assert_eq!(result.position.x, 10.0);
     }
 
     #[test]

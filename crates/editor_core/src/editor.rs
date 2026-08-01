@@ -9,6 +9,11 @@ use glam::{Affine2, Vec2};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::action::{EditorAction, NudgeDirection, NudgeDistance};
+use crate::color_library::{
+    normalize_optional_name, normalize_required_name, ColorGroup, ColorGroupId, ColorLibrary,
+    ColorLibraryError, ColorSortMode, RgbaColor, SavedColor, SavedColorId, SortDirection,
+    MAX_COLOR_GROUPS, MAX_SAVED_COLORS,
+};
 use crate::command::{Command, Patch};
 use crate::history::History;
 use crate::input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
@@ -16,12 +21,13 @@ use crate::layers::{LayerEntry, LayerIcon, LayerPanelState};
 use crate::layout::{AlignCross, AlignMain, AutoLayout, Direction};
 use crate::node::{Layout, Node, NodeId, NodeKind, TextData, TextSizing};
 use crate::path::{HandleMode, PathAnchor, PathContour, PathData, Rect};
+use crate::precision::{GridSettings, Guide, GuideAxis, GuideId, PrecisionError, MAX_GUIDES};
 use crate::property_scrub::{
     NumericAdjustmentMode, NumericPropertyScrubSession, NumericPropertyScrubState,
     NumericPropertySnapshot, NumericPropertyTarget, StyleSnapshot, TransformSnapshot,
 };
 use crate::selection::{Selection, SelectionAction};
-use crate::snap::{SnapEngine, SnapKind, SnapPoint, SnapResult};
+use crate::snap::{SnapEngine, SnapKind, SnapPoint, SnapResult, SnapSettings, SnapSettingsError};
 use crate::style::{Paint, Stroke, Style};
 use crate::transaction::Transaction;
 use crate::transform::View;
@@ -229,6 +235,7 @@ struct TransformSession {
     handle: Option<ResizeHandle>,
     nodes: HashMap<NodeId, TransformNodeSnapshot>,
     preserved_children: HashMap<NodeId, (Affine2, Affine2)>,
+    snap_result: Option<SnapResult>,
 }
 
 /// An anchor selected for direct vector editing.
@@ -713,6 +720,410 @@ impl Editor {
 
         editor.needs_redraw = true;
         editor
+    }
+
+    /// Return workspace-owned snapping preferences.
+    pub fn snap_settings(&self) -> SnapSettings {
+        SnapSettings {
+            enabled: self.snap_engine.config.enabled,
+            objects: self.snap_engine.config.snap_to_nodes,
+            guides: self.snap_engine.config.snap_to_guides,
+            grid: self.snap_engine.config.snap_to_grid,
+            tolerance: self.snap_engine.config.threshold,
+        }
+    }
+
+    /// Replace workspace-owned snapping preferences without dirtying the document.
+    pub fn set_snap_settings(&mut self, settings: SnapSettings) -> Result<bool, SnapSettingsError> {
+        settings.validate()?;
+        if self.snap_settings() == settings {
+            return Ok(false);
+        }
+        self.snap_engine.config.enabled = settings.enabled;
+        self.snap_engine.config.snap_to_nodes = settings.objects;
+        self.snap_engine.config.snap_to_guides = settings.guides;
+        self.snap_engine.config.snap_to_grid = settings.grid;
+        self.snap_engine.config.threshold = settings.tolerance;
+        self.needs_redraw = true;
+        Ok(true)
+    }
+
+    // === Document precision data ===
+
+    /// Replace the document's validated square-grid definition.
+    pub fn set_grid_settings(&mut self, settings: GridSettings) -> Result<bool, PrecisionError> {
+        settings.validate()?;
+        if self.document.grid == settings {
+            return Ok(false);
+        }
+        let command = Command::new("Change Grid Settings").with_patch(Patch::SetGridSettings {
+            before: self.document.grid,
+            after: settings,
+        });
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.sync_snap_grid_spacing();
+        self.needs_redraw = true;
+        Ok(true)
+    }
+
+    /// Add a persistent ruler guide and return its stable ID.
+    pub fn add_guide(&mut self, axis: GuideAxis, position: f32) -> Result<GuideId, PrecisionError> {
+        validate_guide_position(position)?;
+        if self.document.guides.len() >= MAX_GUIDES {
+            return Err(PrecisionError::TooManyGuides);
+        }
+        let id = self.document.allocate_guide_id()?;
+        let mut after = self.document.guides.clone();
+        after.push(Guide { id, axis, position });
+        self.commit_guides("Add Guide", after);
+        Ok(id)
+    }
+
+    /// Move a guide to an exact document coordinate.
+    pub fn move_guide(&mut self, id: GuideId, position: f32) -> Result<bool, PrecisionError> {
+        validate_guide_position(position)?;
+        let mut after = self.document.guides.clone();
+        let guide = after
+            .iter_mut()
+            .find(|guide| guide.id == id)
+            .ok_or(PrecisionError::GuideNotFound(id))?;
+        if guide.position == position {
+            return Ok(false);
+        }
+        guide.position = position;
+        self.commit_guides("Move Guide", after);
+        Ok(true)
+    }
+
+    /// Duplicate a guide at the same axis and coordinate.
+    pub fn duplicate_guide(&mut self, id: GuideId) -> Result<GuideId, PrecisionError> {
+        if self.document.guides.len() >= MAX_GUIDES {
+            return Err(PrecisionError::TooManyGuides);
+        }
+        let source = self
+            .document
+            .guides
+            .iter()
+            .find(|guide| guide.id == id)
+            .copied()
+            .ok_or(PrecisionError::GuideNotFound(id))?;
+        let duplicate_id = self.document.allocate_guide_id()?;
+        let mut after = self.document.guides.clone();
+        after.push(Guide {
+            id: duplicate_id,
+            ..source
+        });
+        self.commit_guides("Duplicate Guide", after);
+        Ok(duplicate_id)
+    }
+
+    /// Remove a guide by stable ID.
+    pub fn remove_guide(&mut self, id: GuideId) -> Result<(), PrecisionError> {
+        let mut after = self.document.guides.clone();
+        let index = after
+            .iter()
+            .position(|guide| guide.id == id)
+            .ok_or(PrecisionError::GuideNotFound(id))?;
+        after.remove(index);
+        self.commit_guides("Remove Guide", after);
+        Ok(())
+    }
+
+    /// Remove every ruler guide as one undoable edit.
+    pub fn clear_guides(&mut self) -> bool {
+        if self.document.guides.is_empty() {
+            return false;
+        }
+        self.commit_guides("Clear Guides", Vec::new());
+        true
+    }
+
+    fn commit_guides(&mut self, description: &str, after: Vec<Guide>) {
+        let command = Command::new(description).with_patch(Patch::SetGuides {
+            before: self.document.guides.clone(),
+            after,
+        });
+        command.apply(&mut self.document);
+        self.history.push(command);
+        self.needs_redraw = true;
+    }
+
+    // === Document Color Library ===
+
+    /// Add a named color group at the end of the document library.
+    pub fn add_color_group(&mut self, name: &str) -> Result<ColorGroupId, ColorLibraryError> {
+        if self.document.color_library.groups.len() >= MAX_COLOR_GROUPS {
+            return Err(ColorLibraryError::TooManyGroups);
+        }
+        let name = normalize_required_name(name)?;
+        let id = self.document.allocate_color_group_id()?;
+        self.edit_color_library("Add Color Group", move |library| {
+            library.groups.push(ColorGroup {
+                id,
+                name,
+                manual_order: library.groups.len() as u32,
+                sort_mode: ColorSortMode::Manual,
+                sort_direction: SortDirection::Ascending,
+            });
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// Rename a color group after trimming surrounding whitespace.
+    pub fn rename_color_group(
+        &mut self,
+        id: ColorGroupId,
+        name: &str,
+    ) -> Result<bool, ColorLibraryError> {
+        let name = normalize_required_name(name)?;
+        self.edit_color_library("Rename Color Group", move |library| {
+            let group = library
+                .groups
+                .iter_mut()
+                .find(|group| group.id == id)
+                .ok_or(ColorLibraryError::GroupNotFound(id))?;
+            if group.name == name {
+                return Ok(false);
+            }
+            group.name = name;
+            Ok(true)
+        })
+    }
+
+    /// Move a group to a zero-based manual position.
+    pub fn reorder_color_group(
+        &mut self,
+        id: ColorGroupId,
+        index: usize,
+    ) -> Result<bool, ColorLibraryError> {
+        self.edit_color_library("Reorder Color Group", move |library| {
+            let current = library
+                .groups
+                .iter()
+                .position(|group| group.id == id)
+                .ok_or(ColorLibraryError::GroupNotFound(id))?;
+            let target = index.min(library.groups.len().saturating_sub(1));
+            if current == target {
+                return Ok(false);
+            }
+            let group = library.groups.remove(current);
+            library.groups.insert(target, group);
+            normalize_group_orders(library);
+            Ok(true)
+        })
+    }
+
+    /// Change the computed ordering of colors in a group without altering manual order.
+    pub fn set_color_group_sort(
+        &mut self,
+        id: ColorGroupId,
+        mode: ColorSortMode,
+        direction: SortDirection,
+    ) -> Result<bool, ColorLibraryError> {
+        self.edit_color_library("Sort Color Group", move |library| {
+            let group = library
+                .groups
+                .iter_mut()
+                .find(|group| group.id == id)
+                .ok_or(ColorLibraryError::GroupNotFound(id))?;
+            if group.sort_mode == mode && group.sort_direction == direction {
+                return Ok(false);
+            }
+            group.sort_mode = mode;
+            group.sort_direction = direction;
+            Ok(true)
+        })
+    }
+
+    /// Remove a group, either moving its colors to Ungrouped or deleting them.
+    pub fn remove_color_group(
+        &mut self,
+        id: ColorGroupId,
+        delete_colors: bool,
+    ) -> Result<(), ColorLibraryError> {
+        self.edit_color_library("Remove Color Group", move |library| {
+            let index = library
+                .groups
+                .iter()
+                .position(|group| group.id == id)
+                .ok_or(ColorLibraryError::GroupNotFound(id))?;
+            library.groups.remove(index);
+            normalize_group_orders(library);
+            if delete_colors {
+                library.colors.retain(|color| color.group_id != Some(id));
+            } else {
+                for color in library
+                    .colors
+                    .iter_mut()
+                    .filter(|color| color.group_id == Some(id))
+                {
+                    color.group_id = None;
+                }
+            }
+            normalize_all_color_orders(library);
+            Ok(())
+        })
+    }
+
+    /// Add an unlinked saved color and return its stable ID.
+    pub fn add_saved_color(
+        &mut self,
+        group_id: Option<ColorGroupId>,
+        name: Option<&str>,
+        rgba: RgbaColor,
+    ) -> Result<SavedColorId, ColorLibraryError> {
+        if self.document.color_library.colors.len() >= MAX_SAVED_COLORS {
+            return Err(ColorLibraryError::TooManyColors);
+        }
+        ensure_group_exists(&self.document.color_library, group_id)?;
+        rgba.validate()?;
+        let name = normalize_optional_name(name)?;
+        let id = self.document.allocate_saved_color_id()?;
+        self.edit_color_library("Add Saved Color", move |library| {
+            let manual_order = library
+                .colors
+                .iter()
+                .filter(|color| color.group_id == group_id)
+                .count() as u32;
+            library.colors.push(SavedColor {
+                id,
+                group_id,
+                name,
+                rgba,
+                manual_order,
+            });
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// Update a saved color's optional name and RGBA value.
+    pub fn update_saved_color(
+        &mut self,
+        id: SavedColorId,
+        name: Option<&str>,
+        rgba: RgbaColor,
+    ) -> Result<bool, ColorLibraryError> {
+        rgba.validate()?;
+        let name = normalize_optional_name(name)?;
+        self.edit_color_library("Edit Saved Color", move |library| {
+            let color = library
+                .colors
+                .iter_mut()
+                .find(|color| color.id == id)
+                .ok_or(ColorLibraryError::ColorNotFound(id))?;
+            if color.name == name && color.rgba == rgba {
+                return Ok(false);
+            }
+            color.name = name;
+            color.rgba = rgba;
+            Ok(true)
+        })
+    }
+
+    /// Duplicate a saved color directly after it in manual order.
+    pub fn duplicate_saved_color(
+        &mut self,
+        id: SavedColorId,
+    ) -> Result<SavedColorId, ColorLibraryError> {
+        if self.document.color_library.colors.len() >= MAX_SAVED_COLORS {
+            return Err(ColorLibraryError::TooManyColors);
+        }
+        let duplicate_id = self.document.allocate_saved_color_id()?;
+        self.edit_color_library("Duplicate Saved Color", move |library| {
+            let source = library
+                .color(id)
+                .cloned()
+                .ok_or(ColorLibraryError::ColorNotFound(id))?;
+            materialize_manual_order(library, source.group_id)?;
+            let target = library
+                .color(id)
+                .ok_or(ColorLibraryError::ColorNotFound(id))?
+                .manual_order as usize
+                + 1;
+            library.colors.push(SavedColor {
+                id: duplicate_id,
+                manual_order: u32::MAX,
+                ..source
+            });
+            place_color(library, duplicate_id, source.group_id, target)?;
+            Ok(())
+        })?;
+        Ok(duplicate_id)
+    }
+
+    /// Move a saved color into a group and zero-based manual position.
+    pub fn move_saved_color(
+        &mut self,
+        id: SavedColorId,
+        group_id: Option<ColorGroupId>,
+        index: usize,
+    ) -> Result<bool, ColorLibraryError> {
+        self.edit_color_library("Move Saved Color", move |library| {
+            ensure_group_exists(library, group_id)?;
+            let before = library
+                .color(id)
+                .cloned()
+                .ok_or(ColorLibraryError::ColorNotFound(id))?;
+            let target_len = library
+                .colors
+                .iter()
+                .filter(|color| color.group_id == group_id)
+                .count();
+            let target =
+                index.min(target_len.saturating_sub(usize::from(before.group_id == group_id)));
+            let target_is_manual = group_id
+                .and_then(|group_id| library.group(group_id))
+                .is_none_or(|group| group.sort_mode == ColorSortMode::Manual);
+            if before.group_id == group_id
+                && target_is_manual
+                && before.manual_order as usize == target
+            {
+                return Ok(false);
+            }
+            materialize_manual_order(library, group_id)?;
+            place_color(library, id, group_id, index)?;
+            Ok(true)
+        })
+    }
+
+    /// Remove a saved-color entry without touching matching artwork.
+    pub fn remove_saved_color(&mut self, id: SavedColorId) -> Result<(), ColorLibraryError> {
+        self.edit_color_library("Remove Saved Color", move |library| {
+            let index = library
+                .colors
+                .iter()
+                .position(|color| color.id == id)
+                .ok_or(ColorLibraryError::ColorNotFound(id))?;
+            library.colors.remove(index);
+            normalize_all_color_orders(library);
+            Ok(())
+        })
+    }
+
+    fn edit_color_library<T>(
+        &mut self,
+        description: &str,
+        edit: impl FnOnce(&mut ColorLibrary) -> Result<T, ColorLibraryError>,
+    ) -> Result<T, ColorLibraryError> {
+        let before = self.document.color_library.clone();
+        let mut after = before.clone();
+        let value = edit(&mut after)?;
+        after.validate()?;
+        if before != after {
+            let command =
+                Command::new(description).with_patch(Patch::SetColorLibrary { before, after });
+            command.apply(&mut self.document);
+            self.history.push(command);
+            self.needs_redraw = true;
+        }
+        Ok(value)
+    }
+
+    fn sync_snap_grid_spacing(&mut self) {
+        self.snap_engine.config.grid_spacing = self.document.grid.spacing;
     }
 
     // === Action System ===
@@ -1966,6 +2377,7 @@ impl Editor {
         button: MouseButton,
         modifiers: Modifiers,
     ) -> Effects {
+        self.sync_snap_grid_spacing();
         let world_pos = self.view.to_world(screen_pos);
 
         if self.space_pan_active
@@ -2110,10 +2522,11 @@ impl Editor {
                         let targets = self.document.all_snap_points(&[]);
                         self.snap_engine.set_targets(targets);
 
-                        let start_snap = self.snap_engine.find_snap(
+                        let start_snap = self.snap_engine.find_snap_with_bypass(
                             &creation_snap_points(world_pos),
                             Vec2::ZERO,
                             self.view.zoom,
+                            modifiers.ctrl,
                         );
                         let start_pos = world_pos + start_snap.position;
                         self.drag = DragState::CreatingShape {
@@ -2128,10 +2541,11 @@ impl Editor {
                     Tool::Frame => {
                         let targets = self.document.all_snap_points(&[]);
                         self.snap_engine.set_targets(targets);
-                        let start_snap = self.snap_engine.find_snap(
+                        let start_snap = self.snap_engine.find_snap_with_bypass(
                             &creation_snap_points(world_pos),
                             Vec2::ZERO,
                             self.view.zoom,
+                            modifiers.ctrl,
                         );
                         let start_pos = world_pos + start_snap.position;
                         self.drag = DragState::CreatingFrame {
@@ -2187,6 +2601,7 @@ impl Editor {
 
     fn handle_pointer_move(&mut self, screen_pos: Vec2, modifiers: Modifiers) -> Effects {
         let world_pos = self.view.to_world(screen_pos);
+        self.sync_snap_grid_spacing();
 
         if matches!(self.drag, DragState::Pen(_)) {
             self.pen_pointer_move(world_pos, modifiers);
@@ -2245,9 +2660,12 @@ impl Editor {
                 let raw_delta = world_pos - *start_pos;
 
                 // Try to snap the source points to targets
-                let result =
-                    self.snap_engine
-                        .find_snap(source_snap_points, raw_delta, self.view.zoom);
+                let result = self.snap_engine.find_snap_with_bypass(
+                    source_snap_points,
+                    raw_delta,
+                    self.view.zoom,
+                    modifiers.ctrl,
+                );
 
                 // Use snapped position if available
                 let final_delta = result.position;
@@ -2271,9 +2689,12 @@ impl Editor {
             } => {
                 let raw_delta = world_pos - *start_pos;
                 let source_points = creation_snap_points(*start_pos);
-                let mut result =
-                    self.snap_engine
-                        .find_snap(&source_points, raw_delta, self.view.zoom);
+                let mut result = self.snap_engine.find_snap_with_bypass(
+                    &source_points,
+                    raw_delta,
+                    self.view.zoom,
+                    modifiers.ctrl,
+                );
                 let snapped_pos = *start_pos + result.position;
                 let constrained_pos = if *shape == ShapeKind::Line {
                     constrained_line_endpoint(*start_pos, snapped_pos, modifiers.shift)
@@ -2301,9 +2722,12 @@ impl Editor {
             } => {
                 let raw_delta = world_pos - *start_pos;
                 let source_points = creation_snap_points(*start_pos);
-                let result = self
-                    .snap_engine
-                    .find_snap(&source_points, raw_delta, self.view.zoom);
+                let result = self.snap_engine.find_snap_with_bypass(
+                    &source_points,
+                    raw_delta,
+                    self.view.zoom,
+                    modifiers.ctrl,
+                );
                 *current_pos = *start_pos + result.position;
                 *current_modifiers = modifiers;
                 *snap_result = Some(result);
@@ -2402,6 +2826,7 @@ impl Editor {
                 }
             }
             DragState::Resizing(session) | DragState::Rotating(session) => {
+                self.snap_engine.clear_targets();
                 self.commit_transform_session(session);
             }
             DragState::Marquee {
@@ -2730,6 +3155,11 @@ impl Editor {
         {
             *active_modifiers = modifiers;
             *snap_result = None;
+            self.needs_redraw = true;
+            redraw = true;
+        }
+        if let DragState::Resizing(session) = &mut self.drag {
+            session.snap_result = None;
             self.needs_redraw = true;
             redraw = true;
         }
@@ -4617,6 +5047,7 @@ impl Editor {
         let selected = self
             .document
             .filter_selection_for_transform(&self.selection.iter().collect::<Vec<_>>());
+        let snap_targets = (!rotation_hit).then(|| self.document.all_snap_points(&selected));
         let mut nodes = HashMap::new();
         let mut preserved_children = HashMap::new();
         for id in selected {
@@ -4652,7 +5083,13 @@ impl Editor {
             handle,
             nodes,
             preserved_children,
+            snap_result: None,
         };
+        if let Some(targets) = snap_targets {
+            self.snap_engine.set_targets(targets);
+        } else {
+            self.snap_engine.clear_targets();
+        }
         self.drag = if rotation_hit {
             DragState::Rotating(session)
         } else {
@@ -4676,6 +5113,17 @@ impl Editor {
             return;
         };
         let handle_position = resize_handle_position(handle, bounds);
+        self.sync_snap_grid_spacing();
+        let snap_result = self.snap_engine.find_snap_with_bypass(
+            &creation_snap_points(handle_position),
+            world_position - handle_position,
+            self.view.zoom,
+            modifiers.ctrl,
+        );
+        let world_position = handle_position + snap_result.position;
+        if let DragState::Resizing(session) = &mut self.drag {
+            session.snap_result = snap_result.has_snap().then_some(snap_result);
+        }
         let fixed = if modifiers.alt {
             bounds.center()
         } else {
@@ -5988,8 +6436,8 @@ impl Editor {
             DragState::Moving { snap_result, .. }
             | DragState::CreatingShape { snap_result, .. }
             | DragState::CreatingFrame { snap_result, .. } => *snap_result,
+            DragState::Resizing(session) => session.snap_result,
             DragState::None
-            | DragState::Resizing(_)
             | DragState::Rotating(_)
             | DragState::Marquee { .. }
             | DragState::Pen(_)
@@ -7434,6 +7882,123 @@ impl Editor {
     }
 }
 
+fn validate_guide_position(position: f32) -> Result<(), PrecisionError> {
+    if position.is_finite() {
+        Ok(())
+    } else {
+        Err(PrecisionError::InvalidGuidePosition)
+    }
+}
+
+fn ensure_group_exists(
+    library: &ColorLibrary,
+    group_id: Option<ColorGroupId>,
+) -> Result<(), ColorLibraryError> {
+    match group_id {
+        Some(id) if library.group(id).is_none() => Err(ColorLibraryError::GroupNotFound(id)),
+        Some(_) | None => Ok(()),
+    }
+}
+
+fn normalize_group_orders(library: &mut ColorLibrary) {
+    for (index, group) in library.groups.iter_mut().enumerate() {
+        group.manual_order = index as u32;
+    }
+}
+
+fn normalize_all_color_orders(library: &mut ColorLibrary) {
+    let group_ids = std::iter::once(None)
+        .chain(library.groups.iter().map(|group| Some(group.id)))
+        .collect::<Vec<_>>();
+    for group_id in group_ids {
+        normalize_color_orders(library, group_id);
+    }
+}
+
+fn normalize_color_orders(library: &mut ColorLibrary, group_id: Option<ColorGroupId>) {
+    let mut ids = library
+        .colors
+        .iter()
+        .filter(|color| color.group_id == group_id)
+        .map(|color| (color.manual_order, color.id))
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    for (order, (_, id)) in ids.into_iter().enumerate() {
+        if let Some(color) = library.colors.iter_mut().find(|color| color.id == id) {
+            color.manual_order = order as u32;
+        }
+    }
+}
+
+fn materialize_manual_order(
+    library: &mut ColorLibrary,
+    group_id: Option<ColorGroupId>,
+) -> Result<(), ColorLibraryError> {
+    let Some(group_id) = group_id else {
+        return Ok(());
+    };
+    let group = library
+        .group(group_id)
+        .ok_or(ColorLibraryError::GroupNotFound(group_id))?;
+    if group.sort_mode == ColorSortMode::Manual {
+        return Ok(());
+    }
+
+    let ordered_ids = library
+        .colors_in_group(Some(group_id))
+        .into_iter()
+        .map(|color| color.id)
+        .collect::<Vec<_>>();
+    for (order, id) in ordered_ids.into_iter().enumerate() {
+        if let Some(color) = library.colors.iter_mut().find(|color| color.id == id) {
+            color.manual_order = order as u32;
+        }
+    }
+    let group = library
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id)
+        .ok_or(ColorLibraryError::GroupNotFound(group_id))?;
+    group.sort_mode = ColorSortMode::Manual;
+    Ok(())
+}
+
+fn place_color(
+    library: &mut ColorLibrary,
+    id: SavedColorId,
+    group_id: Option<ColorGroupId>,
+    index: usize,
+) -> Result<(), ColorLibraryError> {
+    ensure_group_exists(library, group_id)?;
+    let source_group = library
+        .color(id)
+        .map(|color| color.group_id)
+        .ok_or(ColorLibraryError::ColorNotFound(id))?;
+    let color = library
+        .colors
+        .iter_mut()
+        .find(|color| color.id == id)
+        .ok_or(ColorLibraryError::ColorNotFound(id))?;
+    color.group_id = group_id;
+
+    normalize_color_orders(library, source_group);
+    let mut target_ids = library
+        .colors
+        .iter()
+        .filter(|color| color.group_id == group_id && color.id != id)
+        .map(|color| (color.manual_order, color.id))
+        .collect::<Vec<_>>();
+    target_ids.sort_unstable();
+    let target = index.min(target_ids.len());
+    target_ids.insert(target, (u32::MAX, id));
+    for (order, (_, color_id)) in target_ids.into_iter().enumerate() {
+        if let Some(color) = library.colors.iter_mut().find(|color| color.id == color_id) {
+            color.manual_order = order as u32;
+        }
+    }
+    Ok(())
+}
+
 fn max_affine_scale(transform: Affine2) -> f32 {
     let matrix = transform.matrix2;
     let trace = matrix.x_axis.length_squared() + matrix.y_axis.length_squared();
@@ -7468,6 +8033,168 @@ mod tests {
             })
             .collect();
         (editor, ids)
+    }
+
+    #[test]
+    fn snap_settings_are_validated_and_do_not_enter_document_history() {
+        let mut editor = Editor::new();
+        let before_json = editor.document.to_json().unwrap();
+        let settings = SnapSettings {
+            enabled: false,
+            objects: false,
+            guides: true,
+            grid: true,
+            tolerance: 12.0,
+        };
+
+        assert_eq!(editor.set_snap_settings(settings), Ok(true));
+        assert_eq!(editor.snap_settings(), settings);
+        assert_eq!(editor.document.to_json().unwrap(), before_json);
+        assert!(!editor.history.can_undo());
+        assert_eq!(editor.set_snap_settings(settings), Ok(false));
+        assert_eq!(
+            editor.set_snap_settings(SnapSettings {
+                tolerance: 0.0,
+                ..settings
+            }),
+            Err(SnapSettingsError::InvalidTolerance)
+        );
+    }
+
+    #[test]
+    fn guide_and_grid_edits_are_undoable_and_use_stable_ids() {
+        let mut editor = Editor::new();
+        let grid = GridSettings::new(16.0, 4).unwrap();
+        assert_eq!(editor.set_grid_settings(grid), Ok(true));
+        let first = editor.add_guide(GuideAxis::Vertical, 24.0).unwrap();
+        let second = editor.duplicate_guide(first).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(editor.move_guide(second, 32.0), Ok(true));
+        assert_eq!(editor.document.grid, grid);
+        assert_eq!(editor.document.guides.len(), 2);
+
+        assert!(editor.undo_in_context());
+        assert_eq!(editor.document.guides[1].position, 24.0);
+        assert!(editor.redo_in_context());
+        assert_eq!(editor.document.guides[1].position, 32.0);
+        assert!(editor.clear_guides());
+        assert!(editor.document.guides.is_empty());
+        assert!(editor.undo_in_context());
+        assert_eq!(editor.document.guides.len(), 2);
+    }
+
+    #[test]
+    fn color_library_edits_are_undoable_and_never_recolor_artwork() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let shape = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Logo", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::rgba(0.2, 0.4, 0.8, 1.0))),
+            )
+            .unwrap();
+        let group = editor.add_color_group(" Brand ").unwrap();
+        let blue = RgbaColor::new(0.2, 0.4, 0.8, 1.0).unwrap();
+        let color = editor
+            .add_saved_color(Some(group), Some(" Blue "), blue)
+            .unwrap();
+        assert_eq!(
+            editor.document.color_library.group(group).unwrap().name,
+            "Brand"
+        );
+        assert_eq!(
+            editor
+                .document
+                .color_library
+                .color(color)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Blue")
+        );
+
+        let red = RgbaColor::new(1.0, 0.0, 0.0, 1.0).unwrap();
+        assert_eq!(editor.update_saved_color(color, None, red), Ok(true));
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.fill,
+            Some(Paint::rgba(0.2, 0.4, 0.8, 1.0))
+        );
+        editor.remove_saved_color(color).unwrap();
+        assert!(editor.document.color_library.color(color).is_none());
+        assert_eq!(
+            editor.document.get(shape).unwrap().style.fill,
+            Some(Paint::rgba(0.2, 0.4, 0.8, 1.0))
+        );
+        assert!(editor.undo_in_context());
+        assert_eq!(
+            editor.document.color_library.color(color).unwrap().rgba,
+            red
+        );
+    }
+
+    #[test]
+    fn reordering_a_computed_color_group_materializes_visible_order() {
+        let mut editor = Editor::new();
+        let group = editor.add_color_group("Scale").unwrap();
+        let dark = editor
+            .add_saved_color(
+                Some(group),
+                Some("Dark"),
+                RgbaColor::new(0.1, 0.1, 0.1, 1.0).unwrap(),
+            )
+            .unwrap();
+        let light = editor
+            .add_saved_color(
+                Some(group),
+                Some("Light"),
+                RgbaColor::new(0.9, 0.9, 0.9, 1.0).unwrap(),
+            )
+            .unwrap();
+        editor
+            .set_color_group_sort(group, ColorSortMode::Brightness, SortDirection::Descending)
+            .unwrap();
+
+        assert_eq!(editor.move_saved_color(dark, Some(group), 0), Ok(true));
+        let group_data = editor.document.color_library.group(group).unwrap();
+        assert_eq!(group_data.sort_mode, ColorSortMode::Manual);
+        let ids = editor
+            .document
+            .color_library
+            .colors_in_group(Some(group))
+            .into_iter()
+            .map(|color| color.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![dark, light]);
+    }
+
+    #[test]
+    fn resize_snaps_to_document_guides_without_frontend_target_injection() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let shape = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Box", PathData::rect(0.0, 0.0, 100.0, 100.0)),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+        editor.add_guide(GuideAxis::Vertical, 150.0).unwrap();
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(100.0, 50.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(146.0, 50.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        assert_eq!(editor.document.world_bounds(shape).unwrap().max.x, 150.0);
     }
 
     fn editor_with_grouped_shapes() -> (Editor, NodeId, NodeId, NodeId) {

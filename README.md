@@ -42,7 +42,12 @@ the file format and UI should not yet be treated as stable.
 - Frame background toggling and per-tool fill/stroke defaults for new shapes and
   paths
 - Reusable fill/stroke color picker with a hue/saturation wheel, HEX and alpha
-  editing, presets, and HSV, HSL, RGB, and gamut-mapped OKLCH controls
+  editing, presets, HSV, HSL, RGB, gamut-mapped OKLCH controls, searchable Saved
+  Colors, and quick save
+- Zoom-adaptive rulers and grid, persistent draggable guides, guide locking and
+  exact coordinate entry, plus independent object/guide/grid snapping controls
+- A document-local Color Library with named groups, inline editing, manual and
+  perceptual sorting, drag reordering, and remembered modeless panel placement
 - Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files
 - Editable SVG import for paths and basic shape primitives, with explicit errors
@@ -52,7 +57,7 @@ the file format and UI should not yet be treated as stable.
   current platform
 - Cursor-free CLI, AppleScript, and MCP automation with document-tree
   inspection, session-stable layer IDs, semantic edits, explicit file paths,
-  and direct export artifacts
+  direct export artifacts, and semantic precision/guide/Color Library tools
 
 ## Run the GPUI app
 

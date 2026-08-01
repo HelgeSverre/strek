@@ -83,6 +83,39 @@ pub(crate) enum AutomationRequest {
         target: NumericProperty,
         value: f32,
     },
+    SetPrecision {
+        #[serde(flatten)]
+        settings: PrecisionSettingsPatch,
+    },
+    Guide {
+        action: GuideAction,
+        #[serde(default)]
+        id: Option<u64>,
+        #[serde(default)]
+        axis: Option<GuideAxis>,
+        #[serde(default)]
+        position: Option<f32>,
+    },
+    ColorGroup {
+        action: ColorGroupAction,
+        #[serde(default)]
+        id: Option<u64>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    SavedColor {
+        action: SavedColorAction,
+        #[serde(default)]
+        id: Option<u64>,
+        #[serde(default)]
+        group_id: Option<u64>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        target: Option<ColorTarget>,
+    },
     SetLayerProperties {
         ids: Vec<String>,
         #[serde(default)]
@@ -197,6 +230,54 @@ pub(crate) enum NumericProperty {
     LayoutPadding,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct PrecisionSettingsPatch {
+    pub rulers: Option<bool>,
+    pub grid_visible: Option<bool>,
+    pub guides_visible: Option<bool>,
+    pub guides_locked: Option<bool>,
+    pub snapping: Option<bool>,
+    pub snap_objects: Option<bool>,
+    pub snap_guides: Option<bool>,
+    pub snap_grid: Option<bool>,
+    pub tolerance: Option<f32>,
+    pub grid_spacing: Option<f32>,
+    pub grid_major_every: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuideAction {
+    Add,
+    Move,
+    Remove,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GuideAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ColorGroupAction {
+    Add,
+    Rename,
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SavedColorAction {
+    Add,
+    Update,
+    Remove,
+    Apply,
+}
+
 impl FromStr for NumericProperty {
     type Err = String;
 
@@ -280,6 +361,8 @@ pub(crate) enum UiTarget {
     DesignPanel,
     FillColorPicker,
     StrokeColorPicker,
+    ColorLibrary,
+    PrecisionControls,
 }
 
 impl FromStr for UiTarget {
@@ -293,8 +376,10 @@ impl FromStr for UiTarget {
             "design_panel" | "design-panel" => Ok(Self::DesignPanel),
             "fill_color_picker" | "fill-color-picker" => Ok(Self::FillColorPicker),
             "stroke_color_picker" | "stroke-color-picker" => Ok(Self::StrokeColorPicker),
+            "color_library" | "color-library" => Ok(Self::ColorLibrary),
+            "precision_controls" | "precision-controls" => Ok(Self::PrecisionControls),
             _ => Err(format!(
-                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, design-panel, fill-color-picker, or stroke-color-picker"
+                "unknown UI target `{value}`; use main-menu, command-palette, layers-panel, design-panel, fill-color-picker, stroke-color-picker, color-library, or precision-controls"
             )),
         }
     }
@@ -349,6 +434,41 @@ impl AutomationResponse {
 pub(crate) struct AutomationDocument {
     pub root_id: String,
     pub layers: Vec<AutomationLayer>,
+    pub grid: AutomationGrid,
+    pub guides: Vec<AutomationGuide>,
+    pub color_groups: Vec<AutomationColorGroup>,
+    pub saved_colors: Vec<AutomationSavedColor>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct AutomationGrid {
+    pub spacing: f32,
+    pub major_every: u8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct AutomationGuide {
+    pub id: u64,
+    pub axis: GuideAxis,
+    pub position: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationColorGroup {
+    pub id: u64,
+    pub name: String,
+    pub manual_order: u32,
+    pub sort: String,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationSavedColor {
+    pub id: u64,
+    pub group_id: Option<u64>,
+    pub name: Option<String>,
+    pub color: String,
+    pub manual_order: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,6 +523,16 @@ pub(crate) struct AutomationState {
     pub command_palette_open: bool,
     #[serde(default)]
     pub color_picker_open: bool,
+    #[serde(default)]
+    pub color_library_open: bool,
+    #[serde(default)]
+    pub precision_controls_open: bool,
+    #[serde(default)]
+    pub rulers_visible: bool,
+    #[serde(default)]
+    pub grid_visible: bool,
+    #[serde(default)]
+    pub guides_visible: bool,
     #[serde(default)]
     pub numeric_property_scrub_active: bool,
     pub actions: Vec<AutomationAction>,

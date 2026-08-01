@@ -298,7 +298,7 @@ from the stdio server to that application's local automation endpoint.
 | Tool | Parameters | Result |
 | --- | --- | --- |
 | `get_state` | None | Structured automation response containing current state. |
-| `get_document` | None | Document tree with session-stable layer IDs, styles, world bounds, and transforms. |
+| `get_document` | None | Document tree plus grid, guides, Color Library groups, and Saved Colors with stable IDs. |
 | `new_document` | optional `discard_changes` | Creates a new document. |
 | `open_document` | absolute `path`, optional `discard_changes` | Opens native JSON or imports supported SVG. |
 | `save_document` | absolute `path` | Saves native JSON. |
@@ -307,6 +307,10 @@ from the stdio server to that application's local automation endpoint.
 | `select_layers` | `ids`, optional `mode` | Replaces, adds, removes, or toggles selection by layer ID. |
 | `set_color` | `target`, optional `color` | Sets fill/stroke HEX color; omit color to remove paint. |
 | `set_numeric_property` | `target`, `value` | Sets an absolute semantic numeric property. |
+| `set_precision` | optional ruler/grid/guide visibility, locking, snapping targets, tolerance, and grid fields | Updates workspace precision controls and document grid settings. |
+| `guide` | `action`, optional `id`, `axis`, `position` | Adds, moves, removes, or clears persistent guides. |
+| `color_group` | `action`, optional `id`, `name` | Adds, renames, or removes a Color Library group. |
+| `saved_color` | `action`, optional `id`, `group_id`, `name`, `color`, `target` | Adds, updates, removes, or applies a Saved Color. |
 | `set_layer_properties` | `ids`, optional `name`, `visible`, `locked` | Updates layer metadata; name requires exactly one ID. |
 | `pointer` | `phase`, `x`, `y`, optional `button`, `shift`, `control`, `alt`, `command` | Sends a canvas-local pointer event and returns current state. |
 | `insert_text` | `text` | Inserts text into the active text-editing session and returns current state. |
@@ -317,7 +321,8 @@ from the stdio server to that application's local automation endpoint.
 MCP pointer phases are `down`, `move`, and `up`; buttons are `left`, `middle`,
 and `right`. All modifier flags default to `false`. MCP UI targets use
 `main_menu`, `command_palette`, `layers_panel`, `design_panel`,
-`fill_color_picker`, and `stroke_color_picker`.
+`fill_color_picker`, `stroke_color_picker`, `color_library`, and
+`precision_controls`.
 
 A typical semantic editing sequence is:
 

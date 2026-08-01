@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::{
+    assets::{icon, Icon},
     color_picker::{format_paint, paint_as_rgba, parse_hex_paint},
     toolbar::{editor_tooltip, font_family_label, PortableFontFamily},
     AlignTextCenter, AlignTextLeft, AlignTextRight, PropertyFillBlack, PropertyFillBlue,
@@ -437,7 +438,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         .child(div().flex_1())
                         .child(numeric_property_button(
                             "stroke-down",
-                            "−",
+                            Icon::Minus,
                             "Decrease stroke width",
                             NumericPropertyTarget::StrokeWidth,
                             NumericAdjustmentDirection::Decrease,
@@ -460,7 +461,7 @@ pub(crate) fn render(snapshot: PropertiesSnapshot, editor_entity: WeakEntity<Str
                         ))
                         .child(numeric_property_button(
                             "stroke-up",
-                            "+",
+                            Icon::Plus,
                             "Increase stroke width",
                             NumericPropertyTarget::StrokeWidth,
                             NumericAdjustmentDirection::Increase,
@@ -798,9 +799,10 @@ fn action_stepper<A: Action + Clone, B: Action + Clone>(
 ) -> impl IntoElement {
     stepper_row(
         label,
-        property_button("decrease", "−", decrease_tooltip, decrease).into_any_element(),
+        property_icon_button("decrease", Icon::Minus, decrease_tooltip, decrease)
+            .into_any_element(),
         numeric_value(value, None, None),
-        property_button("increase", "+", increase_tooltip, increase).into_any_element(),
+        property_icon_button("increase", Icon::Plus, increase_tooltip, increase).into_any_element(),
     )
 }
 
@@ -817,7 +819,7 @@ fn numeric_stepper(
         label,
         numeric_property_button(
             "decrease",
-            "−",
+            Icon::Minus,
             decrease_tooltip,
             target,
             NumericAdjustmentDirection::Decrease,
@@ -831,7 +833,7 @@ fn numeric_stepper(
         ),
         numeric_property_button(
             "increase",
-            "+",
+            Icon::Plus,
             increase_tooltip,
             target,
             NumericAdjustmentDirection::Increase,
@@ -966,9 +968,37 @@ fn property_button<A: Action + Clone>(
         })
 }
 
+fn property_icon_button<A: Action + Clone>(
+    id: &'static str,
+    icon_kind: Icon,
+    tooltip: &'static str,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!(
+            "property-{id}-{}",
+            tooltip.replace(' ', "-").to_lowercase()
+        )))
+        .h(px(26.0))
+        .min_w(px(26.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(rgb(SURFACE_RAISED))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .child(icon(icon_kind, 13.0, rgb(TEXT)))
+        .tooltip(editor_tooltip(tooltip, None))
+        .on_click(move |_, window: &mut Window, cx| {
+            window.dispatch_action(Box::new(action.clone()), cx);
+        })
+}
+
 fn numeric_property_button(
     id: &'static str,
-    label: &'static str,
+    icon_kind: Icon,
     tooltip: &'static str,
     target: NumericPropertyTarget,
     direction: NumericAdjustmentDirection,
@@ -988,11 +1018,9 @@ fn numeric_property_button(
         .justify_center()
         .rounded(px(4.0))
         .bg(rgb(SURFACE_RAISED))
-        .text_size(px(10.0))
-        .text_color(rgb(TEXT))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(SURFACE_HOVER)))
-        .child(label)
+        .child(icon(icon_kind, 13.0, rgb(TEXT)))
         .tooltip(editor_tooltip(tooltip, None))
         .on_click(move |event, _window: &mut Window, cx| {
             let mode = if event.modifiers().shift {
@@ -1148,7 +1176,7 @@ fn color_value_editor<A: Action + Clone>(
                 div()
                     .text_size(px(9.0))
                     .text_color(rgb(MUTED))
-                    .child("Enter ↵"),
+                    .child("Enter"),
             )
         })
         .on_click(move |_, window: &mut Window, cx| {

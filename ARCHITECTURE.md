@@ -51,7 +51,7 @@ The core owns editor semantics and has no dependency on GPUI.
 - `Patch`, `Command`, `History`, and `Transaction` provide reversible edits.
   Interactive operations preview from a captured starting state and commit one
   history entry when the interaction finishes.
-- `SnapEngine` currently finds screen-tolerance object and analytic-grid
+- `SnapEngine` finds screen-tolerance object, persistent-guide, and analytic-grid
   candidates. Its transient snap guides are display-list overlays rather than
   document objects.
 
@@ -114,10 +114,12 @@ action/command surface instead.
 
 ### Save and load
 
-The current native format is version 2. `SavedDocument` contains the version,
-node arena, and root ID. Loading rejects future versions, excessive input, and
-invalid scene graphs. Saving validates first, serializes a snapshot, and replaces
-the destination through a same-directory temporary file.
+The current native format is version 3. `SavedDocument` contains the version,
+node arena, root ID, grid settings, persistent guides, and the document Color
+Library. Version 1 and 2 documents migrate with bounded defaults. Loading rejects
+future versions, excessive input, and invalid scene graphs. Saving validates
+first, serializes a snapshot, and replaces the destination through a
+same-directory temporary file.
 
 Runtime-only state is intentionally absent: selection, viewport, open panels,
 undo history, caches, text layouts, tool state, and current interaction.
@@ -159,10 +161,10 @@ Persist definitions needed to understand or continue editing a document. Keep
 visibility, panel geometry, and interaction preferences local unless they alter
 document meaning.
 
-## Planned precision aids
+## Precision aids
 
-The bounded design is specified in [`SPEC.md`](SPEC.md#scoped-candidate-canvas-precision-controls).
-The architecture should extend existing systems rather than add a parallel
+The bounded design is specified in [`SPEC.md`](SPEC.md#implemented-canvas-precision-controls).
+It extends the existing editor and canvas systems rather than adding a parallel
 canvas model.
 
 Document-owned, versioned data:
@@ -177,30 +179,32 @@ Workspace-owned preferences:
 - master snapping and object/guide/grid target toggles;
 - screen-space snap tolerance.
 
-Expected core changes:
+Current core behavior:
 
-- add document metadata and migrate the native format to version 3 with defaults
+- stores document metadata in native format version 3 with defaults
   for version 1 and 2 files;
-- represent snap targets by category rather than inferring guides from a missing
+- represents snap targets by category rather than inferring guides from a missing
   node ID;
-- choose X and Y corrections independently, using deterministic tie breaking;
-- preserve the existing transaction boundary while adding snap coverage to
+- chooses X and Y corrections independently, using deterministic tie breaking;
+- preserves the existing transaction boundary while applying snap coverage to
   resize and creation operations;
-- expose guide/grid mutations as commands and semantic automation operations.
+- exposes guide/grid mutations as commands and semantic automation operations.
 
-Expected GPUI changes:
+Current GPUI behavior:
 
-- render zoom-adaptive grid lines and viewport rulers as editor chrome;
-- render and hit-test document guides separately from transient smart guides;
-- add View commands and a compact snapping/precision popover;
-- store visibility and control choices as workspace preferences without making
+- renders the zoom-adaptive grid below artwork and guides/rulers above artwork;
+- renders and hit-tests document guides separately from transient smart guides;
+- provides View commands and a compact snapping/precision popover;
+- stores visibility and control choices as workspace preferences without making
   the document dirty.
 
 Rulers, grids, guides, and smart-guide feedback never enter artwork snapshots.
+User-interface iconography comes from embedded SVG assets with a shared 24-pixel
+stroke style; text glyphs and emoji are not used as substitute icons.
 
-## Planned Document Color Library
+## Document Color Library
 
-The bounded design is specified in [`SPEC.md`](SPEC.md#scoped-candidate-document-color-library).
+The bounded design is specified in [`SPEC.md`](SPEC.md#implemented-document-color-library).
 Version one is a collection of unlinked solid RGBA values. Applying a Saved
 Color copies its value; editing or deleting it cannot alter existing artwork.
 
@@ -215,34 +219,33 @@ Document-owned, versioned data:
 Workspace-owned preferences:
 
 - Color Library panel position and size;
-- collapsed groups, picker presentation, and last-used group.
+- collapsed groups and the last-used group.
 
-Expected core changes:
+Current core behavior:
 
-- add bounded color-library storage, validation, sorting keys, and reversible
+- provides bounded color-library storage, validation, sorting keys, and reversible
   CRUD/reorder operations;
-- define perceptual sorting in OKLCH and brightness sorting by relative
+- defines perceptual sorting in OKLCH and brightness sorting by relative
   luminance;
-- include library data in native version 3 without adding references from nodes
+- includes library data in native version 3 without adding references from nodes
   to saved colors.
 
-Expected GPUI changes:
+Current GPUI behavior:
 
-- extend the existing shared picker with Saved Colors search and one-click Save
+- extends the existing shared picker with Saved Colors search and one-click Save
   Color;
-- implement the Color Library as a modeless, movable, resizable in-app utility
+- implements the Color Library as a modeless, movable, resizable in-app utility
   panel in its own module;
-- route inline edits, reordering, grouping, and deletion through core commands;
-- add semantic automation for library and group management.
+- routes inline edits, reordering, grouping, and deletion through core commands;
+- provides semantic automation for library and group management.
 
 Linked values, aliases, themes, and cross-document libraries are a separate
 future concept named Color Variables. They must not be smuggled into Saved Color
 semantics.
 
-## Sequencing the planned work
+## Implemented sequence
 
-Precision aids and the Color Library can proceed independently after one shared
-persistence step:
+The implementation proceeded in this order:
 
 1. Add typed document metadata, version-3 migration, limits, and round-trip
    tests.

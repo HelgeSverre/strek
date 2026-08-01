@@ -451,15 +451,11 @@ fn render_layer_entry(
         LayerIcon::Text => Icon::Text,
     };
 
-    let expand_icon = if entry.has_children {
-        if entry.expanded {
-            "▼"
-        } else {
-            "▶"
-        }
+    let expand_icon = entry.has_children.then_some(if entry.expanded {
+        Icon::ChevronDown
     } else {
-        " "
-    };
+        Icon::ChevronRight
+    });
     let layer_id = entry.id;
     let drag_payload = DraggedLayer {
         id: entry.id,
@@ -562,9 +558,9 @@ fn render_layer_entry(
                 .items_center()
                 .justify_center()
                 .rounded(px(4.0))
-                .text_size(px(8.0))
-                .text_color(rgb(0x8f929a))
-                .child(expand_icon)
+                .when_some(expand_icon, |chevron, kind| {
+                    chevron.child(icon(kind, 13.0, rgb(0x8f929a)))
+                })
                 .when(entry.has_children, |chevron| {
                     chevron
                         .cursor_pointer()
@@ -606,14 +602,16 @@ fn render_layer_entry(
                 .items_center()
                 .justify_center()
                 .rounded(px(4.0))
-                .text_size(px(12.0))
-                .text_color(rgb(if context_menu_enabled {
-                    0xa8abb2
-                } else {
-                    0x666971
-                }))
                 .opacity(if context_menu_enabled { 0.55 } else { 0.3 })
-                .child("•••")
+                .child(icon(
+                    Icon::MoreHorizontal,
+                    15.0,
+                    rgb(if context_menu_enabled {
+                        0xa8abb2
+                    } else {
+                        0x666971
+                    }),
+                ))
                 .when(context_menu_enabled, |trigger| {
                     trigger
                         .cursor_pointer()

@@ -15,16 +15,18 @@ use crate::{
     properties_panel::{self, ColorTarget},
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
-    BringForward, BringToFront, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete, DeselectAll,
-    DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector, EllipseTool,
-    ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool,
-    Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts,
-    Paste, PenTool, RectangleTool, Redo, ReversePath, SaveDocument, SaveDocumentAs, SelectAll,
-    SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath,
+    BringForward, BringToFront, ClearGuides, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete,
+    DeselectAll, DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector,
+    EllipseTool, ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing,
+    FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument,
+    OpenKeyboardShortcuts, Paste, PenTool, RectangleTool, Redo, ReversePath, SaveDocument,
+    SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath,
     StartCreationFillColorInput, StartCreationStrokeColorInput, StartZoomInput, Strek, TextLarger,
-    TextSmaller, TextTool, ToggleCreationFill, ToggleCreationStroke, ToggleDesignPanel,
-    ToggleFrameBackground, ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, ToggleZoomMenu,
-    Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
+    TextSmaller, TextTool, ToggleColorLibrary, ToggleCreationFill, ToggleCreationStroke,
+    ToggleDesignPanel, ToggleFrameBackground, ToggleGrid, ToggleGuideLock, ToggleGuides,
+    ToggleLayerPanel, ToggleMainMenu, TogglePathClosed, TogglePrecisionMenu, ToggleRulers,
+    ToggleSnapping, ToggleZoomMenu, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll,
+    ZoomToFit, ZoomToSelection,
 };
 
 pub const HEADER_HEIGHT: f32 = 48.0;
@@ -105,6 +107,21 @@ pub struct HistoryAvailability {
 }
 
 #[derive(Clone, Copy)]
+pub struct UtilityState {
+    pub snapping: bool,
+    pub precision_open: bool,
+    pub color_library_open: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct HeaderState {
+    pub panels: PanelVisibility,
+    pub history: HistoryAvailability,
+    pub utilities: UtilityState,
+    pub open_menu: Option<MenuKind>,
+}
+
+#[derive(Clone, Copy)]
 pub struct ZoomInputSnapshot<'a> {
     pub value: &'a str,
     pub invalid: bool,
@@ -125,6 +142,12 @@ pub(crate) struct CreationColorInputSnapshot {
 
 pub struct MenuState<'a> {
     pub panels: PanelVisibility,
+    pub utilities: UtilityState,
+    pub show_rulers: bool,
+    pub show_grid: bool,
+    pub show_guides: bool,
+    pub guides_locked: bool,
+    pub can_clear_guides: bool,
     pub can_paste: bool,
     pub recent_files: &'a [PathBuf],
     pub file_busy: bool,
@@ -190,11 +213,15 @@ pub fn render_header(
     document: DocumentHeader,
     current_tool: Tool,
     zoom: ZoomState<'_>,
-    panels: PanelVisibility,
-    history: HistoryAvailability,
-    open_menu: Option<MenuKind>,
+    state: HeaderState,
     keymap: &Keymap,
 ) -> impl IntoElement {
+    let HeaderState {
+        panels,
+        history,
+        utilities,
+        open_menu,
+    } = state;
     div()
         .id("document-bar")
         .h(px(HEADER_HEIGHT))
@@ -277,6 +304,41 @@ pub fn render_header(
             zoom.level,
             zoom.input,
             open_menu == Some(MenuKind::Zoom),
+        ))
+        .child(icon_action_button(
+            "snapping",
+            Icon::Magnet,
+            utilities.snapping,
+            true,
+            if utilities.snapping {
+                "Disable snapping"
+            } else {
+                "Enable snapping"
+            },
+            shortcut(keymap, CommandTarget::App(AppCommand::ToggleSnapping)),
+            ToggleSnapping,
+        ))
+        .child(icon_action_button(
+            "precision-controls",
+            Icon::ChevronDown,
+            utilities.precision_open,
+            true,
+            "Grid, guides, and snapping controls",
+            shortcut(keymap, CommandTarget::App(AppCommand::TogglePrecisionMenu)),
+            TogglePrecisionMenu,
+        ))
+        .child(icon_action_button(
+            "color-library",
+            Icon::Palette,
+            utilities.color_library_open,
+            true,
+            if utilities.color_library_open {
+                "Hide Color Library"
+            } else {
+                "Show Color Library"
+            },
+            shortcut(keymap, CommandTarget::App(AppCommand::ToggleColorLibrary)),
+            ToggleColorLibrary,
         ))
         .child(icon_action_button(
             "layers-panel",
@@ -391,22 +453,22 @@ pub(crate) fn render_context_bar(
                     "Set stroke color for new objects",
                     StartCreationStrokeColorInput,
                 ))
-                .child(context_text_button(
+                .child(context_stepper_button(
                     "creation-stroke-down",
-                    "−",
+                    Icon::Minus,
+                    "Decrease stroke width",
                     true,
-                    None,
                     crate::CreationStrokeDown,
                 ))
                 .child(context_value(stroke_width.map_or_else(
                     || "—".to_owned(),
                     properties_panel::format_number,
                 )))
-                .child(context_text_button(
+                .child(context_stepper_button(
                     "creation-stroke-up",
-                    "+",
+                    Icon::Plus,
+                    "Increase stroke width",
                     true,
-                    None,
                     crate::CreationStrokeUp,
                 ))
                 .into_any_element(),
@@ -461,35 +523,35 @@ pub(crate) fn render_context_bar(
                         crate::SetTextFamilyMonospace,
                     ))
                     .child(context_separator())
-                    .child(context_text_button(
+                    .child(context_stepper_button(
                         "size-down",
-                        "−",
+                        Icon::Minus,
+                        "Decrease text size",
                         text.font_size > 1.0,
-                        None,
                         TextSmaller,
                     ))
                     .child(context_value(format!("{:.0}", text.font_size)))
-                    .child(context_text_button(
+                    .child(context_stepper_button(
                         "size-up",
-                        "+",
+                        Icon::Plus,
+                        "Increase text size",
                         text.font_size < 512.0,
-                        None,
                         TextLarger,
                     ))
                     .child(context_separator())
-                    .child(context_text_button(
+                    .child(context_stepper_button(
                         "weight-down",
-                        "−",
+                        Icon::Minus,
+                        "Decrease text weight",
                         text.font.weight > 100,
-                        None,
                         crate::TextWeightDown,
                     ))
                     .child(context_value(text.font.weight.to_string()))
-                    .child(context_text_button(
+                    .child(context_stepper_button(
                         "weight-up",
-                        "+",
+                        Icon::Plus,
+                        "Increase text weight",
                         text.font.weight < 900,
-                        None,
                         crate::TextWeightUp,
                     ))
                     .child(context_toggle_text_button(
@@ -848,6 +910,39 @@ fn context_text_button<A: Action + Clone>(
         })
 }
 
+fn context_stepper_button<A: Action + Clone>(
+    id: &'static str,
+    icon_kind: Icon,
+    tooltip: &'static str,
+    enabled: bool,
+    action: A,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("context-{id}")))
+        .h(px(25.0))
+        .min_w(px(25.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .opacity(if enabled { 1.0 } else { 0.38 })
+        .child(icon(
+            icon_kind,
+            13.0,
+            rgb(if enabled { TEXT } else { TEXT_MUTED }),
+        ))
+        .tooltip(editor_tooltip(tooltip, None))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(action.clone()), cx);
+                })
+        })
+}
+
 fn context_toggle_text_button<A: Action + Clone>(
     id: &'static str,
     label: &'static str,
@@ -1074,6 +1169,12 @@ fn render_main_menu(
 ) -> impl IntoElement {
     let MenuState {
         panels,
+        utilities,
+        show_rulers,
+        show_grid,
+        show_guides,
+        guides_locked,
+        can_clear_guides,
         can_paste,
         recent_files,
         file_busy,
@@ -1403,6 +1504,74 @@ fn render_main_menu(
             shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleDesignPanel)),
             true,
             ToggleDesignPanel,
+        ))
+        .child(menu_item(
+            if utilities.color_library_open {
+                "Hide Color Library"
+            } else {
+                "Show Color Library"
+            },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleColorLibrary)),
+            true,
+            ToggleColorLibrary,
+        ))
+        .child(menu_item(
+            "Precision controls…",
+            shortcut_text(keymap, CommandTarget::App(AppCommand::TogglePrecisionMenu)),
+            true,
+            TogglePrecisionMenu,
+        ))
+        .child(menu_item(
+            if show_rulers {
+                "Hide rulers"
+            } else {
+                "Show rulers"
+            },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleRulers)),
+            true,
+            ToggleRulers,
+        ))
+        .child(menu_item(
+            if show_grid { "Hide grid" } else { "Show grid" },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleGrid)),
+            true,
+            ToggleGrid,
+        ))
+        .child(menu_item(
+            if show_guides {
+                "Hide guides"
+            } else {
+                "Show guides"
+            },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleGuides)),
+            true,
+            ToggleGuides,
+        ))
+        .child(menu_item(
+            if guides_locked {
+                "Unlock guides"
+            } else {
+                "Lock guides"
+            },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleGuideLock)),
+            true,
+            ToggleGuideLock,
+        ))
+        .child(menu_item(
+            "Clear guides",
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ClearGuides)),
+            can_clear_guides,
+            ClearGuides,
+        ))
+        .child(menu_item(
+            if utilities.snapping {
+                "Disable snapping"
+            } else {
+                "Enable snapping"
+            },
+            shortcut_text(keymap, CommandTarget::App(AppCommand::ToggleSnapping)),
+            true,
+            ToggleSnapping,
         ))
         .child(menu_item(
             "Command palette…",

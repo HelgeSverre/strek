@@ -12,15 +12,17 @@ use serde_json::{json, Map, Value};
 use crate::{
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight, Backspace,
-    BringForward, BringToFront, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete, DeselectAll,
-    DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector, EllipseTool,
-    ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing, FrameTool,
-    Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument, OpenKeyboardShortcuts,
-    Paste, PenTool, QuitApplication, RectangleTool, Redo, ReversePath, SaveDocument,
-    SaveDocumentAs, SelectAll, SelectTool, SendBackward, SendToBack, ShowCommandPalette, SplitPath,
-    TextLarger, TextSmaller, TextTool, ToggleDesignPanel, ToggleFrameBackground, ToggleLayerPanel,
-    TogglePathClosed, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit,
-    ZoomToSelection,
+    BringForward, BringToFront, ClearGuides, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete,
+    DeselectAll, DistributeObjectsHorizontal, DistributeObjectsVertical, Duplicate, EditVector,
+    EllipseTool, ExportJpeg, ExportPng, ExportSvg, ExportSvgOutlined, ExportWebP, FinishEditing,
+    FrameTool, Group, InvertSelection, JoinPaths, LineTool, NewDocument, OpenDocument,
+    OpenKeyboardShortcuts, Paste, PenTool, QuitApplication, RectangleTool, Redo, ReversePath,
+    SaveCurrentColor, SaveDocument, SaveDocumentAs, SelectAll, SelectTool, SendBackward,
+    SendToBack, ShowCommandPalette, SplitPath, TextLarger, TextSmaller, TextTool,
+    ToggleColorLibrary, ToggleDesignPanel, ToggleFrameBackground, ToggleGrid, ToggleGuideLock,
+    ToggleGuides, ToggleLayerPanel, TogglePathClosed, TogglePrecisionMenu, ToggleRulers,
+    ToggleSnapGrid, ToggleSnapGuides, ToggleSnapObjects, ToggleSnapping, Undo, Ungroup, ZoomIn,
+    ZoomOut, ZoomReset, ZoomResetAll, ZoomToFit, ZoomToSelection,
 };
 
 const KEYMAP_VERSION: u64 = 1;
@@ -50,6 +52,18 @@ pub(crate) enum AppCommand {
     DeleteBackward,
     ToggleLayerPanel,
     ToggleDesignPanel,
+    ToggleColorLibrary,
+    TogglePrecisionMenu,
+    ToggleRulers,
+    ToggleGrid,
+    ToggleGuides,
+    ToggleGuideLock,
+    ToggleSnapping,
+    ToggleSnapObjects,
+    ToggleSnapGuides,
+    ToggleSnapGrid,
+    ClearGuides,
+    SaveCurrentColor,
     ShowCommandPalette,
     TextSmaller,
     TextLarger,
@@ -543,6 +557,102 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         ToggleDesignPanel
     ),
     app_command!(
+        "view.toggle_color_library",
+        "Toggle Color Library",
+        "Show or hide the document Color Library",
+        "View",
+        [],
+        ToggleColorLibrary
+    ),
+    app_command!(
+        "view.precision_controls",
+        "Show Precision Controls",
+        "Open grid, guide, and snapping controls",
+        "View",
+        [],
+        TogglePrecisionMenu
+    ),
+    app_command!(
+        "view.toggle_rulers",
+        "Toggle Rulers",
+        "Show or hide canvas rulers",
+        "View",
+        [],
+        ToggleRulers
+    ),
+    app_command!(
+        "view.toggle_grid",
+        "Toggle Grid",
+        "Show or hide the document grid",
+        "View",
+        [],
+        ToggleGrid
+    ),
+    app_command!(
+        "view.toggle_guides",
+        "Toggle Guides",
+        "Show or hide document guides",
+        "View",
+        [],
+        ToggleGuides
+    ),
+    app_command!(
+        "view.toggle_guide_lock",
+        "Lock or Unlock Guides",
+        "Toggle guide movement and creation",
+        "View",
+        [],
+        ToggleGuideLock
+    ),
+    app_command!(
+        "view.toggle_snapping",
+        "Toggle Snapping",
+        "Enable or disable all snapping",
+        "View",
+        [],
+        ToggleSnapping
+    ),
+    app_command!(
+        "view.toggle_snap_objects",
+        "Toggle Object Snapping",
+        "Enable or disable snapping to object geometry",
+        "View",
+        [],
+        ToggleSnapObjects
+    ),
+    app_command!(
+        "view.toggle_snap_guides",
+        "Toggle Guide Snapping",
+        "Enable or disable snapping to document guides",
+        "View",
+        [],
+        ToggleSnapGuides
+    ),
+    app_command!(
+        "view.toggle_snap_grid",
+        "Toggle Grid Snapping",
+        "Enable or disable snapping to the document grid",
+        "View",
+        [],
+        ToggleSnapGrid
+    ),
+    app_command!(
+        "view.clear_guides",
+        "Clear Guides",
+        "Remove all document guides as one undoable edit",
+        "View",
+        [],
+        ClearGuides
+    ),
+    app_command!(
+        "color.save_current",
+        "Save Current Color",
+        "Add the active picker or fill color to the document Color Library",
+        "Color",
+        [],
+        SaveCurrentColor
+    ),
+    app_command!(
         "view.command_palette",
         "Show Command Palette",
         "Search and run editor commands",
@@ -919,6 +1029,18 @@ pub(crate) fn action_for(target: CommandTarget) -> Box<dyn Action> {
             AppCommand::DeleteBackward => Box::new(Backspace),
             AppCommand::ToggleLayerPanel => Box::new(ToggleLayerPanel),
             AppCommand::ToggleDesignPanel => Box::new(ToggleDesignPanel),
+            AppCommand::ToggleColorLibrary => Box::new(ToggleColorLibrary),
+            AppCommand::TogglePrecisionMenu => Box::new(TogglePrecisionMenu),
+            AppCommand::ToggleRulers => Box::new(ToggleRulers),
+            AppCommand::ToggleGrid => Box::new(ToggleGrid),
+            AppCommand::ToggleGuides => Box::new(ToggleGuides),
+            AppCommand::ToggleGuideLock => Box::new(ToggleGuideLock),
+            AppCommand::ToggleSnapping => Box::new(ToggleSnapping),
+            AppCommand::ToggleSnapObjects => Box::new(ToggleSnapObjects),
+            AppCommand::ToggleSnapGuides => Box::new(ToggleSnapGuides),
+            AppCommand::ToggleSnapGrid => Box::new(ToggleSnapGrid),
+            AppCommand::ClearGuides => Box::new(ClearGuides),
+            AppCommand::SaveCurrentColor => Box::new(SaveCurrentColor),
             AppCommand::ShowCommandPalette => Box::new(ShowCommandPalette),
             AppCommand::TextSmaller => Box::new(TextSmaller),
             AppCommand::TextLarger => Box::new(TextLarger),
@@ -962,7 +1084,19 @@ fn contexts_for(target: CommandTarget) -> &'static [&'static str] {
             | AppCommand::SaveDocumentAs
             | AppCommand::QuitApplication
             | AppCommand::OpenKeyboardShortcuts
-            | AppCommand::ShowCommandPalette,
+            | AppCommand::ShowCommandPalette
+            | AppCommand::ToggleColorLibrary
+            | AppCommand::TogglePrecisionMenu
+            | AppCommand::ToggleRulers
+            | AppCommand::ToggleGrid
+            | AppCommand::ToggleGuides
+            | AppCommand::ToggleGuideLock
+            | AppCommand::ToggleSnapping
+            | AppCommand::ToggleSnapObjects
+            | AppCommand::ToggleSnapGuides
+            | AppCommand::ToggleSnapGrid
+            | AppCommand::ClearGuides
+            | AppCommand::SaveCurrentColor,
         ) => &[EDITOR_CONTEXT, TEXT_CONTEXT, MENU_CONTEXT],
         CommandTarget::App(
             AppCommand::Copy | AppCommand::Cut | AppCommand::Paste | AppCommand::DeleteBackward,

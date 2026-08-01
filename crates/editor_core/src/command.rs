@@ -1,7 +1,9 @@
 use glam::Affine2;
 
+use crate::color_library::ColorLibrary;
 use crate::node::{FrameData, Layout, Node, NodeId, TextData};
 use crate::path::PathData;
+use crate::precision::{GridSettings, Guide};
 use crate::style::Style;
 use crate::Document;
 
@@ -25,6 +27,24 @@ fn set_subtree_deleted(doc: &mut Document, root: NodeId, deleted: bool) {
 /// An atomic change to the document that can be applied forward or backward.
 #[derive(Debug, Clone)]
 pub enum Patch {
+    /// Change the document grid definition.
+    SetGridSettings {
+        before: GridSettings,
+        after: GridSettings,
+    },
+
+    /// Replace the persistent ruler-guide collection.
+    SetGuides {
+        before: Vec<Guide>,
+        after: Vec<Guide>,
+    },
+
+    /// Replace the document-local saved-color library.
+    SetColorLibrary {
+        before: ColorLibrary,
+        after: ColorLibrary,
+    },
+
     /// Change a node's transform
     SetTransform {
         id: NodeId,
@@ -125,6 +145,9 @@ impl Patch {
     /// Apply the patch in the forward direction.
     pub fn apply_forward(&self, doc: &mut Document) {
         match self {
+            Patch::SetGridSettings { after, .. } => doc.grid = *after,
+            Patch::SetGuides { after, .. } => doc.guides.clone_from(after),
+            Patch::SetColorLibrary { after, .. } => doc.color_library.clone_from(after),
             Patch::SetTransform { id, after, .. } => {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.transform = *after;
@@ -281,6 +304,9 @@ impl Patch {
     /// Apply the patch in the backward direction (undo).
     pub fn apply_backward(&self, doc: &mut Document) {
         match self {
+            Patch::SetGridSettings { before, .. } => doc.grid = *before,
+            Patch::SetGuides { before, .. } => doc.guides.clone_from(before),
+            Patch::SetColorLibrary { before, .. } => doc.color_library.clone_from(before),
             Patch::SetTransform { id, before, .. } => {
                 if let Some(node) = doc.nodes.get_mut(*id) {
                     node.transform = *before;

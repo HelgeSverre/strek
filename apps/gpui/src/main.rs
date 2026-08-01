@@ -5,6 +5,7 @@
 mod assets;
 mod automation;
 mod canvas;
+mod color_library_panel;
 mod color_picker;
 mod command_palette;
 mod commands;
@@ -13,11 +14,13 @@ mod export;
 mod layer_name_input;
 mod layer_panel;
 mod mcp;
+mod precision_ui;
 mod properties_panel;
 mod status_bar;
 mod svg_import;
 mod text_input;
 mod toolbar;
+mod workspace_preferences;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -102,6 +105,18 @@ actions!(
         StartZoomInput,
         ToggleLayerPanel,
         ToggleDesignPanel,
+        ToggleColorLibrary,
+        TogglePrecisionMenu,
+        ToggleRulers,
+        ToggleGrid,
+        ToggleGuides,
+        ToggleGuideLock,
+        ToggleSnapping,
+        ToggleSnapObjects,
+        ToggleSnapGuides,
+        ToggleSnapGrid,
+        ClearGuides,
+        SaveCurrentColor,
         ToggleMainMenu,
         ToggleZoomMenu,
         SelectTool,
@@ -284,6 +299,14 @@ struct NumericPropertyInput {
     invalid: bool,
 }
 
+#[derive(Debug, Clone)]
+struct GuidePositionInput {
+    id: editor_core::GuideId,
+    value: String,
+    replace_on_type: bool,
+    invalid: bool,
+}
+
 #[derive(Debug)]
 struct ActiveNumericPropertyScrub {
     session: NumericPropertyScrubSession,
@@ -333,6 +356,13 @@ struct Strek {
     focus_handle: FocusHandle,
     show_layers_panel: bool,
     show_design_panel: bool,
+    workspace_preferences: workspace_preferences::WorkspacePreferences,
+    precision_menu_open: bool,
+    color_library_open: bool,
+    color_library_panel: Option<Entity<color_library_panel::ColorLibraryPanel>>,
+    active_guide: Option<editor_core::GuideId>,
+    guide_drag: Option<GuideDrag>,
+    guide_position_input: Option<GuidePositionInput>,
     layers_panel_width: f32,
     design_panel_width: f32,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
@@ -346,8 +376,19 @@ struct Strek {
 
 impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
+        let workspace_preferences = workspace_preferences::WorkspacePreferences::load();
+        let mut editor = Editor::new();
+        editor
+            .set_snap_settings(editor_core::SnapSettings {
+                enabled: workspace_preferences.snapping_enabled,
+                objects: workspace_preferences.snap_to_objects,
+                guides: workspace_preferences.snap_to_guides,
+                grid: workspace_preferences.snap_to_grid,
+                tolerance: workspace_preferences.snap_tolerance,
+            })
+            .expect("sanitized workspace snapping preferences must be valid");
         Self {
-            editor: Editor::new(),
+            editor,
             document_origin: DocumentOrigin::Untitled,
             recent_files: document_io::RecentFiles::load(),
             file_operation: FileOperation::Idle,
@@ -363,6 +404,13 @@ impl Strek {
             focus_handle: cx.focus_handle(),
             show_layers_panel: true,
             show_design_panel: true,
+            workspace_preferences,
+            precision_menu_open: false,
+            color_library_open: false,
+            color_library_panel: None,
+            active_guide: None,
+            guide_drag: None,
+            guide_position_input: None,
             layers_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             design_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             layer_name_input: None,
@@ -649,6 +697,220 @@ impl Strek {
                     ))
                 }
             }
+            AutomationRequest::SetPrecision { settings } => {
+                let current_grid = self.editor.document().grid;
+                let grid = editor_core::GridSettings::new(
+                    settings.grid_spacing.unwrap_or(current_grid.spacing),
+                    settings
+                        .grid_major_every
+                        .unwrap_or(current_grid.major_every),
+                );
+                match grid {
+                    Err(error) => Err(error.to_string()),
+                    Ok(grid) => {
+                        let snap = editor_core::SnapSettings {
+                            enabled: settings
+                                .snapping
+                                .unwrap_or(self.workspace_preferences.snapping_enabled),
+                            objects: settings
+                                .snap_objects
+                                .unwrap_or(self.workspace_preferences.snap_to_objects),
+                            guides: settings
+                                .snap_guides
+                                .unwrap_or(self.workspace_preferences.snap_to_guides),
+                            grid: settings
+                                .snap_grid
+                                .unwrap_or(self.workspace_preferences.snap_to_grid),
+                            tolerance: settings
+                                .tolerance
+                                .unwrap_or(self.workspace_preferences.snap_tolerance),
+                        };
+                        if let Err(error) = self.editor.set_snap_settings(snap) {
+                            return automation::AutomationResponse::error(
+                                self.automation_state(window),
+                                error.to_string(),
+                            );
+                        }
+                        if let Some(value) = settings.rulers {
+                            self.workspace_preferences.show_rulers = value;
+                        }
+                        if let Some(value) = settings.grid_visible {
+                            self.workspace_preferences.show_grid = value;
+                        }
+                        if let Some(value) = settings.guides_visible {
+                            self.workspace_preferences.show_guides = value;
+                        }
+                        if let Some(value) = settings.guides_locked {
+                            self.workspace_preferences.guides_locked = value;
+                        }
+                        if let Some(value) = settings.snapping {
+                            self.workspace_preferences.snapping_enabled = value;
+                        }
+                        if let Some(value) = settings.snap_objects {
+                            self.workspace_preferences.snap_to_objects = value;
+                        }
+                        if let Some(value) = settings.snap_guides {
+                            self.workspace_preferences.snap_to_guides = value;
+                        }
+                        if let Some(value) = settings.snap_grid {
+                            self.workspace_preferences.snap_to_grid = value;
+                        }
+                        if let Some(value) = settings.tolerance {
+                            self.workspace_preferences.snap_tolerance = value;
+                        }
+                        match self.editor.set_grid_settings(grid) {
+                            Ok(_) => {
+                                self.workspace_preferences.persist();
+                                cx.notify();
+                                Ok("updated precision settings".to_owned())
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                }
+            }
+            AutomationRequest::Guide {
+                action,
+                id,
+                axis,
+                position,
+            } => {
+                use automation::GuideAction;
+                match action {
+                    GuideAction::Add => match (axis, position) {
+                        (Some(axis), Some(position)) => self
+                            .editor
+                            .add_guide(automation_guide_axis(axis), position)
+                            .map(|id| format!("added guide {}", id.get()))
+                            .map_err(|error| error.to_string()),
+                        _ => Err("adding a guide requires axis and position".to_owned()),
+                    },
+                    GuideAction::Move => {
+                        match (id.and_then(editor_core::GuideId::from_opaque), position) {
+                            (Some(id), Some(position)) => self
+                                .editor
+                                .move_guide(id, position)
+                                .map(|_| format!("moved guide {}", id.get()))
+                                .map_err(|error| error.to_string()),
+                            _ => Err("moving a guide requires a valid id and position".to_owned()),
+                        }
+                    }
+                    GuideAction::Remove => match id.and_then(editor_core::GuideId::from_opaque) {
+                        Some(id) => self
+                            .editor
+                            .remove_guide(id)
+                            .map(|()| format!("removed guide {}", id.get()))
+                            .map_err(|error| error.to_string()),
+                        None => Err("removing a guide requires a valid id".to_owned()),
+                    },
+                    GuideAction::Clear => {
+                        self.editor.clear_guides();
+                        Ok("cleared guides".to_owned())
+                    }
+                }
+            }
+            AutomationRequest::ColorGroup { action, id, name } => {
+                use automation::ColorGroupAction;
+                match action {
+                    ColorGroupAction::Add => name
+                        .as_deref()
+                        .ok_or_else(|| "adding a color group requires a name".to_owned())
+                        .and_then(|name| {
+                            self.editor
+                                .add_color_group(name)
+                                .map(|id| format!("added color group {}", id.get()))
+                                .map_err(|error| error.to_string())
+                        }),
+                    ColorGroupAction::Rename => automation_color_group_id(id).and_then(|id| {
+                        let name = name
+                            .as_deref()
+                            .ok_or_else(|| "renaming a color group requires a name".to_owned())?;
+                        self.editor
+                            .rename_color_group(id, name)
+                            .map(|_| format!("renamed color group {}", id.get()))
+                            .map_err(|error| error.to_string())
+                    }),
+                    ColorGroupAction::Remove => automation_color_group_id(id).and_then(|id| {
+                        self.editor
+                            .remove_color_group(id, false)
+                            .map(|()| format!("removed color group {}", id.get()))
+                            .map_err(|error| error.to_string())
+                    }),
+                }
+            }
+            AutomationRequest::SavedColor {
+                action,
+                id,
+                group_id,
+                name,
+                color,
+                target,
+            } => {
+                use automation::SavedColorAction;
+                match action {
+                    SavedColorAction::Add => {
+                        automation_rgba_color(color.as_deref()).and_then(|rgba| {
+                            let group = group_id
+                                .map(|id| automation_color_group_id(Some(id)))
+                                .transpose()?;
+                            self.editor
+                                .add_saved_color(group, name.as_deref(), rgba)
+                                .map(|id| format!("added saved color {}", id.get()))
+                                .map_err(|error| error.to_string())
+                        })
+                    }
+                    SavedColorAction::Update => automation_saved_color_id(id).and_then(|id| {
+                        let current = self
+                            .editor
+                            .document()
+                            .color_library
+                            .color(id)
+                            .cloned()
+                            .ok_or_else(|| "saved color does not exist".to_owned())?;
+                        let rgba = color
+                            .as_deref()
+                            .map(|value| automation_rgba_color(Some(value)))
+                            .transpose()?
+                            .unwrap_or(current.rgba);
+                        self.editor
+                            .update_saved_color(
+                                id,
+                                name.as_deref().or(current.name.as_deref()),
+                                rgba,
+                            )
+                            .map(|_| format!("updated saved color {}", id.get()))
+                            .map_err(|error| error.to_string())
+                    }),
+                    SavedColorAction::Remove => automation_saved_color_id(id).and_then(|id| {
+                        self.editor
+                            .remove_saved_color(id)
+                            .map(|()| format!("removed saved color {}", id.get()))
+                            .map_err(|error| error.to_string())
+                    }),
+                    SavedColorAction::Apply => automation_saved_color_id(id).and_then(|id| {
+                        if self.editor.selection().is_empty() {
+                            return Err("select at least one layer before applying a saved color"
+                                .to_owned());
+                        }
+                        let rgba = self
+                            .editor
+                            .document()
+                            .color_library
+                            .color(id)
+                            .ok_or_else(|| "saved color does not exist".to_owned())?
+                            .rgba
+                            .components();
+                        let paint = Some(editor_core::Paint::Solid(rgba));
+                        match target.unwrap_or(automation::ColorTarget::Fill) {
+                            automation::ColorTarget::Fill => self.editor.set_selected_fill(paint),
+                            automation::ColorTarget::Stroke => {
+                                self.editor.set_selected_stroke(paint)
+                            }
+                        };
+                        Ok(format!("applied saved color {}", id.get()))
+                    }),
+                }
+            }
             AutomationRequest::SetLayerProperties {
                 ids,
                 name,
@@ -766,7 +1028,9 @@ impl Strek {
                     UiTarget::MainMenu
                     | UiTarget::CommandPalette
                     | UiTarget::LayersPanel
-                    | UiTarget::DesignPanel => {}
+                    | UiTarget::DesignPanel
+                    | UiTarget::ColorLibrary
+                    | UiTarget::PrecisionControls => {}
                 }
 
                 let scrub_cancelled = self.cancel_numeric_property_scrub();
@@ -801,6 +1065,19 @@ impl Strek {
                             self.toggle_design_panel(&ToggleDesignPanel, window, cx);
                         }
                     }
+                    UiTarget::ColorLibrary => {
+                        if visible {
+                            self.open_color_library(window, cx);
+                        } else {
+                            self.color_library_open = false;
+                            self.color_library_panel = None;
+                            cx.notify();
+                        }
+                    }
+                    UiTarget::PrecisionControls => {
+                        self.precision_menu_open = visible;
+                        cx.notify();
+                    }
                     UiTarget::FillColorPicker | UiTarget::StrokeColorPicker => unreachable!(),
                 }
                 if scrub_cancelled {
@@ -816,6 +1093,7 @@ impl Strek {
             }
         };
 
+        self.refresh_color_library_panel(cx);
         let state = self.automation_state(window);
         match result {
             Ok(message) => automation::AutomationResponse::success(state, message),
@@ -929,6 +1207,11 @@ impl Strek {
             main_menu_open: self.open_menu == Some(toolbar::MenuKind::Main),
             command_palette_open: self.command_palette.is_some(),
             color_picker_open: self.property_color_input.is_some(),
+            color_library_open: self.color_library_open,
+            precision_controls_open: self.precision_menu_open,
+            rulers_visible: self.workspace_preferences.show_rulers,
+            grid_visible: self.workspace_preferences.show_grid,
+            guides_visible: self.workspace_preferences.show_guides,
             numeric_property_scrub_active: self.numeric_property_scrub.is_some(),
             actions,
         }
@@ -1013,6 +1296,52 @@ impl Strek {
         let document = automation::AutomationDocument {
             root_id: automation_node_id(root),
             layers,
+            grid: automation::AutomationGrid {
+                spacing: self.editor.document().grid.spacing,
+                major_every: self.editor.document().grid.major_every,
+            },
+            guides: self
+                .editor
+                .document()
+                .guides
+                .iter()
+                .map(|guide| automation::AutomationGuide {
+                    id: guide.id.get(),
+                    axis: match guide.axis {
+                        editor_core::GuideAxis::Horizontal => automation::GuideAxis::Horizontal,
+                        editor_core::GuideAxis::Vertical => automation::GuideAxis::Vertical,
+                    },
+                    position: guide.position,
+                })
+                .collect(),
+            color_groups: self
+                .editor
+                .document()
+                .color_library
+                .groups
+                .iter()
+                .map(|group| automation::AutomationColorGroup {
+                    id: group.id.get(),
+                    name: group.name.clone(),
+                    manual_order: group.manual_order,
+                    sort: automation_color_sort_name(group.sort_mode).to_owned(),
+                    descending: group.sort_direction == editor_core::SortDirection::Descending,
+                })
+                .collect(),
+            saved_colors: self
+                .editor
+                .document()
+                .color_library
+                .colors
+                .iter()
+                .map(|color| automation::AutomationSavedColor {
+                    id: color.id.get(),
+                    group_id: color.group_id.map(editor_core::ColorGroupId::get),
+                    name: color.name.clone(),
+                    color: color.rgba.hex_label(),
+                    manual_order: color.manual_order,
+                })
+                .collect(),
         };
         let encoded_size = serde_json::to_vec(&document)
             .map_err(|error| format!("could not encode document inspection: {error}"))?
@@ -1306,12 +1635,18 @@ impl Strek {
     fn reset_document(&mut self) {
         self.cancel_numeric_property_scrub();
         self.editor = editor_preserving_creation_styles(&self.editor, Editor::new());
+        self.sync_snap_settings();
         self.document_origin = DocumentOrigin::Untitled;
         self.object_clipboard = None;
         self.command_palette = None;
         self.property_color_input = None;
         self.zoom_input = None;
         self.numeric_property_input = None;
+        self.active_guide = None;
+        self.guide_drag = None;
+        self.guide_position_input = None;
+        self.color_library_open = false;
+        self.color_library_panel = None;
         self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
@@ -1334,11 +1669,17 @@ impl Strek {
         self.cancel_numeric_property_scrub();
         self.editor =
             editor_preserving_creation_styles(&self.editor, Editor::from_document(document));
+        self.sync_snap_settings();
         self.object_clipboard = None;
         self.command_palette = None;
         self.property_color_input = None;
         self.zoom_input = None;
         self.numeric_property_input = None;
+        self.active_guide = None;
+        self.guide_drag = None;
+        self.guide_position_input = None;
+        self.color_library_open = false;
+        self.color_library_panel = None;
         self.layer_name_input = None;
         self.text_image_cache = canvas::TextImageCache::default();
         self.current_cursor = gpui::CursorStyle::Arrow;
@@ -1519,6 +1860,16 @@ impl Strek {
                         | AppCommand::OpenKeyboardShortcuts
                         | AppCommand::ToggleLayerPanel
                         | AppCommand::ToggleDesignPanel
+                        | AppCommand::ToggleColorLibrary
+                        | AppCommand::TogglePrecisionMenu
+                        | AppCommand::ToggleRulers
+                        | AppCommand::ToggleGrid
+                        | AppCommand::ToggleGuides
+                        | AppCommand::ToggleGuideLock
+                        | AppCommand::ToggleSnapping
+                        | AppCommand::ToggleSnapObjects
+                        | AppCommand::ToggleSnapGuides
+                        | AppCommand::ToggleSnapGrid
                         | AppCommand::ShowCommandPalette
                 )
             )
@@ -1574,10 +1925,36 @@ impl Strek {
             CommandTarget::App(AppCommand::ToggleFrameBackground) => {
                 self.editor.selected_frame_data().is_some()
             }
+            CommandTarget::App(AppCommand::ClearGuides) => {
+                !self.editor.document().guides.is_empty()
+            }
+            CommandTarget::App(AppCommand::SaveCurrentColor) => {
+                self.property_color_input.is_some()
+                    || self.editor.selection().primary().is_some_and(|id| {
+                        self.editor
+                            .document()
+                            .get(id)
+                            .is_some_and(|node| node.style.fill.is_some())
+                    })
+                    || self
+                        .editor
+                        .active_creation_style()
+                        .is_some_and(|style| style.fill.is_some())
+            }
             CommandTarget::App(
                 AppCommand::OpenKeyboardShortcuts
                 | AppCommand::ToggleLayerPanel
                 | AppCommand::ToggleDesignPanel
+                | AppCommand::ToggleColorLibrary
+                | AppCommand::TogglePrecisionMenu
+                | AppCommand::ToggleRulers
+                | AppCommand::ToggleGrid
+                | AppCommand::ToggleGuides
+                | AppCommand::ToggleGuideLock
+                | AppCommand::ToggleSnapping
+                | AppCommand::ToggleSnapObjects
+                | AppCommand::ToggleSnapGuides
+                | AppCommand::ToggleSnapGrid
                 | AppCommand::ShowCommandPalette,
             ) => true,
         }
@@ -2108,6 +2485,7 @@ impl Strek {
             return;
         }
         if self.editor.undo_in_context() || menu_closed {
+            self.refresh_color_library_panel(cx);
             cx.notify();
         }
     }
@@ -2120,6 +2498,7 @@ impl Strek {
             return;
         }
         if self.editor.redo_in_context() || menu_closed {
+            self.refresh_color_library_panel(cx);
             cx.notify();
         }
     }
@@ -2147,7 +2526,11 @@ impl Strek {
     }
 
     fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.text_input_snapshot().is_some() {
+        if let Some(id) = self.active_guide.take() {
+            if self.editor.remove_guide(id).is_ok() {
+                cx.notify();
+            }
+        } else if self.editor.text_input_snapshot().is_some() {
             if self.editor.delete_text_backward() {
                 cx.notify();
             }
@@ -2165,7 +2548,11 @@ impl Strek {
     }
 
     fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.text_input_snapshot().is_some() {
+        if let Some(id) = self.active_guide.take() {
+            if self.editor.remove_guide(id).is_ok() {
+                cx.notify();
+            }
+        } else if self.editor.text_input_snapshot().is_some() {
             if self.editor.delete_text_forward() {
                 cx.notify();
             }
@@ -2432,6 +2819,427 @@ impl Strek {
         self.refresh_canvas_input_bounds(window);
         self.dismiss_menus();
         cx.notify();
+    }
+
+    fn toggle_color_library(
+        &mut self,
+        _: &ToggleColorLibrary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.color_library_open {
+            self.color_library_open = false;
+            self.color_library_panel = None;
+        } else {
+            self.open_color_library(window, cx);
+        }
+        self.precision_menu_open = false;
+        self.dismiss_menus();
+        cx.notify();
+    }
+
+    fn open_color_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.color_library_panel {
+            self.color_library_open = true;
+            panel.read(cx).focus(window);
+            return;
+        }
+
+        let snapshot = color_library_snapshot(self.editor.document());
+        let presentation = color_library_presentation(&self.workspace_preferences);
+        let panel = cx.new(|panel_cx| {
+            color_library_panel::ColorLibraryPanel::new(snapshot, presentation, window, panel_cx)
+        });
+        cx.subscribe_in(
+            &panel,
+            window,
+            |editor, panel, event: &color_library_panel::ColorLibraryPanelEvent, window, cx| {
+                editor.handle_color_library_panel_event(panel.clone(), event.clone(), window, cx);
+            },
+        )
+        .detach();
+        panel.read(cx).focus(window);
+        self.color_library_panel = Some(panel);
+        self.color_library_open = true;
+    }
+
+    fn handle_color_library_panel_event(
+        &mut self,
+        panel: Entity<color_library_panel::ColorLibraryPanel>,
+        event: color_library_panel::ColorLibraryPanelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use color_library_panel::{ColorLibraryPanelEvent as Event, ColorLibrarySectionId};
+
+        let result: Result<(), String> = match event {
+            Event::Dismiss => {
+                self.color_library_open = false;
+                self.color_library_panel = None;
+                Ok(())
+            }
+            Event::QuickAdd => self.quick_add_library_color().map(|_| ()),
+            Event::AddGroup => {
+                let number = self.editor.document().color_library.groups.len() + 1;
+                self.editor
+                    .add_color_group(&format!("Group {number}"))
+                    .map(|id| {
+                        self.workspace_preferences.last_color_group = Some(id.get().to_string());
+                    })
+                    .map_err(|error| error.to_string())
+            }
+            Event::RenameGroup { group, name } => color_group_id(group).and_then(|id| {
+                self.editor
+                    .rename_color_group(id, &name)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+            Event::RemoveGroup { group } => color_group_id(group).and_then(|id| {
+                self.editor
+                    .remove_color_group(id, false)
+                    .map_err(|error| error.to_string())
+            }),
+            Event::SetSort { section, sort } => match section {
+                ColorLibrarySectionId::Ungrouped => Ok(()),
+                ColorLibrarySectionId::Group(group) => color_group_id(group).and_then(|id| {
+                    self.editor
+                        .set_color_group_sort(
+                            id,
+                            core_color_sort_mode(sort.mode),
+                            core_color_sort_direction(sort.direction),
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }),
+            },
+            Event::EditSwatch { color } => self.apply_library_color(color),
+            Event::RenameColor { color, name } => self.update_library_color(color, name, None),
+            Event::SetColorValue { color, value } => {
+                let paint = color_picker::parse_saved_color_paint(&value).ok_or_else(|| {
+                    "color must be a 3, 4, 6, or 8 digit hexadecimal value".to_owned()
+                });
+                paint.and_then(|paint| {
+                    self.update_library_color(color, None, Some(rgba_color_from_paint(&paint)?))
+                })
+            }
+            Event::SetColorOrder {
+                color,
+                one_based_order,
+            } => saved_color_id(color).and_then(|id| {
+                let group = self
+                    .editor
+                    .document()
+                    .color_library
+                    .color(id)
+                    .ok_or_else(|| "saved color no longer exists".to_owned())?
+                    .group_id;
+                self.editor
+                    .move_saved_color(id, group, one_based_order.saturating_sub(1))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+            Event::DuplicateColor { color } => saved_color_id(color).and_then(|id| {
+                self.editor
+                    .duplicate_saved_color(id)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+            Event::RemoveColor { color } => saved_color_id(color).and_then(|id| {
+                self.editor
+                    .remove_saved_color(id)
+                    .map_err(|error| error.to_string())
+            }),
+            Event::MoveColorBefore {
+                color,
+                section,
+                before,
+            } => saved_color_id(color).and_then(|id| {
+                let group = color_section_group(section)?;
+                let before = before.map(saved_color_id).transpose()?;
+                let index = before
+                    .and_then(|before| {
+                        self.editor
+                            .document()
+                            .color_library
+                            .colors_in_group(group)
+                            .iter()
+                            .position(|candidate| candidate.id == before)
+                    })
+                    .unwrap_or_else(|| {
+                        self.editor
+                            .document()
+                            .color_library
+                            .colors_in_group(group)
+                            .len()
+                    });
+                self.editor
+                    .move_saved_color(id, group, index)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+            Event::MoveGroupBefore { group, before } => color_group_id(group).and_then(|id| {
+                let before = color_group_id(before)?;
+                let index = self
+                    .editor
+                    .document()
+                    .color_library
+                    .groups
+                    .iter()
+                    .position(|candidate| candidate.id == before)
+                    .ok_or_else(|| "target color group no longer exists".to_owned())?;
+                self.editor
+                    .reorder_color_group(id, index)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+            Event::PresentationChanged(presentation) => {
+                self.store_color_library_presentation(&presentation);
+                Ok(())
+            }
+        };
+
+        if let Err(error) = result {
+            log::warn!("Color Library action failed: {error}");
+        }
+        if self.color_library_open {
+            let snapshot = color_library_snapshot(self.editor.document());
+            panel.update(cx, |panel, cx| panel.set_snapshot(snapshot, cx));
+        }
+        self.workspace_preferences.persist();
+        cx.notify();
+    }
+
+    fn quick_add_library_color(&mut self) -> Result<editor_core::SavedColorId, String> {
+        let paint = self
+            .property_color_input
+            .as_ref()
+            .map(|input| input.picker.paint().clone())
+            .or_else(|| {
+                self.editor
+                    .selection()
+                    .primary()
+                    .and_then(|id| self.editor.document().get(id))
+                    .and_then(|node| node.style.fill.clone())
+            })
+            .or_else(|| self.editor.active_creation_style()?.fill.clone())
+            .unwrap_or_else(editor_core::Paint::black);
+        let rgba = rgba_color_from_paint(&paint)?;
+        if let Some(existing) = self.editor.document().color_library.find_exact(rgba) {
+            return Ok(existing.id);
+        }
+        let group = self
+            .workspace_preferences
+            .last_color_group
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(editor_core::ColorGroupId::from_opaque)
+            .filter(|id| self.editor.document().color_library.group(*id).is_some());
+        self.editor
+            .add_saved_color(group, None, rgba)
+            .map_err(|error| error.to_string())
+    }
+
+    fn update_library_color(
+        &mut self,
+        color: color_library_panel::ColorLibraryColorId,
+        name: Option<String>,
+        rgba: Option<editor_core::RgbaColor>,
+    ) -> Result<(), String> {
+        let id = saved_color_id(color)?;
+        let current = self
+            .editor
+            .document()
+            .color_library
+            .color(id)
+            .cloned()
+            .ok_or_else(|| "saved color no longer exists".to_owned())?;
+        let name = if rgba.is_some() && name.is_none() {
+            current.name.as_deref()
+        } else {
+            name.as_deref()
+        };
+        self.editor
+            .update_saved_color(id, name, rgba.unwrap_or(current.rgba))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn apply_library_color(
+        &mut self,
+        color: color_library_panel::ColorLibraryColorId,
+    ) -> Result<(), String> {
+        let id = saved_color_id(color)?;
+        let rgba = self
+            .editor
+            .document()
+            .color_library
+            .color(id)
+            .ok_or_else(|| "saved color no longer exists".to_owned())?
+            .rgba
+            .components();
+        let paint = editor_core::Paint::Solid(rgba);
+        if let Some(input) = self.property_color_input.as_mut() {
+            input.picker.set_paint(paint.clone());
+            apply_color_input(&mut self.editor, input.scope, input.target, paint);
+        } else if !self.editor.selection().is_empty() {
+            self.editor.set_selected_fill(Some(paint));
+        } else if self.editor.active_creation_style().is_some() {
+            self.editor.set_creation_fill(Some(paint));
+        }
+        Ok(())
+    }
+
+    fn store_color_library_presentation(
+        &mut self,
+        presentation: &color_library_panel::ColorLibraryPanelPresentation,
+    ) {
+        self.workspace_preferences.color_library_panel =
+            workspace_preferences::FloatingPanelPreferences {
+                x: presentation.geometry.left,
+                y: presentation.geometry.top,
+                width: presentation.geometry.width,
+                height: presentation.geometry.height,
+            };
+        self.workspace_preferences.collapsed_color_groups = presentation
+            .collapsed_sections
+            .iter()
+            .map(|section| match section {
+                color_library_panel::ColorLibrarySectionId::Ungrouped => "ungrouped".to_owned(),
+                color_library_panel::ColorLibrarySectionId::Group(group) => {
+                    format!("group-{}", group.0)
+                }
+            })
+            .collect();
+    }
+
+    fn refresh_color_library_panel(&self, cx: &mut Context<Self>) {
+        let Some(panel) = &self.color_library_panel else {
+            return;
+        };
+        let snapshot = color_library_snapshot(self.editor.document());
+        panel.update(cx, |panel, cx| panel.set_snapshot(snapshot, cx));
+    }
+
+    fn toggle_precision_menu(
+        &mut self,
+        _: &TogglePrecisionMenu,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.precision_menu_open = !self.precision_menu_open;
+        self.dismiss_menus();
+        cx.notify();
+    }
+
+    fn toggle_rulers(&mut self, _: &ToggleRulers, _window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_preferences.show_rulers = !self.workspace_preferences.show_rulers;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_grid(&mut self, _: &ToggleGrid, _window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_preferences.show_grid = !self.workspace_preferences.show_grid;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_guides(&mut self, _: &ToggleGuides, _window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_preferences.show_guides = !self.workspace_preferences.show_guides;
+        if !self.workspace_preferences.show_guides {
+            self.active_guide = None;
+            self.guide_drag = None;
+            self.guide_position_input = None;
+        }
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_guide_lock(
+        &mut self,
+        _: &ToggleGuideLock,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_preferences.guides_locked = !self.workspace_preferences.guides_locked;
+        if self.workspace_preferences.guides_locked {
+            self.active_guide = None;
+            self.guide_drag = None;
+            self.guide_position_input = None;
+        }
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_snapping(
+        &mut self,
+        _: &ToggleSnapping,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_preferences.snapping_enabled = !self.workspace_preferences.snapping_enabled;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_snap_objects(
+        &mut self,
+        _: &ToggleSnapObjects,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_preferences.snap_to_objects = !self.workspace_preferences.snap_to_objects;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_snap_guides(
+        &mut self,
+        _: &ToggleSnapGuides,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_preferences.snap_to_guides = !self.workspace_preferences.snap_to_guides;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn toggle_snap_grid(
+        &mut self,
+        _: &ToggleSnapGrid,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_preferences.snap_to_grid = !self.workspace_preferences.snap_to_grid;
+        self.persist_workspace_preferences(cx);
+    }
+
+    fn clear_guides(&mut self, _: &ClearGuides, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.clear_guides() {
+            self.active_guide = None;
+            self.guide_drag = None;
+            self.guide_position_input = None;
+            cx.notify();
+        }
+    }
+
+    fn save_current_color(
+        &mut self,
+        _: &SaveCurrentColor,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_add_current_picker_color(cx);
+    }
+
+    fn persist_workspace_preferences(&mut self, cx: &mut Context<Self>) {
+        self.sync_snap_settings();
+        self.workspace_preferences.persist();
+        cx.notify();
+    }
+
+    fn sync_snap_settings(&mut self) {
+        self.editor
+            .set_snap_settings(editor_core::SnapSettings {
+                enabled: self.workspace_preferences.snapping_enabled,
+                objects: self.workspace_preferences.snap_to_objects,
+                guides: self.workspace_preferences.snap_to_guides,
+                grid: self.workspace_preferences.snap_to_grid,
+                tolerance: self.workspace_preferences.snap_tolerance,
+            })
+            .expect("sanitized workspace snapping preferences must be valid");
     }
 
     fn resize_panel(
@@ -2978,9 +3786,53 @@ impl Strek {
         }
     }
 
+    pub(crate) fn select_color_picker_saved_color(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(id) = editor_core::SavedColorId::from_opaque(id) else {
+            return;
+        };
+        let Some(rgba) = self
+            .editor
+            .document()
+            .color_library
+            .color(id)
+            .map(|color| color.rgba.components())
+        else {
+            return;
+        };
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.set_paint(editor_core::Paint::Solid(rgba));
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn quick_add_current_picker_color(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.quick_add_library_color() {
+            log::warn!("could not save picker color: {error}");
+        }
+        self.refresh_color_library_panel(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn show_color_library_from_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_color_library(window, cx);
+        self.precision_menu_open = false;
+        cx.notify();
+    }
+
     pub(crate) fn focus_color_picker_hex_input(&mut self, cx: &mut Context<Self>) {
         if let Some(input) = &mut self.property_color_input {
             input.picker.focus_hex_input();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn focus_color_picker_saved_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = &mut self.property_color_input {
+            input.picker.focus_saved_search();
             cx.notify();
         }
     }
@@ -3387,12 +4239,21 @@ impl Strek {
         if self.property_color_input.take().is_some()
             || self.zoom_input.take().is_some()
             || self.numeric_property_input.take().is_some()
+            || self.guide_position_input.take().is_some()
         {
             cx.notify();
         }
     }
 
     fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.guide_position_input.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.guide_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.cancel_numeric_property_scrub() {
             cx.notify();
             return;
@@ -3413,6 +4274,126 @@ impl Strek {
         }
     }
 
+    fn begin_guide_drag(
+        &mut self,
+        position: glam::Vec2,
+        duplicate: bool,
+        click_count: usize,
+    ) -> bool {
+        if !self.workspace_preferences.show_guides || self.workspace_preferences.guides_locked {
+            return false;
+        }
+
+        let ruler = precision_ui::DEFAULT_RULER_THICKNESS;
+        let axis = if self.workspace_preferences.show_rulers && position.y <= ruler {
+            Some(editor_core::GuideAxis::Horizontal)
+        } else if self.workspace_preferences.show_rulers && position.x <= ruler {
+            Some(editor_core::GuideAxis::Vertical)
+        } else {
+            None
+        };
+        let world = self.editor.view().to_world(position);
+        if let Some(axis) = axis {
+            self.editor.cancel_pointer_interaction();
+            self.guide_drag = Some(GuideDrag {
+                source: None,
+                axis,
+                position: guide_axis_value(axis, world),
+                duplicate: false,
+            });
+            self.active_guide = None;
+            return true;
+        }
+
+        const GUIDE_HIT_TOLERANCE_PX: f32 = 5.0;
+        let view = *self.editor.view();
+        let hit = self
+            .editor
+            .document()
+            .guides
+            .iter()
+            .filter_map(|guide| {
+                let screen = match guide.axis {
+                    editor_core::GuideAxis::Horizontal => {
+                        view.to_screen(glam::Vec2::new(0.0, guide.position)).y
+                    }
+                    editor_core::GuideAxis::Vertical => {
+                        view.to_screen(glam::Vec2::new(guide.position, 0.0)).x
+                    }
+                };
+                let pointer = match guide.axis {
+                    editor_core::GuideAxis::Horizontal => position.y,
+                    editor_core::GuideAxis::Vertical => position.x,
+                };
+                let distance = (screen - pointer).abs();
+                (distance <= GUIDE_HIT_TOLERANCE_PX).then_some((distance, *guide))
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, guide)| guide);
+
+        let Some(guide) = hit else {
+            return false;
+        };
+        self.editor.cancel_pointer_interaction();
+        self.active_guide = Some(guide.id);
+        if click_count >= 2 {
+            self.guide_position_input = Some(GuidePositionInput {
+                id: guide.id,
+                value: format!("{}", guide.position),
+                replace_on_type: true,
+                invalid: false,
+            });
+            self.guide_drag = None;
+            return true;
+        }
+        self.guide_drag = Some(GuideDrag {
+            source: Some(guide.id),
+            axis: guide.axis,
+            position: guide.position,
+            duplicate,
+        });
+        true
+    }
+
+    fn update_guide_drag(&mut self, position: glam::Vec2) -> bool {
+        let Some(drag) = self.guide_drag.as_mut() else {
+            return false;
+        };
+        let world = self.editor.view().to_world(position);
+        drag.position = guide_axis_value(drag.axis, world);
+        true
+    }
+
+    fn finish_guide_drag(&mut self, position: glam::Vec2) -> bool {
+        let Some(drag) = self.guide_drag.take() else {
+            return false;
+        };
+        let ruler = precision_ui::DEFAULT_RULER_THICKNESS;
+        let returned_to_ruler = self.workspace_preferences.show_rulers
+            && match drag.axis {
+                editor_core::GuideAxis::Horizontal => position.y <= ruler,
+                editor_core::GuideAxis::Vertical => position.x <= ruler,
+            };
+
+        if returned_to_ruler {
+            if let Some(id) = drag.source {
+                if self.editor.remove_guide(id).is_ok() {
+                    self.active_guide = None;
+                }
+            }
+            return true;
+        }
+
+        self.active_guide = match (drag.source, drag.duplicate) {
+            (Some(_), true) | (None, _) => self.editor.add_guide(drag.axis, drag.position).ok(),
+            (Some(id), false) => {
+                let _ = self.editor.move_guide(id, drag.position);
+                Some(id)
+            }
+        };
+        true
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -3430,6 +4411,14 @@ impl Strek {
             self.canvas_input_bounds,
             visible_panel_width(self.show_layers_panel, self.layers_panel_width),
         );
+        if event.button == MouseButton::Left
+            && self.begin_guide_drag(position, event.modifiers.alt, event.click_count)
+        {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        self.active_guide = None;
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
         let effects = self.editor.handle_pointer_down_with_click_count(
@@ -3456,6 +4445,10 @@ impl Strek {
             self.canvas_input_bounds,
             visible_panel_width(self.show_layers_panel, self.layers_panel_width),
         );
+        if event.button == MouseButton::Left && self.finish_guide_drag(position) {
+            cx.notify();
+            return;
+        }
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
 
@@ -3489,6 +4482,10 @@ impl Strek {
             self.canvas_input_bounds,
             visible_panel_width(self.show_layers_panel, self.layers_panel_width),
         );
+        if self.update_guide_drag(position) {
+            cx.notify();
+            return;
+        }
         let modifiers = convert_modifiers(&event.modifiers);
 
         let input = editor_core::InputEvent::PointerMove {
@@ -3593,6 +4590,9 @@ impl Strek {
                     if input.picker.accepts_text_input() {
                         input.picker.backspace();
                         cx.notify();
+                    } else if input.picker.accepts_saved_search_input() {
+                        input.picker.backspace_saved_search();
+                        cx.notify();
                     }
                 }
             }
@@ -3600,6 +4600,9 @@ impl Strek {
                 if let Some(input) = &mut self.property_color_input {
                     if input.picker.accepts_text_input() {
                         input.picker.select_hex();
+                        cx.notify();
+                    } else if input.picker.accepts_saved_search_input() {
+                        input.picker.clear_saved_search();
                         cx.notify();
                     }
                 }
@@ -3609,6 +4612,9 @@ impl Strek {
                     if let Some(input) = &mut self.property_color_input {
                         if input.picker.accepts_text_input() {
                             input.picker.replace_hex(&text);
+                            cx.notify();
+                        } else if input.picker.accepts_saved_search_input() {
+                            input.picker.replace_saved_search(&text);
                             cx.notify();
                         }
                     }
@@ -3625,6 +4631,9 @@ impl Strek {
                 if let Some(input) = &mut self.property_color_input {
                     if input.picker.accepts_text_input() {
                         input.picker.append_hex(text);
+                        cx.notify();
+                    } else if input.picker.accepts_saved_search_input() {
+                        input.picker.append_saved_search(text);
                         cx.notify();
                     }
                 }
@@ -3813,12 +4822,109 @@ impl Strek {
         cx.stop_propagation();
     }
 
+    fn handle_guide_position_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let primary = if cfg!(target_os = "macos") {
+            event.keystroke.modifiers.platform
+        } else {
+            event.keystroke.modifiers.control
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.guide_position_input = None;
+                cx.notify();
+            }
+            "enter" => {
+                let Some(input) = self.guide_position_input.as_ref() else {
+                    return;
+                };
+                let Ok(position) = input.value.trim().parse::<f32>() else {
+                    if let Some(input) = &mut self.guide_position_input {
+                        input.invalid = true;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                };
+                let id = input.id;
+                match self.editor.move_guide(id, position) {
+                    Ok(_) => {
+                        self.guide_position_input = None;
+                        self.active_guide = Some(id);
+                    }
+                    Err(_) => {
+                        if let Some(input) = &mut self.guide_position_input {
+                            input.invalid = true;
+                        }
+                    }
+                }
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if let Some(input) = &mut self.guide_position_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                    } else {
+                        input.value.pop();
+                    }
+                    input.replace_on_type = false;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "a" if primary => {
+                if let Some(input) = &mut self.guide_position_input {
+                    input.replace_on_type = true;
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            "v" if primary => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    if let Some(input) = &mut self.guide_position_input {
+                        input.value = sanitize_numeric_property_input(&text);
+                        input.replace_on_type = false;
+                        input.invalid = false;
+                        cx.notify();
+                    }
+                }
+            }
+            _ if !primary
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt =>
+            {
+                let Some(text) = event.keystroke.key_char.as_deref() else {
+                    cx.stop_propagation();
+                    return;
+                };
+                if let Some(input) = &mut self.guide_position_input {
+                    if input.replace_on_type {
+                        input.value.clear();
+                        input.replace_on_type = false;
+                    }
+                    for character in text.chars().filter(|character| {
+                        character.is_ascii_digit() || matches!(character, '.' | '-' | '+')
+                    }) {
+                        input.value.push(character);
+                    }
+                    input.invalid = false;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.file_operation == FileOperation::Opening {
             return;
         }
         if self.zoom_input.is_some() {
             self.handle_zoom_key(event, cx);
+            return;
+        }
+        if self.guide_position_input.is_some() {
+            self.handle_guide_position_key(event, cx);
             return;
         }
         if self.numeric_property_input.is_some() {
@@ -3875,6 +4981,14 @@ impl Strek {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GuideDrag {
+    source: Option<editor_core::GuideId>,
+    axis: editor_core::GuideAxis,
+    position: f32,
+    duplicate: bool,
+}
+
 impl Focusable for Strek {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -3916,7 +5030,8 @@ impl Render for Strek {
                 || self.layer_name_input.is_some()
                 || self.property_color_input.is_some()
                 || self.zoom_input.is_some()
-                || self.numeric_property_input.is_some(),
+                || self.numeric_property_input.is_some()
+                || self.guide_position_input.is_some(),
             self.open_menu.is_some() || self.layer_context_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
@@ -3933,6 +5048,8 @@ impl Render for Strek {
         let layer_name_input = self.layer_name_input.clone();
         let layer_context_menu = self.layer_context_menu;
         let command_palette = self.command_palette.clone();
+        let color_library_panel = self.color_library_panel.clone();
+        let guide_position_input = self.guide_position_input.clone();
         let open_menu = self.open_menu;
         let cursor = self.current_cursor;
         let document_name = self.document_name();
@@ -3962,7 +5079,7 @@ impl Render for Strek {
         };
 
         let window_size = window.viewport_size();
-        self.editor.set_viewport_size(glam::Vec2::new(
+        let canvas_viewport = glam::Vec2::new(
             canvas_viewport_width(
                 window_size.width.0,
                 show_layers_panel,
@@ -3971,7 +5088,82 @@ impl Render for Strek {
                 design_panel_width,
             ),
             (window_size.height.0 - toolbar::HEADER_HEIGHT - status_bar::HEIGHT).max(1.0),
-        ));
+        );
+        self.editor.set_viewport_size(canvas_viewport);
+
+        let precision_visibility = precision_ui::PrecisionVisibility {
+            rulers: self.workspace_preferences.show_rulers,
+            grid: self.workspace_preferences.show_grid,
+            guides: self.workspace_preferences.show_guides,
+            guides_locked: self.workspace_preferences.guides_locked,
+        };
+        let document_grid = self.editor.document().grid;
+        let precision_grid = precision_ui::GridSettings {
+            spacing: document_grid.spacing,
+            major_every: document_grid.major_every,
+        };
+        let precision_snapshot = precision_ui::PrecisionUiSnapshot {
+            popover_open: self.precision_menu_open,
+            snapping: precision_ui::SnappingSettings {
+                enabled: self.workspace_preferences.snapping_enabled,
+                objects: self.workspace_preferences.snap_to_objects,
+                guides: self.workspace_preferences.snap_to_guides,
+                grid: self.workspace_preferences.snap_to_grid,
+                tolerance_px: self.workspace_preferences.snap_tolerance,
+            },
+            visibility: precision_visibility,
+            grid: precision_grid,
+            guide_count: self.editor.document().guides.len(),
+        };
+        let mut precision_guides = self
+            .editor
+            .document()
+            .guides
+            .iter()
+            .map(|guide| {
+                let position = self.guide_drag.map_or(guide.position, |drag| {
+                    if drag.source == Some(guide.id) && !drag.duplicate {
+                        drag.position
+                    } else {
+                        guide.position
+                    }
+                });
+                precision_ui::GuideOverlay {
+                    axis: match guide.axis {
+                        editor_core::GuideAxis::Horizontal => precision_ui::OverlayAxis::Horizontal,
+                        editor_core::GuideAxis::Vertical => precision_ui::OverlayAxis::Vertical,
+                    },
+                    position,
+                    active: self.active_guide == Some(guide.id),
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(drag) = self
+            .guide_drag
+            .filter(|drag| drag.source.is_none() || drag.duplicate)
+        {
+            precision_guides.push(precision_ui::GuideOverlay {
+                axis: match drag.axis {
+                    editor_core::GuideAxis::Horizontal => precision_ui::OverlayAxis::Horizontal,
+                    editor_core::GuideAxis::Vertical => precision_ui::OverlayAxis::Vertical,
+                },
+                position: drag.position,
+                active: true,
+            });
+        }
+        let precision_overlay = precision_ui::build_precision_overlay_geometry(
+            &precision_ui::PrecisionOverlaySnapshot {
+                viewport: precision_ui::ScreenRect::from_size(canvas_viewport),
+                view: precision_ui::OverlayView {
+                    pan: self.editor.view().pan,
+                    zoom: self.editor.view().zoom,
+                },
+                visibility: precision_visibility,
+                grid: precision_grid,
+                guides: precision_guides,
+                ruler_thickness: precision_ui::DEFAULT_RULER_THICKNESS,
+            },
+        );
 
         let text_layouts =
             canvas::shape_text_layouts(self.editor.document().text_items_for_layout(), window);
@@ -3994,6 +5186,36 @@ impl Render for Strek {
                 value: input.picker.hex_value().to_owned(),
                 invalid: input.picker.invalid(),
             });
+        let color_library = &self.editor.document().color_library;
+        let has_picker_saved_colors = !color_library.colors.is_empty();
+        let picker_saved_query = self
+            .property_color_input
+            .as_ref()
+            .map_or("", |input| input.picker.saved_search())
+            .trim()
+            .to_lowercase();
+        let picker_saved_colors = color_library
+            .groups
+            .iter()
+            .flat_map(|group| color_library.colors_in_group(Some(group.id)))
+            .chain(color_library.colors_in_group(None))
+            .filter_map(|color| {
+                let value = color.rgba.hex_label();
+                (picker_saved_query.is_empty()
+                    || value.to_lowercase().contains(&picker_saved_query)
+                    || color
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.to_lowercase().contains(&picker_saved_query)))
+                .then(|| color_picker::SavedColorOption {
+                    id: color.id.get(),
+                    name: color.name.clone().map(Into::into),
+                    rgba: color.rgba.components(),
+                    value: value.into(),
+                })
+            })
+            .take(128)
+            .collect::<Vec<_>>();
         let color_picker = self.property_color_input.as_ref().map(|input| {
             let title = match (input.scope, input.target) {
                 (ColorInputScope::Selection, properties_panel::ColorTarget::Fill) => "Fill color",
@@ -4007,7 +5229,10 @@ impl Render for Strek {
                     "New shape stroke"
                 }
             };
-            input.picker.snapshot(title)
+            input
+                .picker
+                .snapshot(title)
+                .with_saved_colors(picker_saved_colors, has_picker_saved_colors)
         });
         let numeric_input = self.numeric_property_input.as_ref().map(|input| {
             properties_panel::NumericInputSnapshot {
@@ -4099,6 +5324,18 @@ impl Render for Strek {
             .on_action(cx.listener(Self::start_zoom_input))
             .on_action(cx.listener(Self::toggle_layer_panel))
             .on_action(cx.listener(Self::toggle_design_panel))
+            .on_action(cx.listener(Self::toggle_color_library))
+            .on_action(cx.listener(Self::toggle_precision_menu))
+            .on_action(cx.listener(Self::toggle_rulers))
+            .on_action(cx.listener(Self::toggle_grid))
+            .on_action(cx.listener(Self::toggle_guides))
+            .on_action(cx.listener(Self::toggle_guide_lock))
+            .on_action(cx.listener(Self::toggle_snapping))
+            .on_action(cx.listener(Self::toggle_snap_objects))
+            .on_action(cx.listener(Self::toggle_snap_guides))
+            .on_action(cx.listener(Self::toggle_snap_grid))
+            .on_action(cx.listener(Self::clear_guides))
+            .on_action(cx.listener(Self::save_current_color))
             .on_action(cx.listener(Self::toggle_main_menu))
             .on_action(cx.listener(Self::toggle_zoom_menu))
             .on_action(cx.listener(Self::select_tool))
@@ -4187,12 +5424,19 @@ impl Render for Strek {
                     level: zoom,
                     input: zoom_input,
                 },
-                panel_visibility,
-                toolbar::HistoryAvailability {
-                    undo: self.editor.can_undo_in_context(),
-                    redo: self.editor.can_redo_in_context(),
+                toolbar::HeaderState {
+                    panels: panel_visibility,
+                    history: toolbar::HistoryAvailability {
+                        undo: self.editor.can_undo_in_context(),
+                        redo: self.editor.can_redo_in_context(),
+                    },
+                    utilities: toolbar::UtilityState {
+                        snapping: self.workspace_preferences.snapping_enabled,
+                        precision_open: self.precision_menu_open,
+                        color_library_open: self.color_library_open,
+                    },
+                    open_menu,
                 },
-                open_menu,
                 &self.keymap,
             ))
             // Main content area
@@ -4242,10 +5486,16 @@ impl Render for Strek {
                             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
                             .on_mouse_move(cx.listener(Self::on_mouse_move))
                             .on_scroll_wheel(cx.listener(Self::on_scroll))
+                            // Keep the grid beneath artwork. Guides and rulers are
+                            // rendered by the foreground precision overlay below.
+                            .child(precision_ui::render_precision_grid(
+                                precision_overlay.clone(),
+                            ))
                             .child(canvas::render_canvas(
                                 display_list,
                                 self.text_image_cache.clone(),
                             ))
+                            .child(precision_ui::render_precision_overlay(precision_overlay))
                             .child(text_input::canvas_text_input(cx.entity().clone()))
                             .when_some(
                                 toolbar::render_context_bar(
@@ -4278,6 +5528,16 @@ impl Render for Strek {
                     &self.editor,
                     toolbar::MenuState {
                         panels: panel_visibility,
+                        utilities: toolbar::UtilityState {
+                            snapping: self.workspace_preferences.snapping_enabled,
+                            precision_open: self.precision_menu_open,
+                            color_library_open: self.color_library_open,
+                        },
+                        show_rulers: self.workspace_preferences.show_rulers,
+                        show_grid: self.workspace_preferences.show_grid,
+                        show_guides: self.workspace_preferences.show_guides,
+                        guides_locked: self.workspace_preferences.guides_locked,
+                        can_clear_guides: !self.editor.document().guides.is_empty(),
                         can_paste,
                         recent_files: &recent_files,
                         file_busy,
@@ -4296,6 +5556,20 @@ impl Render for Strek {
                     cx,
                 ))
             })
+            .when(self.precision_menu_open, |root| {
+                root.child(precision_ui::render_precision_popover(
+                    precision_snapshot,
+                    precision_callbacks(editor_entity.clone()),
+                    precision_ui::PrecisionPopoverPlacement {
+                        top: toolbar::HEADER_HEIGHT + 8.0,
+                        right: visible_panel_width(show_design_panel, design_panel_width) + 44.0,
+                        max_height: (window_size.height.0 - toolbar::HEADER_HEIGHT - 16.0).max(1.0),
+                    },
+                ))
+            })
+            .when_some(guide_position_input, |root, input| {
+                root.child(render_guide_position_input(input))
+            })
             .when_some(color_picker, |root, snapshot| {
                 root.child(color_picker::render(
                     snapshot,
@@ -4309,7 +5583,180 @@ impl Render for Strek {
                 ))
             })
             .when_some(command_palette, |root, palette| root.child(palette))
+            .when_some(color_library_panel, |root, panel| root.child(panel))
     }
+}
+
+fn precision_callbacks(editor_entity: gpui::WeakEntity<Strek>) -> precision_ui::PrecisionCallbacks {
+    let popover_entity = editor_entity.clone();
+    let snapping_entity = editor_entity.clone();
+    let target_entity = editor_entity.clone();
+    let tolerance_entity = editor_entity.clone();
+    let overlay_entity = editor_entity.clone();
+    let lock_entity = editor_entity.clone();
+    let spacing_entity = editor_entity.clone();
+    let major_entity = editor_entity.clone();
+
+    precision_ui::PrecisionCallbacks::default()
+        .on_popover_open_changed(move |open, _, cx| {
+            popover_entity
+                .update(cx, |editor, cx| {
+                    editor.precision_menu_open = open;
+                    cx.notify();
+                })
+                .ok();
+        })
+        .on_snapping_enabled_changed(move |enabled, _, cx| {
+            snapping_entity
+                .update(cx, |editor, cx| {
+                    editor.workspace_preferences.snapping_enabled = enabled;
+                    editor.persist_workspace_preferences(cx);
+                })
+                .ok();
+        })
+        .on_snap_target_changed(move |target, enabled, _, cx| {
+            target_entity
+                .update(cx, |editor, cx| {
+                    match target {
+                        precision_ui::SnapTarget::Objects => {
+                            editor.workspace_preferences.snap_to_objects = enabled;
+                        }
+                        precision_ui::SnapTarget::Guides => {
+                            editor.workspace_preferences.snap_to_guides = enabled;
+                        }
+                        precision_ui::SnapTarget::Grid => {
+                            editor.workspace_preferences.snap_to_grid = enabled;
+                        }
+                    }
+                    editor.persist_workspace_preferences(cx);
+                })
+                .ok();
+        })
+        .on_tolerance_changed(move |tolerance, _, cx| {
+            tolerance_entity
+                .update(cx, |editor, cx| {
+                    editor.workspace_preferences.snap_tolerance = tolerance.clamp(1.0, 32.0);
+                    editor.persist_workspace_preferences(cx);
+                })
+                .ok();
+        })
+        .on_overlay_visibility_changed(move |overlay, visible, _, cx| {
+            overlay_entity
+                .update(cx, |editor, cx| {
+                    match overlay {
+                        precision_ui::PrecisionOverlay::Rulers => {
+                            editor.workspace_preferences.show_rulers = visible;
+                        }
+                        precision_ui::PrecisionOverlay::Grid => {
+                            editor.workspace_preferences.show_grid = visible;
+                        }
+                        precision_ui::PrecisionOverlay::Guides => {
+                            editor.workspace_preferences.show_guides = visible;
+                            if !visible {
+                                editor.active_guide = None;
+                                editor.guide_drag = None;
+                                editor.guide_position_input = None;
+                            }
+                        }
+                    }
+                    editor.persist_workspace_preferences(cx);
+                })
+                .ok();
+        })
+        .on_guides_locked_changed(move |locked, _, cx| {
+            lock_entity
+                .update(cx, |editor, cx| {
+                    editor.workspace_preferences.guides_locked = locked;
+                    if locked {
+                        editor.active_guide = None;
+                        editor.guide_drag = None;
+                        editor.guide_position_input = None;
+                    }
+                    editor.persist_workspace_preferences(cx);
+                })
+                .ok();
+        })
+        .on_grid_spacing_changed(move |spacing, _, cx| {
+            spacing_entity
+                .update(cx, |editor, cx| {
+                    let current = editor.editor.document().grid;
+                    if let Ok(settings) =
+                        editor_core::GridSettings::new(spacing, current.major_every)
+                    {
+                        let _ = editor.editor.set_grid_settings(settings);
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .on_grid_major_every_changed(move |major_every, _, cx| {
+            major_entity
+                .update(cx, |editor, cx| {
+                    let current = editor.editor.document().grid;
+                    if let Ok(settings) =
+                        editor_core::GridSettings::new(current.spacing, major_every)
+                    {
+                        let _ = editor.editor.set_grid_settings(settings);
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .on_clear_guides(move |_, cx| {
+            editor_entity
+                .update(cx, |editor, cx| {
+                    if editor.editor.clear_guides() {
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+}
+
+fn render_guide_position_input(input: GuidePositionInput) -> impl IntoElement {
+    div()
+        .id("guide-position-input")
+        .absolute()
+        .top(px(toolbar::HEADER_HEIGHT + 10.0))
+        .left(px(36.0))
+        .w(px(190.0))
+        .p(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(rgb(if input.invalid { 0xf24822 } else { 0x0c8ce9 }))
+        .bg(rgb(0x202124))
+        .shadow_lg()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(rgb(0xa8abb2))
+                .child("Guide"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h(px(26.0))
+                .px(px(7.0))
+                .flex()
+                .items_center()
+                .rounded(px(4.0))
+                .bg(rgb(0x17181a))
+                .font_family("SFMono-Regular")
+                .text_size(px(10.0))
+                .text_color(rgb(if input.invalid { 0xfca58f } else { 0xf1f3f4 }))
+                .child(input.value),
+        )
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(rgb(0xa8abb2))
+                .child("px"),
+        )
 }
 
 fn visible_panel_width(visible: bool, width: f32) -> f32 {
@@ -4390,6 +5837,175 @@ fn canvas_position(
         |bounds| bounds.origin,
     );
     glam::Vec2::new(position.x.0 - origin.x.0, position.y.0 - origin.y.0)
+}
+
+fn guide_axis_value(axis: editor_core::GuideAxis, position: glam::Vec2) -> f32 {
+    match axis {
+        editor_core::GuideAxis::Horizontal => position.y,
+        editor_core::GuideAxis::Vertical => position.x,
+    }
+}
+
+fn color_library_snapshot(
+    document: &editor_core::Document,
+) -> color_library_panel::ColorLibrarySnapshot {
+    use color_library_panel::{
+        ColorLibraryColorId, ColorLibraryGroupId, ColorLibraryRow, ColorLibrarySection,
+        ColorLibrarySectionId, ColorLibrarySnapshot, ColorLibrarySort,
+    };
+
+    let library = &document.color_library;
+    let rows = |group_id| {
+        library
+            .colors_in_group(group_id)
+            .into_iter()
+            .map(|color| ColorLibraryRow {
+                id: ColorLibraryColorId(color.id.get()),
+                name: color.name.clone().map(Into::into),
+                rgba: color.rgba.components(),
+                value: color.rgba.hex_label().into(),
+                manual_order: color.manual_order as usize,
+            })
+            .collect()
+    };
+    let mut sections = vec![ColorLibrarySection {
+        id: ColorLibrarySectionId::Ungrouped,
+        name: "Ungrouped".into(),
+        sort: ColorLibrarySort::default(),
+        rows: rows(None),
+    }];
+    let mut groups = library.groups.iter().collect::<Vec<_>>();
+    groups.sort_by_key(|group| (group.manual_order, group.id));
+    sections.extend(groups.into_iter().map(|group| ColorLibrarySection {
+        id: ColorLibrarySectionId::Group(ColorLibraryGroupId(group.id.get())),
+        name: group.name.clone().into(),
+        sort: ColorLibrarySort {
+            mode: panel_color_sort_mode(group.sort_mode),
+            direction: panel_color_sort_direction(group.sort_direction),
+        },
+        rows: rows(Some(group.id)),
+    }));
+    ColorLibrarySnapshot { sections }
+}
+
+fn color_library_presentation(
+    preferences: &workspace_preferences::WorkspacePreferences,
+) -> color_library_panel::ColorLibraryPanelPresentation {
+    let panel = preferences.color_library_panel;
+    color_library_panel::ColorLibraryPanelPresentation {
+        geometry: color_library_panel::ColorLibraryPanelGeometry {
+            left: panel.x,
+            top: panel.y,
+            width: panel.width,
+            height: panel.height,
+        },
+        collapsed_sections: preferences
+            .collapsed_color_groups
+            .iter()
+            .filter_map(|value| {
+                if value == "ungrouped" {
+                    Some(color_library_panel::ColorLibrarySectionId::Ungrouped)
+                } else {
+                    value
+                        .strip_prefix("group-")?
+                        .parse::<u64>()
+                        .ok()
+                        .map(color_library_panel::ColorLibraryGroupId)
+                        .map(color_library_panel::ColorLibrarySectionId::Group)
+                }
+            })
+            .collect(),
+    }
+}
+
+fn color_group_id(
+    id: color_library_panel::ColorLibraryGroupId,
+) -> Result<editor_core::ColorGroupId, String> {
+    editor_core::ColorGroupId::from_opaque(id.0).ok_or_else(|| "invalid color group ID".to_owned())
+}
+
+fn saved_color_id(
+    id: color_library_panel::ColorLibraryColorId,
+) -> Result<editor_core::SavedColorId, String> {
+    editor_core::SavedColorId::from_opaque(id.0).ok_or_else(|| "invalid saved color ID".to_owned())
+}
+
+fn color_section_group(
+    section: color_library_panel::ColorLibrarySectionId,
+) -> Result<Option<editor_core::ColorGroupId>, String> {
+    match section {
+        color_library_panel::ColorLibrarySectionId::Ungrouped => Ok(None),
+        color_library_panel::ColorLibrarySectionId::Group(id) => color_group_id(id).map(Some),
+    }
+}
+
+fn panel_color_sort_mode(
+    mode: editor_core::ColorSortMode,
+) -> color_library_panel::ColorLibrarySortMode {
+    match mode {
+        editor_core::ColorSortMode::Manual => color_library_panel::ColorLibrarySortMode::Manual,
+        editor_core::ColorSortMode::Name => color_library_panel::ColorLibrarySortMode::Name,
+        editor_core::ColorSortMode::HueAndShades => {
+            color_library_panel::ColorLibrarySortMode::HueAndShades
+        }
+        editor_core::ColorSortMode::Lightness => {
+            color_library_panel::ColorLibrarySortMode::Lightness
+        }
+        editor_core::ColorSortMode::Chroma => color_library_panel::ColorLibrarySortMode::Chroma,
+        editor_core::ColorSortMode::Brightness => {
+            color_library_panel::ColorLibrarySortMode::Brightness
+        }
+    }
+}
+
+fn core_color_sort_mode(
+    mode: color_library_panel::ColorLibrarySortMode,
+) -> editor_core::ColorSortMode {
+    match mode {
+        color_library_panel::ColorLibrarySortMode::Manual => editor_core::ColorSortMode::Manual,
+        color_library_panel::ColorLibrarySortMode::Name => editor_core::ColorSortMode::Name,
+        color_library_panel::ColorLibrarySortMode::HueAndShades => {
+            editor_core::ColorSortMode::HueAndShades
+        }
+        color_library_panel::ColorLibrarySortMode::Lightness => {
+            editor_core::ColorSortMode::Lightness
+        }
+        color_library_panel::ColorLibrarySortMode::Chroma => editor_core::ColorSortMode::Chroma,
+        color_library_panel::ColorLibrarySortMode::Brightness => {
+            editor_core::ColorSortMode::Brightness
+        }
+    }
+}
+
+fn panel_color_sort_direction(
+    direction: editor_core::SortDirection,
+) -> color_library_panel::ColorLibrarySortDirection {
+    match direction {
+        editor_core::SortDirection::Ascending => {
+            color_library_panel::ColorLibrarySortDirection::Ascending
+        }
+        editor_core::SortDirection::Descending => {
+            color_library_panel::ColorLibrarySortDirection::Descending
+        }
+    }
+}
+
+fn core_color_sort_direction(
+    direction: color_library_panel::ColorLibrarySortDirection,
+) -> editor_core::SortDirection {
+    match direction {
+        color_library_panel::ColorLibrarySortDirection::Ascending => {
+            editor_core::SortDirection::Ascending
+        }
+        color_library_panel::ColorLibrarySortDirection::Descending => {
+            editor_core::SortDirection::Descending
+        }
+    }
+}
+
+fn rgba_color_from_paint(paint: &editor_core::Paint) -> Result<editor_core::RgbaColor, String> {
+    let editor_core::Paint::Solid(rgba) = paint;
+    editor_core::RgbaColor::from_array(*rgba).map_err(|error| error.to_string())
 }
 
 fn editor_key_context(
@@ -4598,6 +6214,41 @@ fn automation_numeric_property(property: automation::NumericProperty) -> Numeric
     }
 }
 
+fn automation_guide_axis(axis: automation::GuideAxis) -> editor_core::GuideAxis {
+    match axis {
+        automation::GuideAxis::Horizontal => editor_core::GuideAxis::Horizontal,
+        automation::GuideAxis::Vertical => editor_core::GuideAxis::Vertical,
+    }
+}
+
+fn automation_color_group_id(id: Option<u64>) -> Result<editor_core::ColorGroupId, String> {
+    id.and_then(editor_core::ColorGroupId::from_opaque)
+        .ok_or_else(|| "a valid color group id is required".to_owned())
+}
+
+fn automation_saved_color_id(id: Option<u64>) -> Result<editor_core::SavedColorId, String> {
+    id.and_then(editor_core::SavedColorId::from_opaque)
+        .ok_or_else(|| "a valid saved color id is required".to_owned())
+}
+
+fn automation_rgba_color(value: Option<&str>) -> Result<editor_core::RgbaColor, String> {
+    let value = value.ok_or_else(|| "a hexadecimal color value is required".to_owned())?;
+    let paint = color_picker::parse_hex_paint(value)
+        .ok_or_else(|| "color must be a 3, 4, 6, or 8 digit hexadecimal value".to_owned())?;
+    rgba_color_from_paint(&paint)
+}
+
+fn automation_color_sort_name(mode: editor_core::ColorSortMode) -> &'static str {
+    match mode {
+        editor_core::ColorSortMode::Manual => "manual",
+        editor_core::ColorSortMode::Name => "name",
+        editor_core::ColorSortMode::HueAndShades => "hue_and_shades",
+        editor_core::ColorSortMode::Lightness => "lightness",
+        editor_core::ColorSortMode::Chroma => "chroma",
+        editor_core::ColorSortMode::Brightness => "brightness",
+    }
+}
+
 fn automation_export_format(format: automation::ArtifactFormat) -> export::ExportFormat {
     match format {
         automation::ArtifactFormat::Svg => export::ExportFormat::Svg,
@@ -4766,6 +6417,7 @@ fn main() {
             let keymap = commands::Keymap::load();
             register_keybindings(cx, &keymap);
             command_palette::register_keybindings(cx);
+            color_library_panel::register_keybindings(cx);
             layer_name_input::register_keybindings(cx);
             let mut file_menu_items = vec![
                 MenuItem::action("New", NewDocument),

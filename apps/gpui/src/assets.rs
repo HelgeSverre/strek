@@ -40,6 +40,35 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/chevron-down.svg",
         include_bytes!("../assets/icons/chevron-down.svg"),
     ),
+    (
+        "icons/chevron-right.svg",
+        include_bytes!("../assets/icons/chevron-right.svg"),
+    ),
+    (
+        "icons/arrow-up.svg",
+        include_bytes!("../assets/icons/arrow-up.svg"),
+    ),
+    (
+        "icons/arrow-down.svg",
+        include_bytes!("../assets/icons/arrow-down.svg"),
+    ),
+    (
+        "icons/check.svg",
+        include_bytes!("../assets/icons/check.svg"),
+    ),
+    (
+        "icons/close.svg",
+        include_bytes!("../assets/icons/close.svg"),
+    ),
+    ("icons/copy.svg", include_bytes!("../assets/icons/copy.svg")),
+    (
+        "icons/grip-vertical.svg",
+        include_bytes!("../assets/icons/grip-vertical.svg"),
+    ),
+    (
+        "icons/more-horizontal.svg",
+        include_bytes!("../assets/icons/more-horizontal.svg"),
+    ),
     ("icons/eye.svg", include_bytes!("../assets/icons/eye.svg")),
     (
         "icons/eye-off.svg",
@@ -106,6 +135,14 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/properties.svg",
         include_bytes!("../assets/icons/properties.svg"),
     ),
+    (
+        "icons/magnet.svg",
+        include_bytes!("../assets/icons/magnet.svg"),
+    ),
+    (
+        "icons/palette.svg",
+        include_bytes!("../assets/icons/palette.svg"),
+    ),
 ];
 
 pub struct Assets;
@@ -142,6 +179,14 @@ pub enum Icon {
     Plus,
     Search,
     ChevronDown,
+    ChevronRight,
+    ArrowUp,
+    ArrowDown,
+    Check,
+    Close,
+    Copy,
+    GripVertical,
+    MoreHorizontal,
     Eye,
     EyeOff,
     Lock,
@@ -160,6 +205,8 @@ pub enum Icon {
     DistributeHorizontal,
     DistributeVertical,
     Properties,
+    Magnet,
+    Palette,
 }
 
 impl Icon {
@@ -179,6 +226,14 @@ impl Icon {
             Self::Plus => "icons/plus.svg",
             Self::Search => "icons/search.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
+            Self::ArrowUp => "icons/arrow-up.svg",
+            Self::ArrowDown => "icons/arrow-down.svg",
+            Self::Check => "icons/check.svg",
+            Self::Close => "icons/close.svg",
+            Self::Copy => "icons/copy.svg",
+            Self::GripVertical => "icons/grip-vertical.svg",
+            Self::MoreHorizontal => "icons/more-horizontal.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
             Self::Lock => "icons/lock.svg",
@@ -197,6 +252,8 @@ impl Icon {
             Self::DistributeHorizontal => "icons/distribute-horizontal.svg",
             Self::DistributeVertical => "icons/distribute-vertical.svg",
             Self::Properties => "icons/properties.svg",
+            Self::Magnet => "icons/magnet.svg",
+            Self::Palette => "icons/palette.svg",
         }
     }
 }

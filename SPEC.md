@@ -1518,10 +1518,6 @@ interoperability.
 
 Important next candidates:
 
-- Canvas precision controls: grid, rulers, persistent guides, and explicit
-  snapping controls. The design is scoped below; implementation is pending.
-- A document-local Color Library with quick Saved Color access in every picker.
-  The design is scoped below; implementation is pending.
 - Editable dimensions, rotation, scale, and skew controls, including direct
   numeric entry; typed entry is complete for the inspector's existing semantic
   numeric controls
@@ -1535,9 +1531,9 @@ Nice-to-have candidates:
 - Gradients and advanced stroke controls such as caps, joins, and dash patterns
 - Actual cross-axis stretch and size constraints in auto layout
 
-### Scoped candidate: Canvas precision controls
+### Implemented: Canvas precision controls
 
-Status: design complete; implementation pending. The comparative rationale and
+Status: implemented in native format version 3. The comparative rationale and
 source links are in
 [`docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md`](docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md).
 
@@ -1587,7 +1583,7 @@ collection may remain a snap target, but the precision popover must make that
 state explicit. Rulers and the grid use a fixed document origin of `(0, 0)` in
 version one.
 
-The native format will move to version 3 when this metadata is implemented.
+The native format is version 3.
 Version 1 and 2 files load with default grid settings and no guides. Validation
 must reject non-finite positions, invalid spacing, duplicate IDs, and more than
 10,000 guides.
@@ -1600,6 +1596,8 @@ must reject non-finite positions, invalid spacing, duplicate IDs, and more than
 - Rendering suppression does not change logical snap locations.
 - Grid and ruler density is bounded by the viewport, not document extent.
 - Ruler tick intervals adapt to zoom and show pixel/document-unit labels.
+- The grid is the bottommost canvas layer: artwork paints over it, while guides,
+  rulers, selection chrome, and interactive feedback paint above artwork.
 - Grid lines, rulers, and guides are editor chrome and never enter artwork
   snapshots, SVG, raster export, or clipboard images.
 - Grid colors and opacity follow the application theme in version one rather
@@ -1700,9 +1698,9 @@ way to manage precision data.
 - equal-gap/size, tangent, perpendicular, glyph, and full path-geometry snaps;
 - separate pixel fitting or whole-pixel transform enforcement.
 
-### Scoped candidate: Document Color Library
+### Implemented: Document Color Library
 
-Status: design complete; implementation pending. “Color manager” is the informal
+Status: implemented in native format version 3. “Color manager” is the informal
 workflow name; the product vocabulary is:
 
 - **Document Color Library**: the complete document-local data set;
@@ -1760,7 +1758,7 @@ Group and Saved Color mutations are document edits and are undoable. The chosen
 sort mode is saved because it defines the library's authored organization.
 Manual order is retained while another sort mode is active.
 
-The Color Library ships in the same planned native version 3 metadata migration
+The Color Library ships in the native version 3 metadata migration
 as precision aids. Version 1 and 2 files receive an empty library. Validation
 limits are 256 groups, 10,000 Saved Colors, and 256 UTF-8 bytes per name, with
 valid IDs, group references, orders, and normalized finite color components.
@@ -1838,21 +1836,25 @@ keyboard traversal without relying on drag-and-drop.
 
 Groups can be added, renamed, collapsed, reordered, sorted independently, and
 removed. Removing a non-empty group moves its entries to Ungrouped by default.
-**Delete Group and Colors…** is a separate confirmed command. Removing a Saved
-Color never searches for or modifies matching artwork.
+Bulk deletion of a group and all of its colors is deferred; colors can be
+removed individually. Removing a Saved Color never searches for or modifies
+matching artwork.
 
 #### Commands and automation
 
-The command palette exposes Open/Focus Color Library and Save Current Color.
-Semantic automation should support:
+The command palette exposes Toggle Color Library and Save Current Color.
+Semantic automation supports inspection, add/update/remove/apply operations,
+group management, and opening the panel. Further reorder/duplicate operations
+remain available through the native panel and core API. The semantic surface
+uses IDs rather than names because names are optional and not unique.
+
+The complete core API supports:
 
 - inspect the complete library with stable group/color IDs;
 - add, update, duplicate, move, reorder, and remove a Saved Color;
 - add, rename, reorder, sort, and remove a Color Group;
 - apply a Saved Color by ID to any supported color target;
 - open/focus the manager and picker for interaction testing.
-
-Automation uses IDs rather than names because names are optional and not unique.
 
 #### Acceptance criteria
 

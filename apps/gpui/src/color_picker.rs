@@ -71,13 +71,14 @@ enum ColorPickerKeyboardFocus {
     Model,
     Channel(usize),
     Alpha,
+    SavedSearch,
     Preset,
     Cancel,
     Apply,
 }
 
 impl ColorPickerKeyboardFocus {
-    const ORDER: [Self; 10] = [
+    const ORDER: [Self; 11] = [
         Self::Hex,
         Self::Wheel,
         Self::Model,
@@ -85,6 +86,7 @@ impl ColorPickerKeyboardFocus {
         Self::Channel(1),
         Self::Channel(2),
         Self::Alpha,
+        Self::SavedSearch,
         Self::Preset,
         Self::Cancel,
         Self::Apply,
@@ -142,6 +144,29 @@ pub(crate) struct ColorPickerSnapshot {
     invalid: bool,
     keyboard_focus: ColorPickerKeyboardFocus,
     preset_index: usize,
+    saved_colors: Vec<SavedColorOption>,
+    has_saved_colors: bool,
+    saved_search: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SavedColorOption {
+    pub id: u64,
+    pub name: Option<SharedString>,
+    pub rgba: [f32; 4],
+    pub value: SharedString,
+}
+
+impl ColorPickerSnapshot {
+    pub(crate) fn with_saved_colors(
+        mut self,
+        saved_colors: Vec<SavedColorOption>,
+        has_saved_colors: bool,
+    ) -> Self {
+        self.saved_colors = saved_colors;
+        self.has_saved_colors = has_saved_colors;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -164,6 +189,7 @@ pub(crate) struct ColorPickerState {
     invalid: bool,
     keyboard_focus: ColorPickerKeyboardFocus,
     preset_index: usize,
+    saved_search: String,
     bounds: ControlBounds,
 }
 
@@ -181,6 +207,7 @@ impl ColorPickerState {
             invalid: false,
             keyboard_focus: ColorPickerKeyboardFocus::default(),
             preset_index: 0,
+            saved_search: String::new(),
             bounds: ControlBounds::default(),
         };
         picker.refresh_channels_from_paint();
@@ -199,6 +226,9 @@ impl ColorPickerState {
             invalid: self.invalid,
             keyboard_focus: self.keyboard_focus,
             preset_index: self.preset_index,
+            saved_colors: Vec::new(),
+            has_saved_colors: false,
+            saved_search: self.saved_search.clone(),
         }
     }
 
@@ -208,6 +238,14 @@ impl ColorPickerState {
 
     pub(crate) fn invalid(&self) -> bool {
         self.invalid
+    }
+
+    pub(crate) fn paint(&self) -> &Paint {
+        &self.paint
+    }
+
+    pub(crate) fn saved_search(&self) -> &str {
+        &self.saved_search
     }
 
     pub(crate) fn set_model(&mut self, model: ColorModel) {
@@ -228,6 +266,30 @@ impl ColorPickerState {
     pub(crate) fn focus_hex_input(&mut self) {
         self.keyboard_focus = ColorPickerKeyboardFocus::Hex;
         self.select_hex();
+    }
+
+    pub(crate) fn focus_saved_search(&mut self) {
+        self.keyboard_focus = ColorPickerKeyboardFocus::SavedSearch;
+    }
+
+    pub(crate) fn accepts_saved_search_input(&self) -> bool {
+        self.keyboard_focus == ColorPickerKeyboardFocus::SavedSearch
+    }
+
+    pub(crate) fn append_saved_search(&mut self, text: &str) {
+        self.saved_search.push_str(text);
+    }
+
+    pub(crate) fn replace_saved_search(&mut self, text: &str) {
+        self.saved_search = text.to_owned();
+    }
+
+    pub(crate) fn backspace_saved_search(&mut self) {
+        self.saved_search.pop();
+    }
+
+    pub(crate) fn clear_saved_search(&mut self) {
+        self.saved_search.clear();
     }
 
     pub(crate) fn focus_next(&mut self, reverse: bool) {
@@ -292,6 +354,7 @@ impl ColorPickerState {
                 self.keyboard_focus = ColorPickerKeyboardFocus::Preset;
             }
             ColorPickerKeyboardFocus::Hex
+            | ColorPickerKeyboardFocus::SavedSearch
             | ColorPickerKeyboardFocus::Cancel
             | ColorPickerKeyboardFocus::Apply => return false,
         }
@@ -312,7 +375,8 @@ impl ColorPickerState {
             ColorPickerKeyboardFocus::Wheel
             | ColorPickerKeyboardFocus::Model
             | ColorPickerKeyboardFocus::Channel(_)
-            | ColorPickerKeyboardFocus::Alpha => ColorPickerKeyboardAction::Updated,
+            | ColorPickerKeyboardFocus::Alpha
+            | ColorPickerKeyboardFocus::SavedSearch => ColorPickerKeyboardAction::Updated,
         }
     }
 
@@ -601,6 +665,21 @@ pub(crate) fn render(
     );
     let opaque = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 1.0);
     let transparent = Paint::rgba(rgb_channels[0], rgb_channels[1], rgb_channels[2], 0.0);
+    let saved_query = snapshot.saved_search.trim().to_lowercase();
+    let visible_saved_colors = snapshot
+        .saved_colors
+        .iter()
+        .filter(|color| {
+            saved_query.is_empty()
+                || color.value.to_lowercase().contains(&saved_query)
+                || color
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.to_lowercase().contains(&saved_query))
+        })
+        .take(128)
+        .cloned()
+        .collect::<Vec<_>>();
 
     anchored()
         .anchor(Corner::TopRight)
@@ -693,6 +772,90 @@ pub(crate) fn render(
                     linear_color_stop(rgba(paint_as_rgba(&transparent)), 0.0),
                     linear_color_stop(rgba(paint_as_rgba(&opaque)), 1.0),
                 )))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(9.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(MUTED))
+                                .child("SAVED COLORS"),
+                        )
+                        .child(picker_link_button(
+                            "color-picker-save-color",
+                            "+ Save",
+                            editor_entity.clone(),
+                            |editor, _, cx| editor.quick_add_current_picker_color(cx),
+                        ))
+                        .child(picker_link_button(
+                            "color-picker-manage-colors",
+                            "Manage",
+                            editor_entity.clone(),
+                            |editor, window, cx| editor.show_color_library_from_picker(window, cx),
+                        )),
+                )
+                .child(
+                    div()
+                        .id("color-picker-saved-search")
+                        .h(px(27.0))
+                        .px(px(7.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(
+                            if snapshot.keyboard_focus == ColorPickerKeyboardFocus::SavedSearch {
+                                ACCENT
+                            } else {
+                                BORDER
+                            },
+                        ))
+                        .bg(rgb(SURFACE_RAISED))
+                        .cursor_text()
+                        .text_size(px(9.0))
+                        .text_color(rgb(if snapshot.saved_search.is_empty() {
+                            MUTED
+                        } else {
+                            TEXT
+                        }))
+                        .child(if snapshot.saved_search.is_empty() {
+                            "Search saved colors…".to_owned()
+                        } else {
+                            snapshot.saved_search.clone()
+                        })
+                        .on_click({
+                            let editor_entity = editor_entity.clone();
+                            move |_, _, cx| {
+                                editor_entity
+                                    .update(cx, |editor, cx| {
+                                        editor.focus_color_picker_saved_search(cx);
+                                    })
+                                    .ok();
+                                cx.stop_propagation();
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(5.0))
+                        .when(visible_saved_colors.is_empty(), |saved| {
+                            saved.child(div().text_size(px(9.0)).text_color(rgb(MUTED)).child(
+                                if !snapshot.has_saved_colors {
+                                    "Save a color to reuse it throughout this document."
+                                } else {
+                                    "No saved colors match."
+                                },
+                            ))
+                        })
+                        .children(visible_saved_colors.into_iter().map(|color| {
+                            saved_color_swatch(color, editor_entity.clone()).into_any_element()
+                        })),
+                )
                 .child(
                     div().flex().flex_wrap().gap(px(5.0)).children(
                         PRESETS
@@ -1025,6 +1188,80 @@ fn preset_swatch(
         })
 }
 
+fn saved_color_swatch(
+    color: SavedColorOption,
+    editor_entity: WeakEntity<Strek>,
+) -> impl IntoElement {
+    let id = color.id;
+    let label = color.name.clone().unwrap_or_else(|| color.value.clone());
+    let paint = Paint::Solid(color.rgba);
+    div()
+        .id(SharedString::from(format!("saved-color-{id}")))
+        .h(px(24.0))
+        .max_w(px(132.0))
+        .px(px(3.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .cursor_pointer()
+        .hover(|style| style.border_color(rgb(ACCENT)).bg(rgb(SURFACE_HOVER)))
+        .child(
+            div()
+                .w(px(18.0))
+                .h(px(16.0))
+                .flex_none()
+                .rounded(px(2.0))
+                .bg(rgba(paint_as_rgba(&paint))),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(9.0))
+                .text_color(rgb(TEXT))
+                .child(label),
+        )
+        .on_click(move |_, _, cx| {
+            editor_entity
+                .update(cx, |editor, cx| {
+                    editor.select_color_picker_saved_color(id, cx);
+                })
+                .ok();
+            cx.stop_propagation();
+        })
+}
+
+fn picker_link_button(
+    id: &'static str,
+    label: &'static str,
+    editor_entity: WeakEntity<Strek>,
+    callback: impl Fn(&mut Strek, &mut Window, &mut gpui::Context<Strek>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .h(px(22.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .text_size(px(9.0))
+        .text_color(rgb(ACCENT))
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .child(label)
+        .on_click(move |_, window, cx| {
+            editor_entity
+                .update(cx, |editor, cx| callback(editor, window, cx))
+                .ok();
+            cx.stop_propagation();
+        })
+}
+
 fn preset_paint(color: u32) -> Paint {
     Paint::rgb(
         ((color >> 16) & 0xff) as f32 / 255.0,
@@ -1216,6 +1453,57 @@ pub(crate) fn parse_hex_paint(value: &str) -> Option<Paint> {
         normalized(blue),
         normalized(alpha),
     ))
+}
+
+pub(crate) fn parse_saved_color_paint(value: &str) -> Option<Paint> {
+    parse_hex_paint(value).or_else(|| parse_rgb_function(value.trim()))
+}
+
+fn parse_rgb_function(value: &str) -> Option<Paint> {
+    let (body, has_alpha) = if let Some(body) = value
+        .strip_prefix("rgba(")
+        .and_then(|body| body.strip_suffix(')'))
+    {
+        (body, true)
+    } else {
+        (
+            value
+                .strip_prefix("rgb(")
+                .and_then(|body| body.strip_suffix(')'))?,
+            false,
+        )
+    };
+    let components = body.split(',').map(str::trim).collect::<Vec<_>>();
+    if components.len() != if has_alpha { 4 } else { 3 } {
+        return None;
+    }
+    let red = parse_rgb_channel(components[0])?;
+    let green = parse_rgb_channel(components[1])?;
+    let blue = parse_rgb_channel(components[2])?;
+    let alpha = if has_alpha {
+        parse_alpha_channel(components[3])?
+    } else {
+        1.0
+    };
+    Some(Paint::rgba(red, green, blue, alpha))
+}
+
+fn parse_rgb_channel(value: &str) -> Option<f32> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let value = percent.parse::<f32>().ok()?;
+        return (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value / 100.0);
+    }
+    let value = value.parse::<u8>().ok()?;
+    Some(f32::from(value) / 255.0)
+}
+
+fn parse_alpha_channel(value: &str) -> Option<f32> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let value = percent.parse::<f32>().ok()?;
+        return (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value / 100.0);
+    }
+    let value = value.parse::<f32>().ok()?;
+    (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value)
 }
 
 pub(crate) fn paint_as_rgba(paint: &Paint) -> u32 {
@@ -1467,6 +1755,19 @@ mod tests {
         );
         assert!(parse_hex_paint("#12xz89").is_none());
         assert!(parse_hex_paint("#12345").is_none());
+    }
+
+    #[test]
+    fn saved_color_parser_matches_the_panel_rgb_formats() {
+        assert_eq!(
+            parse_saved_color_paint("rgb(12, 140, 233)"),
+            Some(Paint::rgb(12.0 / 255.0, 140.0 / 255.0, 233.0 / 255.0))
+        );
+        assert_eq!(
+            parse_saved_color_paint("rgba(100%, 0%, 50%, 25%)"),
+            Some(Paint::rgba(1.0, 0.0, 0.5, 0.25))
+        );
+        assert!(parse_saved_color_paint("rgb(300, 0, 0)").is_none());
     }
 
     #[test]

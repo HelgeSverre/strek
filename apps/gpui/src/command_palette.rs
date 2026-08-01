@@ -13,7 +13,10 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::commands::CommandTarget;
+use crate::{
+    assets::{icon, Icon},
+    commands::CommandTarget,
+};
 
 const MAX_VISIBLE_RESULTS: usize = 11;
 
@@ -639,9 +642,7 @@ impl Render for CommandPalette {
                             .child(
                                 div()
                                     .w(px(18.0))
-                                    .text_size(px(18.0))
-                                    .text_color(rgb(0x92959d))
-                                    .child("⌕"),
+                                    .child(icon(Icon::Search, 16.0, rgb(0x92959d))),
                             )
                             .when(query_is_empty, |input| {
                                 input.child(
@@ -690,7 +691,7 @@ impl Render for CommandPalette {
                             .text_size(px(9.0))
                             .text_color(rgb(0x858890))
                             .child(format!("{result_count} commands"))
-                            .child("↑↓ navigate   ↵ run   esc close"),
+                            .child("Up/Down navigate   Enter run   Esc close"),
                     ),
             )
     }

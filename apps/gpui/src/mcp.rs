@@ -10,8 +10,9 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::automation::{
-    self, ArtifactFormat, AutomationModifiers, AutomationRequest, ColorTarget, NumericProperty,
-    PointerButton, PointerPhase, SelectionMode, UiTarget,
+    self, ArtifactFormat, AutomationModifiers, AutomationRequest, ColorGroupAction, ColorTarget,
+    GuideAction, GuideAxis, NumericProperty, PointerButton, PointerPhase, PrecisionSettingsPatch,
+    SavedColorAction, SelectionMode, UiTarget,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -72,6 +73,41 @@ struct ColorParams {
 struct NumericPropertyParams {
     target: NumericProperty,
     value: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GuideParams {
+    action: GuideAction,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    axis: Option<GuideAxis>,
+    #[serde(default)]
+    position: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ColorGroupParams {
+    action: ColorGroupAction,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SavedColorParams {
+    action: SavedColorAction,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    group_id: Option<u64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    target: Option<ColorTarget>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -206,6 +242,56 @@ impl StrekMcp {
         Parameters(NumericPropertyParams { target, value }): Parameters<NumericPropertyParams>,
     ) -> CallToolResult {
         response_result(AutomationRequest::SetNumericProperty { target, value }).await
+    }
+
+    #[tool(
+        description = "Configure rulers, grid, guide visibility, snapping targets, and tolerance"
+    )]
+    async fn set_precision(
+        &self,
+        Parameters(settings): Parameters<PrecisionSettingsPatch>,
+    ) -> CallToolResult {
+        response_result(AutomationRequest::SetPrecision { settings }).await
+    }
+
+    #[tool(description = "Add, move, remove, or clear persistent document guides")]
+    async fn guide(&self, Parameters(params): Parameters<GuideParams>) -> CallToolResult {
+        response_result(AutomationRequest::Guide {
+            action: params.action,
+            id: params.id,
+            axis: params.axis,
+            position: params.position,
+        })
+        .await
+    }
+
+    #[tool(description = "Add, rename, or remove a document Color Library group")]
+    async fn color_group(
+        &self,
+        Parameters(params): Parameters<ColorGroupParams>,
+    ) -> CallToolResult {
+        response_result(AutomationRequest::ColorGroup {
+            action: params.action,
+            id: params.id,
+            name: params.name,
+        })
+        .await
+    }
+
+    #[tool(description = "Add, update, remove, or apply a document Saved Color")]
+    async fn saved_color(
+        &self,
+        Parameters(params): Parameters<SavedColorParams>,
+    ) -> CallToolResult {
+        response_result(AutomationRequest::SavedColor {
+            action: params.action,
+            id: params.id,
+            group_id: params.group_id,
+            name: params.name,
+            color: params.color,
+            target: params.target,
+        })
+        .await
     }
 
     #[tool(description = "Rename a layer or set visibility and locking by stable layer ID")]
