@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml"><img src="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/platform-macOS-0C8CE9?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Platform: macOS">
+  <img src="https://img.shields.io/badge/platform-Linux-0C8CE9?style=flat-square&amp;logo=linux&amp;logoColor=white" alt="Platform: Linux">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0C8CE9?style=flat-square" alt="License: MIT"></a>
 </p>
 
@@ -69,8 +70,22 @@ the file format and UI should not yet be treated as stable.
 
 ## Run the GPUI app
 
-The current reference platform and CI environment is macOS. Install a stable
-Rust toolchain and the Xcode Command Line Tools, then run:
+Strek supports macOS and Linux on x86-64 and ARM64. Install a stable Rust
+toolchain first. On macOS, install the Xcode Command Line Tools. On Ubuntu or
+Debian, install GPUI's native build and runtime dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install --yes \
+  build-essential \
+  fonts-dejavu-core \
+  libfontconfig-dev \
+  libvulkan1 \
+  libwayland-dev \
+  libxkbcommon-x11-dev
+```
+
+Then run:
 
 ```sh
 cargo run -p strek
@@ -84,13 +99,17 @@ just run
 
 ## Install
 
-Strek is under active development. Tagged releases include a universal macOS
-installer for Apple Silicon and Intel. The installer is Developer ID-signed and
-notarized by Apple. Install the command-line binary through the Homebrew tap:
+Strek is under active development. Tagged releases include Linux archives for
+x86-64 and ARM64 plus a universal macOS installer for Apple Silicon and Intel.
+The macOS installer is Developer ID-signed and notarized by Apple. Homebrew
+automatically selects the archive for the current platform:
 
 ```sh
 brew install helgesverre/tap/strek
 ```
+
+Linux also requires a Vulkan-capable GPU and driver plus the desktop libraries
+listed in [Run the GPUI app](#run-the-gpui-app).
 
 You can also run from source or create a local package as described below.
 
@@ -270,8 +289,9 @@ just format  # format the workspace
 ```
 
 Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
-Apple Silicon and Intel archives to a GitHub Release, then publish the matching
-formula to `helgesverre/homebrew-tap`.
+Apple Silicon, Intel macOS, x86-64 Linux, and ARM64 Linux archives to a GitHub
+Release, then publish the matching macOS/Linux formula to
+`helgesverre/homebrew-tap`.
 
 ## Package for macOS
 

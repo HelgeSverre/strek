@@ -31,11 +31,8 @@ const MAX_AFFINE_TEXT_RASTER_DIMENSION: u32 = 16_384;
 const MAX_AFFINE_TEXT_RASTER_PIXELS: u64 = 16_000_000;
 const MAX_AFFINE_TEXT_FRAME_PIXELS: u64 = MAX_AFFINE_TEXT_CACHE_BYTES / 4;
 
-static SVG_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
-    let mut database = resvg::usvg::fontdb::Database::new();
-    database.load_system_fonts();
-    Arc::new(database)
-});
+static SVG_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
+    LazyLock::new(|| Arc::new(crate::typography::system_font_database()));
 
 struct CachedTextImage {
     key: String,

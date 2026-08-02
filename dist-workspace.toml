@@ -7,15 +7,28 @@ ci = "github"
 installers = ["homebrew"]
 tap = "helgesverre/homebrew-tap"
 publish-jobs = ["homebrew"]
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
 packages = ["strek"]
 precise-builds = true
+merge-tasks = true
 pr-run-mode = "skip"
 # release.yml adds checksum verification and least-privilege permissions that
 # cargo-dist 0.32 cannot express in generated output.
 allow-dirty = ["ci"]
 
+# GPUI links to XKB on Linux. The other desktop libraries are loaded at runtime.
+[dist.dependencies.apt]
+libxkbcommon-x11-dev = { version = "*", targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] }
+
 [dist.github-action-commits]
 "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
 "actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+
+[dist.github-custom-runners]
+x86_64-apple-darwin = "macos-14"

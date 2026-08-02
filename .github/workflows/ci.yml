@@ -73,3 +73,35 @@ jobs:
 
       - name: Run application tests
         run: cargo test -p strek --locked
+
+  linux:
+    name: Linux application check (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-22.04
+          - arch: ARM64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fonts-dejavu-core libxkbcommon-x11-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --locked

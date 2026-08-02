@@ -18,11 +18,8 @@ const MAX_RASTER_DIMENSION: u32 = 16_384;
 const MAX_RASTER_PIXELS: u64 = 16_000_000;
 const JPEG_QUALITY: u8 = 92;
 
-static OUTLINE_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> = LazyLock::new(|| {
-    let mut database = resvg::usvg::fontdb::Database::new();
-    database.load_system_fonts();
-    Arc::new(database)
-});
+static OUTLINE_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
+    LazyLock::new(|| Arc::new(crate::typography::system_font_database()));
 
 /// User-selectable artwork export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
