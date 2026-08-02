@@ -40,6 +40,8 @@ function Invoke-MsiExec {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
+        Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" |
+            ForEach-Object { Write-Host "Existing MSI process: $($_.CommandLine)" }
         if (-not $process.Start()) {
             throw "Could not start msiexec for MSI $Operation"
         }

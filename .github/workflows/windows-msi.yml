@@ -28,6 +28,7 @@ jobs:
           $smokeDirectory = Join-Path $env:RUNNER_TEMP "strek-wix-smoke"
           $wixObject = Join-Path $smokeDirectory "main.wixobj"
           $smokeInstaller = Join-Path $smokeDirectory "strek-smoke.msi"
+          $smokeInstallerForTest = Join-Path $env:WINDIR "Temp\strek-smoke.msi"
           $placeholderExecutable = Join-Path $smokeDirectory "strek.exe"
           New-Item -ItemType Directory -Force $smokeDirectory | Out-Null
           Copy-Item "$env:WINDIR\System32\where.exe" $placeholderExecutable
@@ -58,12 +59,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "WiX linker failed with exit code $LASTEXITCODE"
           }
+          Copy-Item $smokeInstaller $smokeInstallerForTest
 
           & .github/scripts/test-windows-msi.ps1 `
-            -MsiPath $smokeInstaller `
-            -InstallDirectory (Join-Path $env:RUNNER_TEMP "Strek Smoke Install") `
-            -InstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-smoke-install.log") `
-            -UninstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-smoke-uninstall.log") `
+            -MsiPath $smokeInstallerForTest `
+            -InstallDirectory (Join-Path $env:SystemDrive "Strek Smoke Install") `
+            -InstallLog (Join-Path $env:WINDIR "Temp\strek-msi-smoke-install.log") `
+            -UninstallLog (Join-Path $env:WINDIR "Temp\strek-msi-smoke-uninstall.log") `
             -TimeoutSeconds 20
 
       - name: Install stable Rust
@@ -107,11 +109,14 @@ jobs:
             throw "MSI checksum mismatch: expected $expectedChecksum, got $actualChecksum"
           }
 
+          $msiForTest = Join-Path $env:WINDIR "Temp\$($msi.Name)"
+          Copy-Item $msi.FullName $msiForTest
+
           & .github/scripts/test-windows-msi.ps1 `
-            -MsiPath $msi.FullName `
-            -InstallDirectory (Join-Path $env:RUNNER_TEMP "Strek Custom Install") `
-            -InstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-install.log") `
-            -UninstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-uninstall.log")
+            -MsiPath $msiForTest `
+            -InstallDirectory (Join-Path $env:SystemDrive "Strek Custom Install") `
+            -InstallLog (Join-Path $env:WINDIR "Temp\strek-msi-install.log") `
+            -UninstallLog (Join-Path $env:WINDIR "Temp\strek-msi-uninstall.log")
 
       - name: Upload installer diagnostics
         if: ${{ failure() }}
@@ -120,4 +125,4 @@ jobs:
           name: windows-msi-diagnostics
           if-no-files-found: ignore
           path: |
-            ${{ runner.temp }}/strek-msi-*.log
+            C:/Windows/Temp/strek-msi-*.log
