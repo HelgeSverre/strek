@@ -11,6 +11,7 @@ readme = "../../README.md"
 
 [dependencies]
 base64 = "0.22"
+directories = "6"
 editor_core = { path = "../../crates/editor_core" }
 editor_render = { path = "../../crates/editor_render" }
 render_svg = { path = "../../crates/render_svg" }
@@ -29,6 +30,7 @@ serde_json = { workspace = true }
 smallvec = "1"
 tokio = { version = "1", features = ["io-std", "rt", "sync"] }
 unicode-segmentation = { workspace = true }
+url = "2.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

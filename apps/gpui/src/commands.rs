@@ -1226,22 +1226,22 @@ fn binding_label(binding: &str) -> Option<String> {
         .map(|keystrokes| keystrokes.join(" "))
 }
 
-pub(crate) fn file_url(path: &std::path::Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
-    let mut encoded = String::with_capacity(path.len() + 7);
-    if cfg!(target_os = "windows") && !path.starts_with('/') {
-        encoded.push_str("file:///");
+pub(crate) fn file_url(path: &std::path::Path) -> Result<String, String> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        encoded.push_str("file://");
-    }
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
+        std::env::current_dir()
+            .map_err(|error| format!("could not resolve {}: {error}", path.display()))?
+            .join(path)
+    };
+    url::Url::from_file_path(&absolute_path)
+        .map(String::from)
+        .map_err(|()| {
+            format!(
+                "could not convert {} to a file URL",
+                absolute_path.display()
+            )
+        })
 }
 
 #[cfg(test)]
@@ -1349,9 +1349,39 @@ mod tests {
 
     #[test]
     fn file_urls_escape_spaces_and_non_ascii_bytes() {
-        let url = file_url(std::path::Path::new("/tmp/My Keys/ø.json"));
+        let path = std::env::temp_dir().join("My Keys").join("ø.json");
+        let url = file_url(&path).unwrap();
 
-        assert!(url.starts_with("file:///tmp/My%20Keys/"));
+        assert!(url.starts_with("file://"));
+        assert!(url.contains("My%20Keys/"));
         assert!(url.ends_with("%C3%B8.json"));
+    }
+
+    #[test]
+    fn relative_file_urls_are_resolved_against_the_current_directory() {
+        let url = file_url(std::path::Path::new("keybindings.json")).unwrap();
+
+        assert!(url.starts_with("file://"));
+        assert!(url.ends_with("/keybindings.json"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn file_urls_support_windows_drive_unc_and_extended_paths() {
+        assert_eq!(
+            file_url(std::path::Path::new(r"C:\My Keys\keybindings.json")).unwrap(),
+            "file:///C:/My%20Keys/keybindings.json"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new(
+                r"\\server\share\My Keys\keybindings.json"
+            ))
+            .unwrap(),
+            "file://server/share/My%20Keys/keybindings.json"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new(r"\\?\C:\My Keys\keybindings.json")).unwrap(),
+            "file:///C:/My%20Keys/keybindings.json"
+        );
     }
 }

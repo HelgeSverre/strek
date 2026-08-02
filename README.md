@@ -12,6 +12,7 @@
   <a href="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml"><img src="https://github.com/HelgeSverre/strek/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/platform-macOS-0C8CE9?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Platform: macOS">
   <img src="https://img.shields.io/badge/platform-Linux-0C8CE9?style=flat-square&amp;logo=linux&amp;logoColor=white" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/platform-Windows-0C8CE9?style=flat-square&amp;logo=windows&amp;logoColor=white" alt="Platform: Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0C8CE9?style=flat-square" alt="License: MIT"></a>
 </p>
 
@@ -70,9 +71,11 @@ the file format and UI should not yet be treated as stable.
 
 ## Run the GPUI app
 
-Strek supports macOS and Linux on x86-64 and ARM64. Install a stable Rust
-toolchain first. On macOS, install the Xcode Command Line Tools. On Ubuntu or
-Debian, install GPUI's native build and runtime dependencies:
+Strek supports macOS, Linux, and Windows. Install a stable Rust toolchain first.
+On macOS, install the Xcode Command Line Tools. On Windows, use the MSVC Rust
+toolchain and install Visual Studio Build Tools with Desktop development with
+C++ and a current Windows SDK. On Ubuntu or Debian, install GPUI's native build
+and runtime dependencies:
 
 ```sh
 sudo apt-get update
@@ -100,13 +103,17 @@ just run
 ## Install
 
 Strek is under active development. Tagged releases include Linux archives for
-x86-64 and ARM64 plus a universal macOS installer for Apple Silicon and Intel.
-The macOS installer is Developer ID-signed and notarized by Apple. Homebrew
-automatically selects the archive for the current platform:
+x86-64 and ARM64, a Windows x86-64 archive, and a universal macOS installer for
+Apple Silicon and Intel. The macOS installer is Developer ID-signed and
+notarized by Apple. On macOS and Linux, Homebrew automatically selects the
+archive for the current platform:
 
 ```sh
 brew install helgesverre/tap/strek
 ```
+
+On Windows, download the `x86_64-pc-windows-msvc` ZIP from the GitHub Release,
+extract `strek.exe`, and place its directory on `PATH`.
 
 Linux also requires a Vulkan-capable GPU and driver plus the desktop libraries
 listed in [Run the GPUI app](#run-the-gpui-app).
@@ -140,14 +147,21 @@ osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" st
 
 Strek includes a local stdio MCP server. The desktop application must already
 be running; the MCP process forwards tool calls to that application. Each
-example resolves the absolute path to the installed binary. When running from
-source instead, replace the first line with `STREK_BIN="$PWD/target/debug/strek"`.
+example resolves the absolute path to the installed binary and is independently
+copy-pastable. The shell blocks are for macOS/Linux; use the PowerShell blocks
+on Windows. When running from source, use `$PWD/target/debug/strek` on
+macOS/Linux or `Resolve-Path .\target\debug\strek.exe` on Windows.
 
 Claude Code (user scope):
 
 ```sh
 STREK_BIN="$(command -v strek)"
 claude mcp add --scope user strek -- "$STREK_BIN" mcp
+```
+
+```powershell
+$STREK_BIN = (Get-Command strek).Source
+claude mcp add --scope user strek -- $STREK_BIN mcp
 ```
 
 OpenCode:
@@ -157,11 +171,21 @@ STREK_BIN="$(command -v strek)"
 opencode mcp add strek -- "$STREK_BIN" mcp
 ```
 
+```powershell
+$STREK_BIN = (Get-Command strek).Source
+opencode mcp add strek -- $STREK_BIN mcp
+```
+
 Codex:
 
 ```sh
 STREK_BIN="$(command -v strek)"
 codex mcp add strek -- "$STREK_BIN" mcp
+```
+
+```powershell
+$STREK_BIN = (Get-Command strek).Source
+codex mcp add strek -- $STREK_BIN mcp
 ```
 
 GitHub Copilot CLI:
@@ -171,11 +195,21 @@ STREK_BIN="$(command -v strek)"
 copilot mcp add strek -- "$STREK_BIN" mcp
 ```
 
+```powershell
+$STREK_BIN = (Get-Command strek).Source
+copilot mcp add strek -- $STREK_BIN mcp
+```
+
 Amp:
 
 ```sh
 STREK_BIN="$(command -v strek)"
 amp mcp add strek -- "$STREK_BIN" mcp
+```
+
+```powershell
+$STREK_BIN = (Get-Command strek).Source
+amp mcp add strek -- $STREK_BIN mcp
 ```
 
 Restart or reconnect the client after adding the server if it does not discover
@@ -289,8 +323,8 @@ just format  # format the workspace
 ```
 
 Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
-Apple Silicon, Intel macOS, x86-64 Linux, and ARM64 Linux archives to a GitHub
-Release, then publish the matching macOS/Linux formula to
+Apple Silicon, Intel macOS, x86-64 Linux, ARM64 Linux, and x86-64 Windows
+archives to a GitHub Release, then publish the matching macOS/Linux formula to
 `helgesverre/homebrew-tap`.
 
 ## Package for macOS

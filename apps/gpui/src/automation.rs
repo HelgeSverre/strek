@@ -1726,13 +1726,15 @@ mod tests {
             })
         ));
 
-        let mut to_path = ["svg", "/tmp/logo.svg"].into_iter().map(str::to_owned);
+        let export_path = std::env::temp_dir().join("logo.svg");
+        let export_path = export_path.to_string_lossy().into_owned();
+        let mut to_path = ["svg".to_owned(), export_path.clone()].into_iter();
         assert!(matches!(
             parse_request("export".to_owned(), &mut to_path),
             Ok(AutomationRequest::Export {
                 format: ArtifactFormat::Svg,
                 path: Some(path)
-            }) if path == "/tmp/logo.svg"
+            }) if path == export_path
         ));
     }
 

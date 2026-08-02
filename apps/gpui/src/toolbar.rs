@@ -1593,9 +1593,8 @@ fn recent_file_item(index: usize, path: &Path, cx: &mut Context<Strek>) -> impl 
     let path = path.to_path_buf();
     let label = path
         .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Untitled")
-        .to_owned();
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".to_owned());
 
     div()
         .id(SharedString::from(format!("recent-file-{index}")))

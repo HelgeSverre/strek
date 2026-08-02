@@ -381,28 +381,26 @@ mod tests {
 
     #[test]
     fn normalizes_the_extension_to_the_selected_format() {
+        let directory = PathBuf::from("exports");
         assert_eq!(
-            normalize_path(PathBuf::from("/tmp/drawing.final"), ExportFormat::Svg),
-            PathBuf::from("/tmp/drawing.svg")
+            normalize_path(directory.join("drawing.final"), ExportFormat::Svg),
+            directory.join("drawing.svg")
         );
         assert_eq!(
-            normalize_path(
-                PathBuf::from("/tmp/drawing.final"),
-                ExportFormat::SvgOutlined
-            ),
-            PathBuf::from("/tmp/drawing.svg")
+            normalize_path(directory.join("drawing.final"), ExportFormat::SvgOutlined),
+            directory.join("drawing.svg")
         );
         assert_eq!(
-            normalize_path(PathBuf::from("/tmp/drawing.PNG"), ExportFormat::Png),
-            PathBuf::from("/tmp/drawing.PNG")
+            normalize_path(directory.join("drawing.PNG"), ExportFormat::Png),
+            directory.join("drawing.PNG")
         );
         assert_eq!(
-            normalize_path(PathBuf::from("/tmp/drawing.jpeg"), ExportFormat::Jpeg),
-            PathBuf::from("/tmp/drawing.jpg")
+            normalize_path(directory.join("drawing.jpeg"), ExportFormat::Jpeg),
+            directory.join("drawing.jpg")
         );
         assert_eq!(
-            normalize_path(PathBuf::from("/tmp/drawing.WEBP"), ExportFormat::WebP),
-            PathBuf::from("/tmp/drawing.WEBP")
+            normalize_path(directory.join("drawing.WEBP"), ExportFormat::WebP),
+            directory.join("drawing.WEBP")
         );
     }
 

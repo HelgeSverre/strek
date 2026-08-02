@@ -62,6 +62,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
+      - name: Enable long paths
+        run: git config --global core.longpaths true
+
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -71,8 +74,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Run application tests
-        run: cargo test -p strek --locked
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --locked
 
   linux:
     name: Linux application check (${{ matrix.arch }})

@@ -2,6 +2,7 @@
 
 use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -137,9 +138,9 @@ pub fn read_document(path: &Path) -> Result<OpenedDocument, DocumentIoError> {
     {
         let document_name = path
             .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Imported SVG");
-        svg_import::import_svg(&contents, document_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Imported SVG".to_owned());
+        svg_import::import_svg(&contents, &document_name)
             .map(OpenedDocument::ImportedSvg)
             .map_err(|source| DocumentIoError::Import {
                 path: path.to_path_buf(),
@@ -192,10 +193,13 @@ pub fn normalize_document_path(path: PathBuf) -> PathBuf {
         return path;
     }
 
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+    let Some(file_name) = path.file_name() else {
         return path;
     };
-    path.with_file_name(format!("{file_name}.{DOCUMENT_EXTENSION}"))
+    let mut native_file_name = OsString::from(file_name);
+    native_file_name.push(".");
+    native_file_name.push(DOCUMENT_EXTENSION);
+    path.with_file_name(native_file_name)
 }
 
 /// Force an imported document's save destination to the native extension and
@@ -206,7 +210,7 @@ pub fn normalize_imported_document_path(
 ) -> Result<PathBuf, DocumentIoError> {
     let is_native_path = path
         .file_name()
-        .and_then(|name| name.to_str())
+        .map(|name| name.to_string_lossy())
         .is_some_and(|name| {
             name.to_ascii_lowercase()
                 .ends_with(&format!(".{DOCUMENT_EXTENSION}"))
@@ -378,27 +382,8 @@ fn resolve_app_config_directory(
         .or_else(|| config_root.map(|root| root.join("strek")))
 }
 
-#[cfg(target_os = "macos")]
 fn config_root() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library").join("Application Support"))
-}
-
-#[cfg(target_os = "windows")]
-fn config_root() -> Option<PathBuf> {
-    env::var_os("APPDATA").map(PathBuf::from)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn config_root() -> Option<PathBuf> {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".config"))
-        })
+    directories::BaseDirs::new().map(|directories| directories.config_dir().to_path_buf())
 }
 
 pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -410,21 +395,17 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     })?;
     fs::create_dir_all(parent)?;
 
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "save destination has no valid file name",
-            )
-        })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "save destination has no file name",
+        )
+    })?;
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary_path = parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        sequence
-    ));
+    let mut temporary_file_name = OsString::from(".");
+    temporary_file_name.push(file_name);
+    temporary_file_name.push(format!(".{}.{sequence}.tmp", std::process::id()));
+    let temporary_path = parent.join(temporary_file_name);
 
     let result = (|| {
         {
@@ -516,19 +497,24 @@ mod tests {
 
     #[test]
     fn explicit_config_directory_is_isolated_and_empty_values_use_the_platform_root() {
-        let platform_root = PathBuf::from("/platform/config");
+        let platform_root = PathBuf::from("platform").join("config");
+        let isolated_root = PathBuf::from("isolated").join("strek");
 
         assert_eq!(
-            resolve_app_config_directory(
-                Some(PathBuf::from("/isolated/strek")),
-                Some(platform_root.clone()),
-            ),
-            Some(PathBuf::from("/isolated/strek"))
+            resolve_app_config_directory(Some(isolated_root.clone()), Some(platform_root.clone()),),
+            Some(isolated_root)
         );
         assert_eq!(
-            resolve_app_config_directory(Some(PathBuf::new()), Some(platform_root)),
-            Some(PathBuf::from("/platform/config/strek"))
+            resolve_app_config_directory(Some(PathBuf::new()), Some(platform_root.clone())),
+            Some(platform_root.join("strek"))
         );
+    }
+
+    #[test]
+    fn platform_config_root_is_absolute_when_available() {
+        if let Some(root) = config_root() {
+            assert!(root.is_absolute());
+        }
     }
 
     #[test]
@@ -566,6 +552,55 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"new contents");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_supports_unicode_and_spaces_in_file_names() {
+        let directory = temporary_test_directory("atomic-unicode");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("Logo ø final.strek.json");
+
+        write_atomic(&path, b"contents").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"contents");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_writer_supports_non_utf8_file_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = temporary_test_directory("atomic-non-utf8");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(OsString::from_vec(b"drawing-\x80.strek.json".to_vec()));
+
+        write_atomic(&path, b"contents").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"contents");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn atomic_writer_supports_windows_long_paths() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = temporary_test_directory("atomic-long-path");
+        let mut directory = root.clone();
+        for index in 0..8 {
+            directory = directory.join(format!("segment-{index}-0123456789abcdefghijklmnop"));
+        }
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("drawing.strek.json");
+        assert!(path.as_os_str().encode_wide().count() > 260);
+
+        write_atomic(&path, b"contents").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"contents");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "windows")]
@@ -614,28 +649,46 @@ mod tests {
 
     #[test]
     fn extensionless_paths_receive_native_extension() {
+        let directory = PathBuf::from("drawings");
         assert_eq!(
-            normalize_document_path(PathBuf::from("/tmp/drawing")),
-            PathBuf::from("/tmp/drawing.strek.json")
+            normalize_document_path(directory.join("drawing")),
+            directory.join("drawing.strek.json")
         );
         assert_eq!(
-            normalize_document_path(PathBuf::from("/tmp/drawing.json")),
-            PathBuf::from("/tmp/drawing.json")
+            normalize_document_path(directory.join("drawing.json")),
+            directory.join("drawing.json")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_paths_receive_and_preserve_native_extensions() {
+        assert_eq!(
+            normalize_document_path(PathBuf::from(r"C:\Designs\drawing")),
+            PathBuf::from(r"C:\Designs\drawing.strek.json")
+        );
+        assert_eq!(
+            normalize_imported_document_path(
+                PathBuf::from(r"C:\Designs\drawing.STREK.JSON"),
+                Path::new(r"C:\Imports\drawing.svg"),
+            )
+            .unwrap(),
+            PathBuf::from(r"C:\Designs\drawing.STREK.JSON")
         );
     }
 
     #[test]
     fn imported_save_paths_always_use_the_native_extension() {
-        let source = Path::new("/tmp/logo.svg");
+        let directory = PathBuf::from("imports");
+        let source = directory.join("logo.svg");
 
         assert_eq!(
-            normalize_imported_document_path(PathBuf::from("/tmp/logo.svg"), source).unwrap(),
-            PathBuf::from("/tmp/logo.strek.json")
+            normalize_imported_document_path(directory.join("logo.svg"), &source).unwrap(),
+            directory.join("logo.strek.json")
         );
         assert_eq!(
-            normalize_imported_document_path(PathBuf::from("/tmp/logo.STREK.JSON"), source)
-                .unwrap(),
-            PathBuf::from("/tmp/logo.STREK.JSON")
+            normalize_imported_document_path(directory.join("logo.STREK.JSON"), &source).unwrap(),
+            directory.join("logo.STREK.JSON")
         );
     }
 

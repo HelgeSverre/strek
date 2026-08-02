@@ -25,10 +25,11 @@ For unattended automation, launch the desktop window without activating it:
 strek --background
 ```
 
-Semantic requests and window screenshots explicitly refresh inactive windows,
-so scripted edits remain visible without bringing Strek to the foreground. On
-macOS, background mode parks a two-pixel edge of the window on the rightmost
-display so the system continues rendering its otherwise off-screen surface.
+Semantic requests explicitly refresh inactive windows, so scripted edits remain
+visible without bringing Strek to the foreground. Window screenshots are
+currently supported on macOS, where background mode parks a two-pixel edge of
+the window on the rightmost display so the system continues rendering its
+otherwise off-screen surface.
 
 By default, Strek creates a per-user local endpoint. On Linux and macOS it is a
 socket below `XDG_RUNTIME_DIR`, when it is an absolute path, or the system
@@ -98,7 +99,7 @@ Running `strek automate` without a subcommand is equivalent to
 | `strek automate pointer <down\|move\|up> <x> <y> [left\|middle\|right]` | Send a canvas-local pointer event; the button defaults to `left`. |
 | `strek automate text <text>` | Insert text into the active text-editing session. |
 | `strek automate ui <target> <show\|hide>` | Show or hide a supported panel or overlay. |
-| `strek automate screenshot <output.png>` | Save a complete window screenshot without activating Strek. |
+| `strek automate screenshot <output.png>` | On macOS, save a complete window screenshot without activating Strek. |
 
 The CLI accepts these UI targets: `main-menu`, `command-palette`,
 `layers-panel`, `design-panel`, `fill-color-picker`, `stroke-color-picker`,
@@ -180,7 +181,7 @@ canvas pointer sequence:
 strek automate text "Hello, Strek"
 ```
 
-Show a panel and capture the result:
+Show a panel and capture the result on macOS:
 
 ```sh
 strek automate ui layers-panel show
@@ -195,6 +196,13 @@ strek automate select replace node-0000000100000001
 strek automate color fill '#ff3366'
 strek automate property opacity 0.8
 strek automate export svg /tmp/strek-export.svg
+```
+
+The same export flow in Windows PowerShell uses a native Windows path:
+
+```powershell
+$exportPath = Join-Path $env:TEMP "strek-export.svg"
+strek automate export svg $exportPath
 ```
 
 Use the ID from the current `document` response; the example ID is only
@@ -306,6 +314,10 @@ Replace the command with the result of `command -v strek`; Intel Homebrew
 commonly installs it at `/usr/local/bin/strek`. The MCP client owns the stdio
 server subprocess and negotiates the MCP lifecycle. The server writes protocol
 messages on standard input/output and does not open a network port.
+
+On Windows, set `command` to the value printed by
+`(Get-Command strek).Source`, escaping each backslash when writing JSON, for
+example `C:\\Tools\\Strek\\strek.exe`.
 
 The Strek desktop application must still be running. MCP tool calls are bridged
 from the stdio server to that application's local automation endpoint.

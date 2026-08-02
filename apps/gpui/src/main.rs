@@ -489,7 +489,7 @@ impl Strek {
         }
         self.source_document_path()
             .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
+            .map(|name| name.to_string_lossy())
             .map(|name| {
                 let lowercase = name.to_ascii_lowercase();
                 for suffix in [".strek.json", ".json", ".svg"] {
@@ -497,7 +497,7 @@ impl Strek {
                         return name[..name.len() - suffix.len()].to_owned();
                     }
                 }
-                name.to_owned()
+                name.into_owned()
             })
             .unwrap_or_else(|| "Untitled".to_owned())
     }
@@ -819,8 +819,8 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.dismiss_menus();
-        match commands::Keymap::ensure_user_file() {
-            Ok(path) => cx.open_url(&commands::file_url(&path)),
+        match commands::Keymap::ensure_user_file().and_then(|path| commands::file_url(&path)) {
+            Ok(url) => cx.open_url(&url),
             Err(error) => {
                 let prompt = window.prompt(
                     PromptLevel::Critical,
@@ -6185,7 +6185,7 @@ mod layout_tests {
 
     #[test]
     fn imported_svg_origin_requires_a_new_native_save_destination() {
-        let path = PathBuf::from("/tmp/logo.svg");
+        let path = std::env::temp_dir().join("logo.svg");
         let origin = DocumentOrigin::ImportedSvg(path.clone());
 
         assert_eq!(origin.source_path(), Some(path.as_path()));
@@ -6513,16 +6513,17 @@ mod layout_tests {
 
     #[test]
     fn automation_file_paths_are_unambiguous() {
-        let absolute = if cfg!(target_os = "windows") {
-            PathBuf::from(r"C:\tmp\logo.svg")
-        } else {
-            PathBuf::from("/tmp/logo.svg")
-        };
+        let absolute = std::env::temp_dir().join("logo.svg");
         assert_eq!(
             automation_absolute_path(&absolute.to_string_lossy()).unwrap(),
             absolute
         );
         assert!(automation_absolute_path("logo.svg").is_err());
+
+        #[cfg(target_os = "windows")]
+        for path in [r"C:\Designs\logo.svg", r"\\server\share\logo.svg"] {
+            assert_eq!(automation_absolute_path(path).unwrap(), PathBuf::from(path));
+        }
     }
 
     #[test]
