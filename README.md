@@ -103,17 +103,19 @@ just run
 ## Install
 
 Strek is under active development. Tagged releases include Linux archives for
-x86-64 and ARM64, a Windows x86-64 archive, and a universal macOS installer for
-Apple Silicon and Intel. The macOS installer is Developer ID-signed and
-notarized by Apple. On macOS and Linux, Homebrew automatically selects the
-archive for the current platform:
+x86-64 and ARM64, a Windows x86-64 MSI installer and portable ZIP, and a
+universal macOS installer for Apple Silicon and Intel. The macOS installer is
+Developer ID-signed and notarized by Apple. On macOS and Linux, Homebrew
+automatically selects the archive for the current platform:
 
 ```sh
 brew install helgesverre/tap/strek
 ```
 
-On Windows, download the `x86_64-pc-windows-msvc` ZIP from the GitHub Release,
-extract `strek.exe`, and place its directory on `PATH`.
+On Windows, download `strek-x86_64-pc-windows-msvc.msi` from the GitHub Release.
+The installer lets you choose the installation directory and whether to add
+Strek to the system `PATH`. The matching ZIP remains available as a portable
+installation.
 
 Linux also requires a Vulkan-capable GPU and driver plus the desktop libraries
 listed in [Run the GPUI app](#run-the-gpui-app).
@@ -324,8 +326,8 @@ just format  # format the workspace
 
 Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
 Apple Silicon, Intel macOS, x86-64 Linux, ARM64 Linux, and x86-64 Windows
-archives to a GitHub Release, then publish the matching macOS/Linux formula to
-`helgesverre/homebrew-tap`.
+archives plus the Windows MSI to a GitHub Release, then publish the matching
+macOS/Linux formula to `helgesverre/homebrew-tap`.
 
 ## Package for macOS
 
@@ -343,3 +345,11 @@ in GitHub Actions, signed with separate Developer ID Application and Installer
 certificates, notarized, stapled, verified, and attached to tagged releases.
 See [docs/macos-release.md](docs/macos-release.md) for the one-time Apple and
 GitHub credential setup, manual test workflow, and release procedure.
+
+## Package for Windows
+
+Cargo-dist and WiX produce the Windows MSI on a native Windows runner. The
+manual installer workflow tests a custom-path installation and uninstall without
+creating a release. See [docs/windows-release.md](docs/windows-release.md) for
+the workflow, stable GUIDs, release artifacts, and optional Authenticode signing
+setup.

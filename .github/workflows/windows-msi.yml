@@ -1,0 +1,108 @@
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and exercise MSI
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Enable long paths
+        run: git config --global core.longpaths true
+
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-msi
+
+      - name: Install dist
+        shell: bash
+        run: .github/scripts/install-cargo-dist.sh
+
+      - name: Build MSI
+        run: dist build --artifacts=local --target=x86_64-pc-windows-msvc --output-format=json > dist-manifest.json
+
+      - name: Verify checksum and custom-path install
+        shell: pwsh
+        run: |
+          $msiFiles = @(Get-ChildItem target/distrib/*.msi)
+          if ($msiFiles.Count -ne 1) {
+            throw "Expected exactly one MSI, found $($msiFiles.Count)"
+          }
+
+          $msi = $msiFiles[0]
+          $checksumFile = "$($msi.FullName).sha256"
+          $expectedChecksum = ((Get-Content $checksumFile -Raw).Trim() -split '\s+')[0]
+          $actualChecksum = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+          if ($actualChecksum -ne $expectedChecksum) {
+            throw "MSI checksum mismatch: expected $expectedChecksum, got $actualChecksum"
+          }
+
+          $installDirectory = Join-Path $env:RUNNER_TEMP "Strek Custom Install"
+          $installLog = Join-Path $env:RUNNER_TEMP "strek-msi-install.log"
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "strek-msi-uninstall.log"
+          $installedExecutable = Join-Path $installDirectory "bin\strek.exe"
+          $startMenuShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Strek\Strek.lnk"
+
+          & msiexec.exe /i $msi.FullName /qn /norestart "APPLICATIONFOLDER=$installDirectory" "/L*v" $installLog
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content $installLog -Tail 200
+            throw "MSI installation failed with exit code $LASTEXITCODE"
+          }
+
+          try {
+            if (-not (Test-Path $installedExecutable -PathType Leaf)) {
+              throw "MSI did not install strek.exe at $installedExecutable"
+            }
+            if (-not (Test-Path $startMenuShortcut -PathType Leaf)) {
+              throw "MSI did not create the Start Menu shortcut"
+            }
+          }
+          finally {
+            & msiexec.exe /x $msi.FullName /qn /norestart "/L*v" $uninstallLog
+            if ($LASTEXITCODE -ne 0) {
+              Get-Content $uninstallLog -Tail 200
+              throw "MSI uninstall failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          if (Test-Path $installedExecutable) {
+            throw "MSI uninstall left strek.exe behind"
+          }
+          if (Test-Path $startMenuShortcut) {
+            throw "MSI uninstall left the Start Menu shortcut behind"
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: windows-msi
+          if-no-files-found: error
+          path: |
+            target/distrib/*.msi
+            target/distrib/*.msi.sha256
+
+      - name: Upload installer diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: windows-msi-diagnostics
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/strek-msi-install.log
+            ${{ runner.temp }}/strek-msi-uninstall.log

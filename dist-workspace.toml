@@ -4,7 +4,7 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = "github"
-installers = ["homebrew"]
+installers = ["homebrew", "msi"]
 tap = "helgesverre/homebrew-tap"
 publish-jobs = ["homebrew"]
 targets = [
@@ -19,8 +19,9 @@ precise-builds = true
 merge-tasks = true
 pr-run-mode = "skip"
 # release.yml adds checksum verification and least-privilege permissions that
-# cargo-dist 0.32 cannot express in generated output.
-allow-dirty = ["ci"]
+# cargo-dist 0.32 cannot express in generated output. The WiX definition is
+# intentionally customized with branding and a Start Menu shortcut.
+allow-dirty = ["ci", "msi"]
 
 # GPUI links to XKB on Linux. The other desktop libraries are loaded at runtime.
 [dist.dependencies.apt]

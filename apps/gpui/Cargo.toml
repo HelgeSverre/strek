@@ -64,3 +64,9 @@ formats = ["app"]
 [package.metadata.packager.macos]
 minimum-system-version = "12.3"
 signing-identity = "-"
+
+[package.metadata.wix]
+upgrade-guid = "B3DB2893-3377-416B-9AC8-216808A18204"
+path-guid = "6B0BBEB8-8A4D-471F-AE5C-0736EA1DB81E"
+license = false
+eula = false

@@ -71,6 +71,12 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+      - name: Check MSI definition
+        shell: pwsh
+        run: |
+          $document = New-Object System.Xml.XmlDocument
+          $document.Load((Resolve-Path "apps/gpui/wix/main.wxs"))
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
