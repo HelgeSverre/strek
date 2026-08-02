@@ -51,7 +51,8 @@ pub use input::{Cursor, Effects, InputEvent, Key, Modifiers, MouseButton};
 pub use layers::{LayerEntry, LayerIcon, LayerPanelState};
 pub use layout::{AlignCross, AlignMain, AutoLayout, Direction, Edges, LayoutOffset};
 pub use node::{
-    FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign, TextData, TextSizing,
+    ClipNode, ClipPath, ClipShape, FontSpec, FrameData, Layout, Node, NodeId, NodeKind, TextAlign,
+    TextData, TextSizing,
 };
 pub use path::{HandleMode, PathAnchor, PathCmd, PathContour, PathData, Rect};
 pub use precision::{GridSettings, Guide, GuideAxis, GuideId, PrecisionError, MAX_GUIDES};
@@ -64,7 +65,10 @@ pub use snap::{
     AlignAxis, DistributeAxis, SnapConfig, SnapEngine, SnapKind, SnapPoint, SnapResult,
     SnapSettings, SnapSettingsError, SnapTarget, MAX_SNAP_TOLERANCE, MIN_SNAP_TOLERANCE,
 };
-pub use style::{Paint, Stroke, Style};
+pub use style::{
+    FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PaintOrder, RadialGradient,
+    SpreadMethod, Stroke, Style,
+};
 pub use text::{
     estimate_text_metrics, FontId, GlyphRun, PositionedGlyph, SimpleTextEngine, TextEngine,
     TextLayout, TextLayoutLine, TextMetrics,
@@ -77,6 +81,14 @@ use serde::{de::IgnoredAny, Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static CLIP_CONTAINMENT_EVALUATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Serializable document format (excludes derived cache data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +117,7 @@ pub struct SavedDocument {
 
 impl SavedDocument {
     /// Current file format version
-    pub const CURRENT_VERSION: u32 = 3;
+    pub const CURRENT_VERSION: u32 = 4;
 }
 
 /// Error returned while decoding a saved document.
@@ -152,6 +164,16 @@ pub enum DocumentValidationError {
         node: NodeId,
         bytes: usize,
         limit: usize,
+    },
+    VisualComplexity {
+        node: NodeId,
+        resource: &'static str,
+        count: usize,
+        limit: usize,
+    },
+    InvalidVisualData {
+        node: NodeId,
+        reason: &'static str,
     },
     MissingRoot {
         root: NodeId,
@@ -226,6 +248,18 @@ impl fmt::Display for DocumentValidationError {
                 formatter,
                 "text node {node:?} contains {bytes} bytes; limit is {limit}"
             ),
+            Self::VisualComplexity {
+                node,
+                resource,
+                count,
+                limit,
+            } => write!(
+                formatter,
+                "node {node:?} contains {count} {resource}; limit is {limit}"
+            ),
+            Self::InvalidVisualData { node, reason } => {
+                write!(formatter, "node {node:?} has invalid visual data: {reason}")
+            }
             Self::MissingRoot { root } => write!(formatter, "root {root:?} does not exist"),
             Self::DeletedRoot { root } => write!(formatter, "root {root:?} is deleted"),
             Self::RootHasParent { root, parent } => {
@@ -282,6 +316,14 @@ impl DocumentComplexityLimits {
         text_bytes_per_node: 4 * 1024 * 1024,
     };
 }
+
+const MAX_GRADIENT_STOPS_PER_NODE: usize = 4_096;
+const MAX_STROKE_DASH_VALUES_PER_NODE: usize = 4_096;
+const MAX_CLIP_NODES_PER_NODE: usize = 100_000;
+const MAX_CLIP_CONTOURS_PER_SHAPE: usize = 10_000;
+const MAX_CLIP_CONTOURS_PER_NODE: usize = 100_000;
+const MAX_CLIP_ANCHORS_PER_NODE: usize = 1_000_000;
+const MAX_CLIP_DEPTH: usize = 128;
 
 impl fmt::Display for DocumentLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -628,13 +670,14 @@ impl Document {
     }
 
     /// Replace platform-shaped text layouts used by bounds and editor interaction geometry.
-    pub fn set_text_layouts(&mut self, layouts: HashMap<NodeId, text::TextLayout>) {
+    pub fn set_text_layouts(&mut self, layouts: HashMap<NodeId, text::TextLayout>) -> bool {
         if self.text_layouts == layouts {
-            return;
+            return false;
         }
         self.text_layouts = layouts;
         self.mark_layout_dirty();
         self.cache.world_bounds.clear();
+        true
     }
 
     /// Resolve the platform layout for a text node, falling back to deterministic metrics.
@@ -846,19 +889,21 @@ impl Document {
             .unwrap_or(Affine2::IDENTITY);
         let layout = Affine2::from_translation(self.cache.get_layout_offset(id));
         let local_from_world = parent_world * layout;
-        let determinant = local_from_world.matrix2.determinant();
-        if !determinant.is_finite()
-            || determinant.abs() <= f32::EPSILON
-            || !world.matrix2.is_finite()
-            || !world.translation.is_finite()
-        {
+        let Some(local_inverse) = finite_affine_inverse(local_from_world) else {
+            return self
+                .nodes
+                .get(id)
+                .map(|node| node.transform)
+                .unwrap_or(Affine2::IDENTITY);
+        };
+        if !affine_is_finite(world) {
             return self
                 .nodes
                 .get(id)
                 .map(|node| node.transform)
                 .unwrap_or(Affine2::IDENTITY);
         }
-        local_from_world.inverse() * world
+        local_inverse * world
     }
 
     /// Reapply desired world transforms until ancestor auto-layout measurement
@@ -1097,6 +1142,7 @@ impl Document {
         include_groups: bool,
         tolerance: f32,
     ) -> Option<NodeId> {
+        let mut clip_containment_cache = HashMap::new();
         for id in self.reverse_paint_order().collect::<Vec<_>>() {
             let Some(node) = self.nodes.get(id) else {
                 continue;
@@ -1120,6 +1166,9 @@ impl Document {
 
             let kind = node.kind.clone();
             let style = node.style.clone();
+            if !self.clip_chain_contains(id, world_pos, &mut clip_containment_cache) {
+                continue;
+            }
             if matches!(kind, NodeKind::Group) {
                 if self
                     .world_bounds(id)
@@ -1131,11 +1180,10 @@ impl Document {
             }
 
             let world = self.world_transform(id);
-            let determinant = world.matrix2.determinant();
-            if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+            let Some(world_inverse) = finite_affine_inverse(world) else {
                 continue;
-            }
-            let local = world.inverse().transform_point2(world_pos);
+            };
+            let local = world_inverse.transform_point2(world_pos);
             let minimum_scale = world
                 .matrix2
                 .x_axis
@@ -1154,7 +1202,8 @@ impl Document {
                     .local_bounds(id)
                     .is_some_and(|bounds| bounds.contains(local)),
                 NodeKind::Shape(path) => {
-                    let fill_hit = style.fill.is_some() && path.contains_point(local);
+                    let fill_hit = style.fill.is_some()
+                        && path.contains_point_with_rule(local, style.fill_rule);
                     let stroke_hit = style.stroke.is_some_and(|stroke| {
                         path.distance_to_point(local, local_tolerance * 0.25)
                             <= stroke.width * 0.5 + local_tolerance
@@ -1169,6 +1218,45 @@ impl Document {
         }
 
         None
+    }
+
+    fn clip_chain_contains(
+        &mut self,
+        id: NodeId,
+        world_point: Vec2,
+        containment_cache: &mut HashMap<NodeId, bool>,
+    ) -> bool {
+        let clipped_nodes = std::iter::once(id)
+            .chain(self.ancestors(id))
+            .filter(|node_id| {
+                self.nodes
+                    .get(*node_id)
+                    .is_some_and(|node| node.clip_path.is_some())
+            })
+            .collect::<Vec<_>>();
+        for clipped_node in clipped_nodes {
+            let contains = if let Some(&contains) = containment_cache.get(&clipped_node) {
+                contains
+            } else {
+                let world = self.world_transform(clipped_node);
+                let contains = finite_affine_inverse(world).is_some_and(|world_inverse| {
+                    let local_point = world_inverse.transform_point2(world_point);
+                    self.nodes
+                        .get(clipped_node)
+                        .and_then(|node| node.clip_path.as_ref())
+                        .is_some_and(|clip| clip_path_contains_point(clip, local_point))
+                });
+                #[cfg(test)]
+                CLIP_CONTAINMENT_EVALUATIONS
+                    .with(|evaluations| evaluations.set(evaluations.get() + 1));
+                containment_cache.insert(clipped_node, contains);
+                contains
+            };
+            if !contains {
+                return false;
+            }
+        }
+        true
     }
 
     /// Group the given nodes into a new group.
@@ -1225,10 +1313,7 @@ impl Document {
         // Reparenting changes both ancestor transforms and auto-layout
         // translations. Snapshot the visual result before changing the tree.
         let parent_world = self.world_transform(first_parent);
-        let determinant = parent_world.matrix2.determinant();
-        if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
-            return None;
-        }
+        finite_affine_inverse(parent_world)?;
         let preserved = nodes
             .iter()
             .map(|&id| (id, self.world_transform(id)))
@@ -1287,10 +1372,7 @@ impl Document {
         }
 
         let parent_world = self.world_transform(parent_id);
-        let determinant = parent_world.matrix2.determinant();
-        if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
-            return None;
-        }
+        finite_affine_inverse(parent_world)?;
         let preserved = children
             .iter()
             .map(|&id| (id, self.world_transform(id)))
@@ -1746,6 +1828,8 @@ impl Document {
                 });
             }
 
+            validate_node_visual_data(node_id, node)?;
+
             match &node.kind {
                 NodeKind::Shape(path) => {
                     if path.contours.len() > limits.path_contours_per_node {
@@ -1853,6 +1937,295 @@ impl Document {
     }
 }
 
+fn validate_node_visual_data(node_id: NodeId, node: &Node) -> Result<(), DocumentValidationError> {
+    if !affine_is_finite(node.transform) {
+        return Err(invalid_visual(node_id, "non-finite node transform"));
+    }
+    if !is_normalized(node.style.opacity) {
+        return Err(invalid_visual(
+            node_id,
+            "opacity must be between zero and one",
+        ));
+    }
+    if let Some(fill) = &node.style.fill {
+        validate_paint(node_id, fill)?;
+    }
+    if let Some(stroke) = &node.style.stroke {
+        validate_stroke(node_id, stroke)?;
+    }
+    if let NodeKind::Shape(path) = &node.kind {
+        validate_path_geometry(node_id, path, "non-finite path geometry")?;
+    }
+    if let NodeKind::Frame(frame) = &node.kind {
+        if !frame.width.is_finite()
+            || !frame.height.is_finite()
+            || frame.width < 0.0
+            || frame.height < 0.0
+        {
+            return Err(invalid_visual(
+                node_id,
+                "frame dimensions must be finite and nonnegative",
+            ));
+        }
+        if let Some(background) = &frame.background {
+            validate_paint(node_id, background)?;
+        }
+    }
+    if let Some(clip) = &node.clip_path {
+        let mut state = ClipValidationState::default();
+        validate_clip_path(node_id, clip, 0, &mut state)?;
+    }
+    Ok(())
+}
+
+fn validate_stroke(node_id: NodeId, stroke: &Stroke) -> Result<(), DocumentValidationError> {
+    validate_paint(node_id, &stroke.paint)?;
+    if !stroke.width.is_finite() || stroke.width < 0.0 {
+        return Err(invalid_visual(
+            node_id,
+            "stroke width must be finite and nonnegative",
+        ));
+    }
+    if !stroke.miter_limit.is_finite() || stroke.miter_limit < 1.0 {
+        return Err(invalid_visual(
+            node_id,
+            "stroke miter limit must be finite and at least one",
+        ));
+    }
+    let maximum_outset = stroke.width * 0.5 * stroke.miter_limit;
+    if !maximum_outset.is_finite() {
+        return Err(invalid_visual(
+            node_id,
+            "stroke width and miter limit produce a non-finite visual extent",
+        ));
+    }
+    if stroke.dash_array.len() > MAX_STROKE_DASH_VALUES_PER_NODE {
+        return Err(visual_complexity(
+            node_id,
+            "stroke dash values",
+            stroke.dash_array.len(),
+            MAX_STROKE_DASH_VALUES_PER_NODE,
+        ));
+    }
+    let dash_total = stroke.dash_array.iter().sum::<f32>();
+    if !stroke.dash_offset.is_finite()
+        || stroke
+            .dash_array
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        || (!stroke.dash_array.is_empty() && (!dash_total.is_finite() || dash_total <= 0.0))
+    {
+        return Err(invalid_visual(node_id, "invalid stroke dash pattern"));
+    }
+    Ok(())
+}
+
+fn validate_paint(node_id: NodeId, paint: &Paint) -> Result<(), DocumentValidationError> {
+    match paint {
+        Paint::Solid(color) => validate_color(node_id, color),
+        Paint::LinearGradient(gradient) => {
+            if !gradient.start.is_finite()
+                || !gradient.end.is_finite()
+                || !affine_is_finite(gradient.transform)
+            {
+                return Err(invalid_visual(node_id, "invalid linear gradient geometry"));
+            }
+            validate_gradient_stops(node_id, &gradient.stops)
+        }
+        Paint::RadialGradient(gradient) => {
+            if !gradient.center.is_finite()
+                || !gradient.focal.is_finite()
+                || !gradient.radius.is_finite()
+                || gradient.radius <= 0.0
+                || !affine_is_finite(gradient.transform)
+            {
+                return Err(invalid_visual(node_id, "invalid radial gradient geometry"));
+            }
+            validate_gradient_stops(node_id, &gradient.stops)
+        }
+    }
+}
+
+fn validate_gradient_stops(
+    node_id: NodeId,
+    stops: &[GradientStop],
+) -> Result<(), DocumentValidationError> {
+    if stops.len() < 2 {
+        return Err(invalid_visual(
+            node_id,
+            "gradients require at least two stops",
+        ));
+    }
+    if stops.len() > MAX_GRADIENT_STOPS_PER_NODE {
+        return Err(visual_complexity(
+            node_id,
+            "gradient stops",
+            stops.len(),
+            MAX_GRADIENT_STOPS_PER_NODE,
+        ));
+    }
+    let mut previous = 0.0;
+    for stop in stops {
+        if !is_normalized(stop.offset) || stop.offset < previous {
+            return Err(invalid_visual(
+                node_id,
+                "gradient offsets must be finite, normalized, and ordered",
+            ));
+        }
+        validate_color(node_id, &stop.color)?;
+        previous = stop.offset;
+    }
+    Ok(())
+}
+
+fn validate_color(node_id: NodeId, color: &[f32; 4]) -> Result<(), DocumentValidationError> {
+    if color.iter().copied().all(is_normalized) {
+        Ok(())
+    } else {
+        Err(invalid_visual(
+            node_id,
+            "paint channels must be finite and between zero and one",
+        ))
+    }
+}
+
+#[derive(Default)]
+struct ClipValidationState {
+    nodes: usize,
+    contours: usize,
+    anchors: usize,
+}
+
+fn validate_clip_path(
+    node_id: NodeId,
+    clip: &ClipPath,
+    depth: usize,
+    state: &mut ClipValidationState,
+) -> Result<(), DocumentValidationError> {
+    if depth > MAX_CLIP_DEPTH {
+        return Err(visual_complexity(
+            node_id,
+            "clip nesting levels",
+            depth,
+            MAX_CLIP_DEPTH,
+        ));
+    }
+    if !affine_is_finite(clip.transform) {
+        return Err(invalid_visual(node_id, "non-finite clip transform"));
+    }
+    state.nodes = state.nodes.saturating_add(1);
+    if state.nodes > MAX_CLIP_NODES_PER_NODE {
+        return Err(visual_complexity(
+            node_id,
+            "clip nodes",
+            state.nodes,
+            MAX_CLIP_NODES_PER_NODE,
+        ));
+    }
+    for child in &clip.children {
+        match child {
+            ClipNode::Group(group) => validate_clip_path(node_id, group, depth + 1, state)?,
+            ClipNode::Shape(shape) => {
+                if !affine_is_finite(shape.transform) {
+                    return Err(invalid_visual(node_id, "non-finite clip shape transform"));
+                }
+                validate_path_geometry(node_id, &shape.path, "non-finite clip path geometry")?;
+                let contour_count = shape.path.contours.len();
+                if contour_count > MAX_CLIP_CONTOURS_PER_SHAPE {
+                    return Err(visual_complexity(
+                        node_id,
+                        "contours in one clip shape",
+                        contour_count,
+                        MAX_CLIP_CONTOURS_PER_SHAPE,
+                    ));
+                }
+                state.nodes = state.nodes.saturating_add(1);
+                state.contours = state.contours.saturating_add(contour_count);
+                state.anchors = shape
+                    .path
+                    .contours
+                    .iter()
+                    .fold(state.anchors, |count, contour| {
+                        count.saturating_add(contour.anchors.len())
+                    });
+                if state.nodes > MAX_CLIP_NODES_PER_NODE {
+                    return Err(visual_complexity(
+                        node_id,
+                        "clip nodes",
+                        state.nodes,
+                        MAX_CLIP_NODES_PER_NODE,
+                    ));
+                }
+                if state.contours > MAX_CLIP_CONTOURS_PER_NODE {
+                    return Err(visual_complexity(
+                        node_id,
+                        "clip contours",
+                        state.contours,
+                        MAX_CLIP_CONTOURS_PER_NODE,
+                    ));
+                }
+                if state.anchors > MAX_CLIP_ANCHORS_PER_NODE {
+                    return Err(visual_complexity(
+                        node_id,
+                        "clip anchors",
+                        state.anchors,
+                        MAX_CLIP_ANCHORS_PER_NODE,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(nested) = &clip.clip_path {
+        validate_clip_path(node_id, nested, depth + 1, state)?;
+    }
+    Ok(())
+}
+
+fn validate_path_geometry(
+    node_id: NodeId,
+    path: &PathData,
+    reason: &'static str,
+) -> Result<(), DocumentValidationError> {
+    let is_finite = path.contours.iter().all(|contour| {
+        contour.anchors.iter().all(|anchor| {
+            anchor.position.is_finite()
+                && anchor.in_handle.is_none_or(Vec2::is_finite)
+                && anchor.out_handle.is_none_or(Vec2::is_finite)
+        })
+    });
+    if is_finite {
+        Ok(())
+    } else {
+        Err(invalid_visual(node_id, reason))
+    }
+}
+
+fn affine_is_finite(transform: Affine2) -> bool {
+    transform.matrix2.is_finite() && transform.translation.is_finite()
+}
+
+fn is_normalized(value: f32) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+fn invalid_visual(node: NodeId, reason: &'static str) -> DocumentValidationError {
+    DocumentValidationError::InvalidVisualData { node, reason }
+}
+
+fn visual_complexity(
+    node: NodeId,
+    resource: &'static str,
+    count: usize,
+    limit: usize,
+) -> DocumentValidationError {
+    DocumentValidationError::VisualComplexity {
+        node,
+        resource,
+        count,
+        limit,
+    }
+}
+
 impl Default for Document {
     fn default() -> Self {
         Self::new()
@@ -1867,6 +2240,38 @@ fn take_next_id(next: &mut u64) -> Option<u64> {
     let current = (*next != 0).then_some(*next)?;
     *next = current.checked_add(1).unwrap_or(0);
     Some(current)
+}
+
+fn clip_path_contains_point(clip: &ClipPath, point: Vec2) -> bool {
+    let Some(clip_inverse) = finite_affine_inverse(clip.transform) else {
+        return false;
+    };
+    let local_point = clip_inverse.transform_point2(point);
+    let inside_children = clip.children.iter().any(|child| match child {
+        ClipNode::Group(group) => clip_path_contains_point(group, local_point),
+        ClipNode::Shape(shape) => finite_affine_inverse(shape.transform).is_some_and(|inverse| {
+            shape
+                .path
+                .contains_point_with_rule(inverse.transform_point2(local_point), shape.fill_rule)
+        }),
+    });
+    inside_children
+        && clip
+            .clip_path
+            .as_ref()
+            .is_none_or(|nested| clip_path_contains_point(nested, point))
+}
+
+fn finite_affine_inverse(transform: Affine2) -> Option<Affine2> {
+    if !affine_is_finite(transform) {
+        return None;
+    }
+    let determinant = transform.matrix2.determinant();
+    if !determinant.is_finite() || determinant == 0.0 {
+        return None;
+    }
+    let inverse = transform.inverse();
+    affine_is_finite(inverse).then_some(inverse)
 }
 
 /// Transform a rectangle by an affine transform (returns axis-aligned bounding box).
@@ -2111,6 +2516,105 @@ mod tests {
 
         // Point outside shape
         assert_eq!(doc.hit_test(Vec2::new(0.0, 0.0)), None);
+    }
+
+    #[test]
+    fn hit_testing_respects_node_and_ancestor_clips() {
+        let mut doc = Document::new();
+        let clip = ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::rect(0.0, 0.0, 25.0, 25.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+        let group = doc
+            .add_child(doc.root, Node::group("Clipped").with_clip_path(clip))
+            .unwrap();
+        let shape = doc
+            .add_child(
+                group,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 100.0, 100.0)),
+            )
+            .unwrap();
+
+        assert_eq!(doc.hit_test(Vec2::new(10.0, 10.0)), Some(shape));
+        assert_eq!(doc.hit_test(Vec2::new(50.0, 50.0)), None);
+    }
+
+    #[test]
+    fn hit_testing_evaluates_a_shared_ancestor_clip_once() {
+        let mut doc = Document::new();
+        let clip = ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::rect(0.0, 0.0, 100.0, 100.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+        let group = doc
+            .add_child(doc.root, Node::group("Clipped").with_clip_path(clip))
+            .unwrap();
+        let target = doc
+            .add_child(
+                group,
+                Node::shape("Target", PathData::rect(0.0, 0.0, 100.0, 100.0)),
+            )
+            .unwrap();
+        doc.add_child(
+            group,
+            Node::shape("Top miss", PathData::rect(200.0, 200.0, 20.0, 20.0)),
+        )
+        .unwrap();
+
+        CLIP_CONTAINMENT_EVALUATIONS.with(|evaluations| evaluations.set(0));
+        assert_eq!(
+            doc.hit_test_with_tolerance(Vec2::new(50.0, 50.0), false, 0.0),
+            Some(target)
+        );
+        CLIP_CONTAINMENT_EVALUATIONS.with(|evaluations| assert_eq!(evaluations.get(), 1));
+    }
+
+    #[test]
+    fn hit_testing_accepts_finite_inverses_for_small_scale_nodes_and_clips() {
+        let small_scale = Affine2::from_scale(Vec2::splat(1e-4));
+        let clip = ClipPath {
+            transform: small_scale,
+            children: vec![ClipNode::Group(ClipPath {
+                transform: Affine2::from_scale(Vec2::splat(1e8)),
+                children: vec![ClipNode::Shape(ClipShape {
+                    path: PathData::rect(0.0, 0.0, 100.0, 100.0),
+                    transform: small_scale,
+                    fill_rule: FillRule::NonZero,
+                })],
+                clip_path: None,
+            })],
+            clip_path: None,
+        };
+        assert!(clip_path_contains_point(&clip, Vec2::splat(50.0)));
+
+        let mut doc = Document::new();
+        let shape = doc
+            .add_child(
+                doc.root,
+                Node::shape("Small", PathData::rect(0.0, 0.0, 100.0, 100.0))
+                    .with_transform(small_scale)
+                    .with_clip_path(clip),
+            )
+            .unwrap();
+
+        assert_eq!(
+            doc.hit_test_with_tolerance(Vec2::splat(0.005), false, 0.0),
+            Some(shape)
+        );
+        assert_eq!(
+            doc.hit_test_with_tolerance(Vec2::splat(0.015), false, 0.0),
+            None
+        );
     }
 
     #[test]
@@ -2659,6 +3163,192 @@ mod tests {
     }
 
     #[test]
+    fn version_four_round_trips_advanced_svg_visual_data() {
+        let mut doc = Document::new();
+        let gradient = Paint::LinearGradient(LinearGradient {
+            start: Vec2::ZERO,
+            end: Vec2::new(100.0, 0.0),
+            transform: Affine2::from_translation(Vec2::new(2.0, 3.0)),
+            spread: SpreadMethod::Reflect,
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: [1.0, 0.0, 0.0, 0.5],
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+            ],
+        });
+        let mut stroke = Stroke::new(3.0, gradient.clone());
+        stroke.line_cap = LineCap::Round;
+        stroke.line_join = LineJoin::MiterClip;
+        stroke.miter_limit = 8.0;
+        stroke.dash_array = vec![5.0, 2.0];
+        stroke.dash_offset = 1.0;
+        let mut style = Style::fill_and_stroke(gradient, stroke);
+        style.fill_rule = FillRule::EvenOdd;
+        style.paint_order = PaintOrder::StrokeAndFill;
+        style.opacity = 0.75;
+        let clip = ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::rect(0.0, 0.0, 50.0, 50.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::EvenOdd,
+            })],
+            clip_path: None,
+        };
+        doc.add_child(
+            doc.root,
+            Node::shape("Advanced", PathData::rect(0.0, 0.0, 100.0, 50.0))
+                .with_style(style.clone())
+                .with_clip_path(clip.clone()),
+        );
+
+        let json = doc.to_json().unwrap();
+        let restored = Document::from_json(&json).unwrap();
+        let node = &restored.nodes[restored.nodes[restored.root].children[0]];
+
+        assert_eq!(restored.to_saved().version, 4);
+        assert_eq!(node.style, style);
+        assert_eq!(node.clip_path, Some(clip));
+    }
+
+    #[test]
+    fn invalid_advanced_visual_data_is_rejected_before_persistence() {
+        let mut doc = Document::new();
+        let invalid_gradient = Paint::RadialGradient(RadialGradient {
+            center: Vec2::ZERO,
+            focal: Vec2::ZERO,
+            radius: f32::NAN,
+            transform: Affine2::IDENTITY,
+            spread: SpreadMethod::Pad,
+            stops: Vec::new(),
+        });
+        let node = Node::shape("Invalid", PathData::rect(0.0, 0.0, 10.0, 10.0))
+            .with_style(Style::fill(invalid_gradient));
+        doc.add_child(doc.root, node);
+
+        assert!(matches!(
+            doc.to_validated_saved(),
+            Err(DocumentValidationError::InvalidVisualData { .. })
+        ));
+
+        for stops in [
+            Vec::new(),
+            vec![GradientStop {
+                offset: 0.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+            }],
+        ] {
+            let mut doc = Document::new();
+            let paint = Paint::LinearGradient(LinearGradient {
+                start: Vec2::ZERO,
+                end: Vec2::X,
+                transform: Affine2::IDENTITY,
+                spread: SpreadMethod::Pad,
+                stops,
+            });
+            doc.add_child(
+                doc.root,
+                Node::shape("Incomplete gradient", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                    .with_style(Style::fill(paint)),
+            );
+            assert!(matches!(
+                doc.to_validated_saved(),
+                Err(DocumentValidationError::InvalidVisualData {
+                    reason: "gradients require at least two stops",
+                    ..
+                })
+            ));
+        }
+
+        let mut invalid_path = PathData::rect(0.0, 0.0, 10.0, 10.0);
+        invalid_path.contours[0].anchors[0].position.x = f32::NAN;
+        let mut doc = Document::new();
+        doc.add_child(doc.root, Node::shape("Invalid path", invalid_path));
+        assert!(matches!(
+            doc.to_validated_saved(),
+            Err(DocumentValidationError::InvalidVisualData {
+                reason: "non-finite path geometry",
+                ..
+            })
+        ));
+
+        let mut invalid_clip_path = PathData::rect(0.0, 0.0, 10.0, 10.0);
+        invalid_clip_path.contours[0].anchors[0].out_handle = Some(Vec2::splat(f32::INFINITY));
+        let clip = ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![ClipNode::Shape(ClipShape {
+                path: invalid_clip_path,
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+        let mut doc = Document::new();
+        doc.add_child(
+            doc.root,
+            Node::shape("Invalid clip", PathData::rect(0.0, 0.0, 10.0, 10.0)).with_clip_path(clip),
+        );
+        assert!(matches!(
+            doc.to_validated_saved(),
+            Err(DocumentValidationError::InvalidVisualData {
+                reason: "non-finite clip path geometry",
+                ..
+            })
+        ));
+
+        let mut overflowing_stroke = Stroke::black(f32::MAX);
+        overflowing_stroke.miter_limit = 4.0;
+        let mut doc = Document::new();
+        doc.add_child(
+            doc.root,
+            Node::shape("Overflowing stroke", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                .with_style(Style::stroke(overflowing_stroke)),
+        );
+        let saved = doc.to_saved();
+        assert!(matches!(
+            invalid_saved_reason(saved),
+            DocumentValidationError::InvalidVisualData {
+                reason: "stroke width and miter limit produce a non-finite visual extent",
+                ..
+            }
+        ));
+
+        let clip = ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData {
+                    contours: vec![PathContour::default(); MAX_CLIP_CONTOURS_PER_SHAPE + 1],
+                },
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+        let mut doc = Document::new();
+        doc.add_child(
+            doc.root,
+            Node::shape(
+                "Excessive clip contours",
+                PathData::rect(0.0, 0.0, 10.0, 10.0),
+            )
+            .with_clip_path(clip),
+        );
+        assert!(matches!(
+            doc.to_validated_saved(),
+            Err(DocumentValidationError::VisualComplexity {
+                resource: "contours in one clip shape",
+                limit: MAX_CLIP_CONTOURS_PER_SHAPE,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn version_three_metadata_round_trips() {
         let mut editor = Editor::new();
         editor
@@ -3055,7 +3745,61 @@ mod tests {
         assert_eq!(restored.grid, GridSettings::default());
         assert!(restored.guides.is_empty());
         assert_eq!(restored.color_library, ColorLibrary::default());
-        assert_eq!(restored.to_saved().version, 3);
+        assert_eq!(restored.to_saved().version, SavedDocument::CURRENT_VERSION);
+    }
+
+    #[test]
+    fn version_three_documents_receive_version_four_visual_defaults() {
+        fn remove_visual_fields(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for field in [
+                        "clip_path",
+                        "fill_rule",
+                        "paint_order",
+                        "line_cap",
+                        "line_join",
+                        "miter_limit",
+                        "dash_array",
+                        "dash_offset",
+                    ] {
+                        object.remove(field);
+                    }
+                    for child in object.values_mut() {
+                        remove_visual_fields(child);
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for child in array {
+                        remove_visual_fields(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut doc = Document::new();
+        doc.add_child(
+            doc.root,
+            Node::shape("Legacy", PathData::rect(0.0, 0.0, 10.0, 10.0))
+                .with_style(Style::stroke(Stroke::black(2.0))),
+        );
+        let mut saved: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        saved["version"] = serde_json::json!(3);
+        remove_visual_fields(&mut saved);
+
+        let restored = Document::from_json(&serde_json::to_string(&saved).unwrap()).unwrap();
+        let node = &restored.nodes[restored.nodes[restored.root].children[0]];
+        let stroke = node.style.stroke.as_ref().unwrap();
+        assert_eq!(node.style.fill_rule, FillRule::NonZero);
+        assert_eq!(node.style.paint_order, PaintOrder::FillAndStroke);
+        assert_eq!(stroke.line_cap, LineCap::Butt);
+        assert_eq!(stroke.line_join, LineJoin::Miter);
+        assert_eq!(stroke.miter_limit, 4.0);
+        assert!(stroke.dash_array.is_empty());
+        assert_eq!(stroke.dash_offset, 0.0);
+        assert!(node.clip_path.is_none());
+        assert_eq!(restored.to_saved().version, 4);
     }
 
     #[test]

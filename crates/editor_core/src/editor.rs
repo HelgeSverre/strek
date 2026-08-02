@@ -422,6 +422,9 @@ enum InteractionState {
 
 type DragState = InteractionState;
 
+const DEFAULT_CLICK_CREATION_SIZE: f32 = 100.0;
+const MIN_CREATION_DRAG_PX: f32 = 2.0;
+
 fn creation_endpoint(start: Vec2, current: Vec2, constrain_proportions: bool) -> Vec2 {
     let mut delta = current - start;
 
@@ -483,6 +486,14 @@ fn creation_geometry(
             PathAnchor::corner(line_end - bounds.min),
         ])],
     };
+    (bounds, path)
+}
+
+fn default_creation_geometry(shape: ShapeKind, origin: Vec2) -> (Rect, PathData) {
+    debug_assert_ne!(shape, ShapeKind::Line);
+    let size = Vec2::splat(DEFAULT_CLICK_CREATION_SIZE);
+    let bounds = Rect::from_pos_size(origin, size);
+    let path = shape.path(size);
     (bounds, path)
 }
 
@@ -630,6 +641,9 @@ pub struct Editor {
     /// Non-document style presets for newly created vector objects.
     creation_styles: CreationStyleDefaults,
 
+    /// Last size used for a top-level frame in this file session.
+    last_top_level_frame_size: Option<Vec2>,
+
     /// Live numeric property edit, kept outside document history until commit.
     numeric_property_scrub: Option<NumericPropertyScrubState>,
 
@@ -647,6 +661,9 @@ pub struct Editor {
 
     /// Whether a redraw is needed
     needs_redraw: bool,
+
+    /// Changes to visible document geometry that are not yet represented by history.
+    transient_artwork_revision: u64,
 
     /// Snap engine for finding snap targets
     snap_engine: SnapEngine,
@@ -669,12 +686,14 @@ impl Editor {
             viewport_size: Vec2::new(800.0, 600.0),
             tool: Tool::Select,
             creation_styles: CreationStyleDefaults::default(),
+            last_top_level_frame_size: None,
             numeric_property_scrub: None,
             nudge_sequence_active: false,
             numeric_property_scrub_owner: Arc::new(()),
             next_numeric_property_scrub_id: 1,
             drag: DragState::None,
             needs_redraw: true,
+            transient_artwork_revision: 0,
             snap_engine: SnapEngine::new(),
             layer_panel: LayerPanelState::new(),
             space_pan_active: false,
@@ -1242,6 +1261,14 @@ impl Editor {
     fn cancel_interaction(&mut self) -> bool {
         let drag = std::mem::take(&mut self.drag);
         let cancelled = !matches!(drag, DragState::None);
+        let restores_artwork = matches!(
+            drag,
+            DragState::Moving { .. }
+                | DragState::Resizing(_)
+                | DragState::Rotating(_)
+                | DragState::TextEditing(_)
+                | DragState::VectorEditing(_)
+        );
 
         match drag {
             DragState::Moving { transaction, .. } => transaction.cancel(&mut self.document),
@@ -1278,6 +1305,9 @@ impl Editor {
 
         self.snap_engine.clear_targets();
         if cancelled {
+            if restores_artwork {
+                self.bump_transient_artwork_revision();
+            }
             self.needs_redraw = true;
         }
         cancelled
@@ -1364,6 +1394,7 @@ impl Editor {
                         self.document.mark_bounds_dirty(id);
                     }
                     self.needs_redraw = true;
+                    self.bump_transient_artwork_revision();
                     return true;
                 }
                 DragState::Pen(session) => {
@@ -1886,7 +1917,24 @@ impl Editor {
 
     /// Handle an input event and return effects.
     pub fn handle_event(&mut self, event: InputEvent) -> Effects {
-        match event {
+        let can_mutate_transient_artwork = match &event {
+            InputEvent::PointerMove { .. } => {
+                matches!(
+                    self.drag,
+                    DragState::Moving { .. } | DragState::Resizing(_) | DragState::Rotating(_)
+                ) || matches!(
+                    &self.drag,
+                    DragState::VectorEditing(session) if session.dragging.is_some()
+                )
+            }
+            InputEvent::PointerDown { .. }
+            | InputEvent::PointerUp { .. }
+            | InputEvent::Scroll { .. }
+            | InputEvent::KeyDown { .. }
+            | InputEvent::KeyUp { .. }
+            | InputEvent::ModifiersChanged { .. } => false,
+        };
+        let effects = match event {
             InputEvent::PointerDown {
                 position,
                 button,
@@ -1909,7 +1957,15 @@ impl Editor {
             InputEvent::KeyDown { key, modifiers } => self.handle_key_down(key, modifiers),
             InputEvent::KeyUp { key, modifiers } => self.handle_key_up(key, modifiers),
             InputEvent::ModifiersChanged { modifiers } => self.handle_modifiers_changed(modifiers),
+        };
+        if can_mutate_transient_artwork && effects.redraw {
+            self.bump_transient_artwork_revision();
         }
+        effects
+    }
+
+    fn bump_transient_artwork_revision(&mut self) {
+        self.transient_artwork_revision = self.transient_artwork_revision.wrapping_add(1);
     }
 
     /// Resolve a painted leaf to the object users expect to manipulate.
@@ -2556,9 +2612,9 @@ impl Editor {
                         self.compute_marquee_selection(start_pos, current_pos, deep_select);
 
                     if modifiers.shift {
-                        // Selection depth and additive selection are independent.
+                        // Selection depth and set toggling are independent.
                         for id in selected {
-                            self.add_selection_target(id);
+                            self.toggle_selection_target(id);
                         }
                     } else {
                         // No modifiers: Replace selection
@@ -2575,8 +2631,20 @@ impl Editor {
                 ..
             } => {
                 self.snap_engine.clear_targets();
-                let (bounds, path) = creation_geometry(shape, start_pos, current_pos, modifiers);
-                const MIN_SHAPE_SIZE: f32 = 2.0;
+                let drag_distance = (current_pos - start_pos).length() * self.view.zoom.abs();
+                let clicked = drag_distance < MIN_CREATION_DRAG_PX;
+                if clicked && shape == ShapeKind::Line {
+                    self.needs_redraw = true;
+                    return Effects {
+                        redraw: true,
+                        cursor: Some(self.cursor_for_state()),
+                    };
+                }
+                let (bounds, path) = if clicked {
+                    default_creation_geometry(shape, start_pos)
+                } else {
+                    creation_geometry(shape, start_pos, current_pos, modifiers)
+                };
 
                 let large_enough = if shape == ShapeKind::Line {
                     path.contours
@@ -2587,13 +2655,15 @@ impl Editor {
                             };
                             Some(
                                 start.position.distance(end.position) * self.view.zoom.abs()
-                                    >= MIN_SHAPE_SIZE,
+                                    >= MIN_CREATION_DRAG_PX,
                             )
                         })
                         .unwrap_or(false)
                 } else {
                     let screen_size = bounds.size() * self.view.zoom.abs();
-                    screen_size.x >= MIN_SHAPE_SIZE && screen_size.y >= MIN_SHAPE_SIZE
+                    clicked
+                        || screen_size.x >= MIN_CREATION_DRAG_PX
+                            && screen_size.y >= MIN_CREATION_DRAG_PX
                 };
                 if large_enough {
                     self.create_shape(shape, bounds, path, start_pos);
@@ -2606,10 +2676,29 @@ impl Editor {
                 ..
             } => {
                 self.snap_engine.clear_targets();
-                let bounds = creation_bounds(start_pos, current_pos, modifiers);
+                let drag_distance = (current_pos - start_pos).length() * self.view.zoom.abs();
+                let clicked = drag_distance < MIN_CREATION_DRAG_PX;
+                let parent = self.deepest_frame_at(start_pos);
+                let bounds = if clicked {
+                    let size = if parent == self.document.root {
+                        self.last_top_level_frame_size
+                            .unwrap_or(Vec2::splat(DEFAULT_CLICK_CREATION_SIZE))
+                    } else {
+                        Vec2::splat(DEFAULT_CLICK_CREATION_SIZE)
+                    };
+                    Rect::from_pos_size(start_pos, size)
+                } else {
+                    creation_bounds(start_pos, current_pos, modifiers)
+                };
                 let screen_size = bounds.size() * self.view.zoom.abs();
-                if screen_size.x >= 2.0 && screen_size.y >= 2.0 {
+                if clicked
+                    || (screen_size.x >= MIN_CREATION_DRAG_PX
+                        && screen_size.y >= MIN_CREATION_DRAG_PX)
+                {
                     self.create_frame(bounds, start_pos);
+                    if parent == self.document.root {
+                        self.last_top_level_frame_size = Some(bounds.size());
+                    }
                 }
             }
             DragState::CreatingText {
@@ -2637,7 +2726,8 @@ impl Editor {
     ///
     /// The default marquee selects direct children of the active selection
     /// scope. Deep-select marquee traverses the scope and selects editable
-    /// leaves, never a container together with its descendants.
+    /// leaves, never a container together with its descendants, and requires
+    /// those leaves to be fully enclosed like Figma's primary-modifier marquee.
     fn compute_marquee_selection(
         &mut self,
         start: Vec2,
@@ -2685,11 +2775,14 @@ impl Editor {
             if deep_select && is_container {
                 continue;
             }
-            if self
-                .document
-                .world_bounds(id)
-                .is_some_and(|bounds| marquee.intersects(&bounds))
-            {
+            let matches_geometry = self.document.world_bounds(id).is_some_and(|bounds| {
+                if deep_select {
+                    marquee.contains_rect(&bounds)
+                } else {
+                    marquee.intersects(&bounds)
+                }
+            });
+            if matches_geometry {
                 selected.push(id);
             }
         }
@@ -3409,6 +3502,7 @@ impl Editor {
             session.selection_reversed = false;
         }
         self.document.mark_bounds_dirty(node_id);
+        self.bump_transient_artwork_revision();
         self.needs_redraw = true;
         true
     }
@@ -3641,6 +3735,7 @@ impl Editor {
             node.kind = NodeKind::Text(target.text);
         }
         self.document.mark_bounds_dirty(node);
+        self.bump_transient_artwork_revision();
         self.needs_redraw = true;
         true
     }
@@ -3935,6 +4030,7 @@ impl Editor {
             session.selected = target.selected;
             session.dragging = None;
         }
+        self.bump_transient_artwork_revision();
         self.needs_redraw = true;
         true
     }
@@ -4417,6 +4513,7 @@ impl Editor {
         if let DragState::VectorEditing(session) = &mut self.drag {
             session.selected.clear();
         }
+        self.bump_transient_artwork_revision();
         self.needs_redraw = true;
         self.record_vector_edit(before);
         true
@@ -5893,7 +5990,7 @@ impl Editor {
 
     /// Return conservative world-space bounds for all effectively visible artwork.
     ///
-    /// Shape bounds include enough room for the SVG renderer's default miter limit, so exported
+    /// Shape bounds include enough room for each stroke's miter limit, so exported
     /// strokes are not clipped. Frames contribute their explicit dimensions even when their
     /// background is transparent.
     pub fn artwork_bounds(&mut self) -> Option<Rect> {
@@ -5912,7 +6009,19 @@ impl Editor {
                     NodeKind::Shape(_) => node.style.stroke.as_ref(),
                     NodeKind::Group | NodeKind::Text(_) | NodeKind::Frame(_) => None,
                 })
-                .map(|stroke| stroke.width.max(0.0))
+                .map(|stroke| {
+                    let join_factor = match stroke.line_join {
+                        crate::LineJoin::Miter | crate::LineJoin::MiterClip => {
+                            stroke.miter_limit.max(1.0)
+                        }
+                        crate::LineJoin::Round | crate::LineJoin::Bevel => 1.0,
+                    };
+                    let cap_factor = match stroke.line_cap {
+                        crate::LineCap::Square => std::f32::consts::SQRT_2,
+                        crate::LineCap::Butt | crate::LineCap::Round => 1.0,
+                    };
+                    stroke.width.max(0.0) * 0.5 * join_factor.max(cap_factor)
+                })
                 .unwrap_or(0.0);
             let transform_scale = if stroke_outset > 0.0 {
                 max_affine_scale(self.document.world_transform(id))
@@ -5926,11 +6035,50 @@ impl Editor {
                 continue;
             }
 
-            // SVG's default miter limit is four times the half-stroke width.
-            let margin = stroke_outset * transform_scale * 2.0;
-            if margin.is_finite() && margin > 0.0 {
+            let margin = stroke_outset * transform_scale;
+            if !margin.is_finite() {
+                return None;
+            }
+            if margin > 0.0 {
                 bounds.min -= Vec2::splat(margin);
                 bounds.max += Vec2::splat(margin);
+                if !bounds.min.is_finite() || !bounds.max.is_finite() {
+                    return None;
+                }
+            }
+            let clipped_nodes = std::iter::once(id)
+                .chain(self.document.ancestors(id))
+                .filter(|node_id| {
+                    self.document
+                        .get(*node_id)
+                        .is_some_and(|node| node.clip_path.is_some())
+                })
+                .collect::<Vec<_>>();
+            let mut fully_clipped = false;
+            for clipped_node in clipped_nodes {
+                let Some(clip) = self
+                    .document
+                    .get(clipped_node)
+                    .and_then(|node| node.clip_path.clone())
+                else {
+                    continue;
+                };
+                let Some(local_clip_bounds) = clip_path_bounds(&clip, Affine2::IDENTITY) else {
+                    fully_clipped = true;
+                    break;
+                };
+                let world_clip_bounds = crate::transform_rect(
+                    local_clip_bounds,
+                    self.document.world_transform(clipped_node),
+                );
+                let Some(intersection) = bounds.intersection(&world_clip_bounds) else {
+                    fully_clipped = true;
+                    break;
+                };
+                bounds = intersection;
+            }
+            if fully_clipped || bounds.is_empty() {
+                continue;
             }
             combined = if combined.is_empty() {
                 bounds
@@ -6024,7 +6172,20 @@ impl Editor {
 
     /// Build a display list for rendering.
     pub fn build_display_list(&mut self) -> DisplayList {
-        let mut display_list = self.document.build_display_list(&self.view);
+        self.build_display_list_with_document(true)
+    }
+
+    /// Build only viewport-dependent editing chrome for a separately rasterized document.
+    pub fn build_overlay_display_list(&mut self) -> DisplayList {
+        self.build_display_list_with_document(false)
+    }
+
+    fn build_display_list_with_document(&mut self, include_document: bool) -> DisplayList {
+        let mut display_list = if include_document {
+            self.document.build_display_list(&self.view)
+        } else {
+            DisplayList::default()
+        };
 
         if let DragState::CreatingShape {
             shape,
@@ -6370,7 +6531,25 @@ impl Editor {
 
     /// Install platform-shaped text layouts before building bounds and display geometry.
     pub fn set_text_layouts(&mut self, layouts: HashMap<NodeId, crate::text::TextLayout>) {
-        self.document.set_text_layouts(layouts);
+        if self.document.set_text_layouts(layouts) {
+            self.bump_transient_artwork_revision();
+        }
+    }
+
+    /// Monotonic identity for live artwork changes not represented by history.
+    pub fn transient_artwork_revision(&self) -> u64 {
+        self.transient_artwork_revision
+    }
+
+    /// Whether pointer movement is currently mutating document artwork.
+    pub fn has_active_artwork_gesture(&self) -> bool {
+        matches!(
+            self.drag,
+            DragState::Moving { .. } | DragState::Resizing(_) | DragState::Rotating(_)
+        ) || matches!(
+            &self.drag,
+            DragState::VectorEditing(session) if session.dragging.is_some()
+        )
     }
 
     /// Get a reference to the selection.
@@ -6536,6 +6715,7 @@ impl Editor {
             .unwrap_or(false);
         self.numeric_property_scrub = Some(state);
         if changed {
+            self.bump_transient_artwork_revision();
             self.needs_redraw = true;
         }
         changed
@@ -6953,8 +7133,8 @@ impl Editor {
                     let after = self.document.get(snapshot.id)?.style.clone();
                     (after != snapshot.before).then(|| Patch::SetStyle {
                         id: snapshot.id,
-                        before: snapshot.before.clone(),
-                        after,
+                        before: Box::new(snapshot.before.clone()),
+                        after: Box::new(after),
                     })
                 })
                 .collect(),
@@ -6991,6 +7171,7 @@ impl Editor {
             return false;
         };
         if self.restore_numeric_property_snapshot(&state.snapshot) {
+            self.bump_transient_artwork_revision();
             self.needs_redraw = true;
         }
         true
@@ -7443,7 +7624,11 @@ impl Editor {
             let mut after = before.clone();
             update(&mut after);
             if before != after {
-                patches.push(Patch::SetStyle { id, before, after });
+                patches.push(Patch::SetStyle {
+                    id,
+                    before: Box::new(before),
+                    after: Box::new(after),
+                });
             }
         }
         if patches.is_empty() {
@@ -7723,6 +7908,34 @@ fn max_affine_scale(transform: Affine2) -> f32 {
     let determinant = matrix.determinant();
     let discriminant = (trace * trace - 4.0 * determinant * determinant).max(0.0);
     ((trace + discriminant.sqrt()) * 0.5).sqrt()
+}
+
+fn clip_path_bounds(clip: &crate::ClipPath, transform: Affine2) -> Option<Rect> {
+    let content_transform = transform * clip.transform;
+    let mut combined = Rect::empty();
+    for child in &clip.children {
+        let Some(bounds) = (match child {
+            crate::ClipNode::Group(group) => clip_path_bounds(group, content_transform),
+            crate::ClipNode::Shape(shape) => shape
+                .path
+                .bounds()
+                .map(|bounds| crate::transform_rect(bounds, content_transform * shape.transform)),
+        }) else {
+            continue;
+        };
+        combined = if combined.is_empty() {
+            bounds
+        } else {
+            combined.union(&bounds)
+        };
+    }
+    if combined.is_empty() {
+        return None;
+    }
+    if let Some(nested) = &clip.clip_path {
+        combined = combined.intersection(&clip_path_bounds(nested, transform)?)?;
+    }
+    Some(combined)
 }
 
 impl Default for Editor {
@@ -8332,6 +8545,38 @@ mod tests {
 
         editor.vector_pointer_move(Vec2::splat(30.0), Modifiers::default());
         assert_eq!(editor.document.get(id).unwrap().path(), Some(&original));
+    }
+
+    #[test]
+    fn vector_hover_does_not_invalidate_artwork_but_anchor_drag_does() {
+        let mut editor = Editor::new();
+        let id = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Path", PathData::rect(0.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+        editor.selection.select(id);
+        assert!(editor.execute_action(EditorAction::EnterVectorEdit));
+        let before_hover = editor.transient_artwork_revision();
+
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::splat(30.0),
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(editor.transient_artwork_revision(), before_hover);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::ZERO,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerMove {
+            position: Vec2::splat(10.0),
+            modifiers: Modifiers::default(),
+        });
+        assert!(editor.transient_artwork_revision() > before_hover);
     }
 
     #[test]
@@ -9505,6 +9750,53 @@ mod tests {
     }
 
     #[test]
+    fn delivered_scroll_delta_controls_pan_direction() {
+        for delta in [Vec2::new(12.0, -7.0), Vec2::new(-12.0, 7.0)] {
+            let mut editor = Editor::new();
+            let effects = editor.handle_event(InputEvent::Scroll {
+                position: Vec2::splat(50.0),
+                delta,
+                modifiers: Modifiers::default(),
+            });
+
+            assert_eq!(editor.view.pan, -delta);
+            assert_eq!(editor.view.zoom, 1.0);
+            assert!(effects.redraw);
+        }
+    }
+
+    #[test]
+    fn delivered_primary_scroll_delta_controls_zoom_direction_and_anchor() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+        ] {
+            for (delta_y, expected_zoom) in [(10.0, 0.9), (-10.0, 1.1)] {
+                let mut editor = Editor::new();
+                editor.view.pan = Vec2::new(15.0, -20.0);
+                let position = Vec2::new(125.0, 80.0);
+                let world_before = editor.view.to_world(position);
+
+                let effects = editor.handle_event(InputEvent::Scroll {
+                    position,
+                    delta: Vec2::new(0.0, delta_y),
+                    modifiers,
+                });
+
+                assert!((editor.view.zoom - expected_zoom).abs() < 0.000_001);
+                assert!((editor.view.to_world(position) - world_before).length() < 0.000_1);
+                assert!(effects.redraw);
+            }
+        }
+    }
+
+    #[test]
     fn artwork_snapshot_uses_world_space_and_excludes_hidden_content() {
         let mut editor = Editor::new();
         let root = editor.document.root;
@@ -9539,6 +9831,65 @@ mod tests {
             panic!("first visible display item should be the shape fill");
         };
         assert_eq!(transform.translation, Vec2::new(-25.0, 40.0));
+    }
+
+    #[test]
+    fn artwork_bounds_intersect_large_content_with_node_and_ancestor_clips() {
+        let mut editor = Editor::new();
+        let clip = crate::ClipPath {
+            transform: Affine2::IDENTITY,
+            children: vec![crate::ClipNode::Shape(crate::ClipShape {
+                path: PathData::rect(0.0, 0.0, 12.0, 8.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: crate::FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+        let group = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::group("Clipped group").with_clip_path(clip),
+            )
+            .unwrap();
+        editor
+            .document
+            .add_child(
+                group,
+                Node::shape("Huge", PathData::rect(0.0, 0.0, 1_000_000.0, 1_000_000.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            editor.artwork_bounds(),
+            Some(Rect::from_pos_size(Vec2::ZERO, Vec2::new(12.0, 8.0)))
+        );
+    }
+
+    #[test]
+    fn artwork_bounds_include_rotated_square_cap_extent_independent_of_miter_limit() {
+        let mut editor = Editor::new();
+        let mut stroke = Stroke::black(10.0);
+        stroke.line_cap = crate::LineCap::Square;
+        stroke.miter_limit = 1.0;
+        let path = PathData {
+            contours: vec![PathContour::open([
+                PathAnchor::corner(Vec2::ZERO),
+                PathAnchor::corner(Vec2::splat(10.0)),
+            ])],
+        };
+        editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Square cap", path).with_style(Style::stroke(stroke)),
+            )
+            .unwrap();
+
+        let bounds = editor.artwork_bounds().unwrap();
+        let cap_extent = 5.0 * std::f32::consts::SQRT_2;
+        assert!(bounds.min.x <= -cap_extent && bounds.min.y <= -cap_extent);
+        assert!(bounds.max.x >= 10.0 + cap_extent && bounds.max.y >= 10.0 + cap_extent);
     }
 
     #[test]
@@ -10295,6 +10646,127 @@ mod tests {
             editor.compute_marquee_selection(start, end, false),
             vec![frame]
         );
+    }
+
+    #[test]
+    fn primary_marquee_requires_full_enclosure_while_plain_marquee_accepts_touch() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let shape = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Shape", PathData::rect(0.0, 0.0, 20.0, 20.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            editor.compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(10.0), false),
+            vec![shape]
+        );
+        assert!(editor
+            .compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(10.0), true)
+            .is_empty());
+        assert_eq!(
+            editor.compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(20.0), true),
+            vec![shape]
+        );
+    }
+
+    #[test]
+    fn command_and_control_marquees_select_fully_enclosed_nested_leaves() {
+        for modifiers in [
+            Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        ] {
+            let (mut editor, _group, first, second) = editor_with_grouped_shapes();
+
+            editor.handle_event(InputEvent::PointerDown {
+                position: Vec2::splat(-5.0),
+                button: MouseButton::Left,
+                modifiers,
+            });
+            editor.handle_event(InputEvent::PointerUp {
+                position: Vec2::new(25.0, 25.0),
+                button: MouseButton::Left,
+                modifiers,
+            });
+
+            assert_eq!(editor.selection.iter().collect::<Vec<_>>(), vec![first]);
+            assert!(!editor.selection.contains(second));
+        }
+    }
+
+    #[test]
+    fn shift_marquee_toggles_touched_objects() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let mut add_shape = |name: &str, x: f32| {
+            editor
+                .document
+                .add_child(
+                    root,
+                    Node::shape(name, PathData::rect(0.0, 0.0, 10.0, 10.0))
+                        .with_transform(Affine2::from_translation(Vec2::new(x, 0.0))),
+                )
+                .unwrap()
+        };
+        let first = add_shape("First", 0.0);
+        let second = add_shape("Second", 20.0);
+        let third = add_shape("Third", 40.0);
+        editor.selection.set(vec![first, second]);
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(15.0, -12.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(55.0, 15.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+
+        assert!(editor.selection.contains(first));
+        assert!(!editor.selection.contains(second));
+        assert!(editor.selection.contains(third));
+        assert_eq!(editor.selection.len(), 2);
+    }
+
+    #[test]
+    fn shift_primary_marquee_combines_deep_enclosure_with_toggle() {
+        let (mut editor, _group, first, second) = editor_with_grouped_shapes();
+        editor.selection.select(first);
+        let modifiers = Modifiers {
+            shift: true,
+            meta: true,
+            ..Modifiers::default()
+        };
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::splat(-5.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(65.0, 25.0),
+            button: MouseButton::Left,
+            modifiers,
+        });
+
+        assert!(!editor.selection.contains(first));
+        assert!(editor.selection.contains(second));
+        assert_eq!(editor.selection.len(), 1);
     }
 
     #[test]
@@ -11176,6 +11648,143 @@ mod tests {
     }
 
     #[test]
+    fn closed_shape_tool_clicks_create_selected_undoable_figma_sized_defaults() {
+        for (action, name, expected_size) in [
+            (
+                EditorAction::ToolRectangle,
+                "Rectangle",
+                Vec2::splat(DEFAULT_CLICK_CREATION_SIZE),
+            ),
+            (
+                EditorAction::ToolEllipse,
+                "Ellipse",
+                Vec2::splat(DEFAULT_CLICK_CREATION_SIZE),
+            ),
+        ] {
+            let mut editor = Editor::new();
+            assert!(editor.execute_action(action));
+            let position = Vec2::new(25.0, 35.0);
+
+            editor.handle_event(InputEvent::PointerDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+            });
+            editor.handle_event(InputEvent::PointerUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::default(),
+            });
+
+            let id = editor.selection.primary().unwrap();
+            let node = editor.document.get(id).unwrap();
+            let NodeKind::Shape(path) = &node.kind else {
+                panic!("{name} click should create a shape");
+            };
+            assert_eq!(node.name, name);
+            assert_eq!(node.transform.translation, position);
+            assert_eq!(path.bounds().unwrap().size(), expected_size);
+            let expected_history = format!("Create {name}");
+            assert_eq!(
+                editor.history.undo_description(),
+                Some(expected_history.as_str())
+            );
+            assert!(editor.execute_action(EditorAction::Undo));
+            assert!(editor.selection.is_empty());
+            assert_eq!(editor.document.descendants(editor.document.root).count(), 0);
+        }
+    }
+
+    #[test]
+    fn frame_tool_click_creates_a_selected_undoable_hundred_unit_frame() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolFrame));
+        let position = Vec2::new(25.0, 35.0);
+
+        editor.handle_event(InputEvent::PointerDown {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+
+        let id = editor.selection.primary().unwrap();
+        let node = editor.document.get(id).unwrap();
+        let NodeKind::Frame(frame) = &node.kind else {
+            panic!("frame click should create a frame");
+        };
+        assert_eq!(node.transform.translation, position);
+        assert_eq!(
+            Vec2::new(frame.width, frame.height),
+            Vec2::splat(DEFAULT_CLICK_CREATION_SIZE)
+        );
+        assert_eq!(editor.history.undo_description(), Some("Create Frame"));
+        assert!(editor.execute_action(EditorAction::Undo));
+        assert!(editor.selection.is_empty());
+    }
+
+    #[test]
+    fn top_level_frame_click_reuses_the_last_top_level_size_but_nested_click_does_not() {
+        let mut editor = Editor::new();
+        assert!(editor.execute_action(EditorAction::ToolFrame));
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(10.0, 10.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(170.0, 100.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let custom_frame = editor.selection.primary().unwrap();
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(250.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(250.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let repeated = editor.selection.primary().unwrap();
+        let NodeKind::Frame(frame) = &editor.document.get(repeated).unwrap().kind else {
+            panic!("top-level click should create a frame");
+        };
+        assert_eq!(Vec2::new(frame.width, frame.height), Vec2::new(160.0, 90.0));
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: Vec2::new(20.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: Vec2::new(20.0, 20.0),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+        });
+        let nested = editor.selection.primary().unwrap();
+        assert_eq!(
+            editor.document.get(nested).unwrap().parent,
+            Some(custom_frame)
+        );
+        let NodeKind::Frame(frame) = &editor.document.get(nested).unwrap().kind else {
+            panic!("nested click should create a frame");
+        };
+        assert_eq!(
+            Vec2::new(frame.width, frame.height),
+            Vec2::splat(DEFAULT_CLICK_CREATION_SIZE)
+        );
+    }
+
+    #[test]
     fn creation_style_defaults_are_non_historical_and_tool_scoped() {
         let mut editor = Editor::new();
         let revision = editor.current_revision();
@@ -11585,9 +12194,9 @@ mod tests {
     }
 
     #[test]
-    fn click_without_drag_does_not_create_shape_or_history() {
+    fn line_click_without_drag_does_not_create_shape_or_history() {
         let mut editor = Editor::new();
-        editor.execute_action(EditorAction::ToolRectangle);
+        editor.execute_action(EditorAction::ToolLine);
 
         editor.handle_event(InputEvent::PointerDown {
             position: Vec2::splat(25.0),

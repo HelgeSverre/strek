@@ -27,7 +27,9 @@ mod workspace_preferences;
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -37,10 +39,10 @@ use editor_core::{
 };
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    DragMoveEvent, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, KeyDownEvent,
-    KeyUpEvent, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathPromptOptions, PromptLevel, ScrollWheelEvent, Window, WindowBounds,
-    WindowOptions,
+    DispatchPhase, DragMoveEvent, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding,
+    KeyDownEvent, KeyUpEvent, Menu, MenuItem, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, PromptLevel, ScrollWheelEvent, Window,
+    WindowBounds, WindowOptions,
 };
 
 const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
@@ -51,6 +53,7 @@ const MAX_AUTOMATION_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
 const MAX_INLINE_AUTOMATION_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 const WORKSPACE_PREFERENCES_DEBOUNCE: Duration = Duration::from_millis(250);
 const RECENT_FILES_DEBOUNCE: Duration = Duration::from_millis(50);
+const ARTWORK_RASTER_DEBOUNCE: Duration = Duration::from_millis(50);
 static OBJECT_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ARTWORK_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -390,6 +393,100 @@ impl ObjectClipboard {
     }
 }
 
+struct CachedArtworkSnapshot {
+    key: canvas::ArtworkCacheKey,
+    snapshot: Option<Arc<editor_core::ArtworkSnapshot>>,
+    requires_raster: bool,
+}
+
+type ArtworkRasterIdentity = canvas::ArtworkRasterIdentity;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingArtworkRaster {
+    identity: ArtworkRasterIdentity,
+    interactive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtworkRasterRequestAction {
+    Ready,
+    Wait,
+    Start,
+    Replace,
+}
+
+#[derive(Debug, Default)]
+struct ArtworkRasterScheduler {
+    desired: Option<ArtworkRasterIdentity>,
+    pending: Option<PendingArtworkRaster>,
+    failed: Option<ArtworkRasterIdentity>,
+}
+
+impl ArtworkRasterScheduler {
+    fn request(
+        &mut self,
+        identity: ArtworkRasterIdentity,
+        interactive: bool,
+        cached: bool,
+    ) -> ArtworkRasterRequestAction {
+        self.desired = Some(identity);
+        if cached {
+            self.pending = None;
+            self.failed = None;
+            return ArtworkRasterRequestAction::Ready;
+        }
+        if self.failed == Some(identity) {
+            return ArtworkRasterRequestAction::Wait;
+        }
+        if let Some(pending) = self.pending {
+            if pending.identity == identity {
+                return ArtworkRasterRequestAction::Wait;
+            }
+            if pending.interactive {
+                return ArtworkRasterRequestAction::Wait;
+            }
+            self.pending = Some(PendingArtworkRaster {
+                identity,
+                interactive,
+            });
+            self.failed = None;
+            return ArtworkRasterRequestAction::Replace;
+        }
+
+        self.pending = Some(PendingArtworkRaster {
+            identity,
+            interactive,
+        });
+        self.failed = None;
+        ArtworkRasterRequestAction::Start
+    }
+
+    fn complete(&mut self, identity: ArtworkRasterIdentity, succeeded: bool) -> bool {
+        if self.pending.map(|pending| pending.identity) != Some(identity) {
+            return false;
+        }
+        self.pending = None;
+        if self.desired != Some(identity) {
+            return false;
+        }
+        self.failed = (!succeeded).then_some(identity);
+        true
+    }
+
+    fn fail_desired(&mut self, identity: ArtworkRasterIdentity) -> bool {
+        if self.desired != Some(identity) {
+            return false;
+        }
+        self.pending = None;
+        self.failed = Some(identity);
+        true
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Main application state as a GPUI Entity.
 struct Strek {
     editor: Editor,
@@ -426,6 +523,11 @@ struct Strek {
     current_cursor: gpui::CursorStyle,
     canvas_input_bounds: Option<Bounds<gpui::Pixels>>,
     text_image_cache: canvas::TextImageCache,
+    artwork_image_cache: canvas::ArtworkImageCache,
+    artwork_snapshot_cache: Option<CachedArtworkSnapshot>,
+    artwork_raster_task: Option<gpui::Task<()>>,
+    artwork_raster_scheduler: ArtworkRasterScheduler,
+    document_epoch: u64,
     fit_artwork_on_first_layout: bool,
     did_focus: bool,
 }
@@ -478,9 +580,120 @@ impl Strek {
             current_cursor: gpui::CursorStyle::Arrow,
             canvas_input_bounds: None,
             text_image_cache: canvas::TextImageCache::default(),
+            artwork_image_cache: canvas::ArtworkImageCache::default(),
+            artwork_snapshot_cache: None,
+            artwork_raster_task: None,
+            artwork_raster_scheduler: ArtworkRasterScheduler::default(),
+            document_epoch: 0,
             fit_artwork_on_first_layout: true,
             did_focus: false,
         }
+    }
+
+    fn artwork_cache_key(&self) -> canvas::ArtworkCacheKey {
+        canvas::ArtworkCacheKey {
+            document_epoch: self.document_epoch,
+            history_revision: self.editor.current_revision(),
+            transient_revision: self.editor.transient_artwork_revision(),
+        }
+    }
+
+    fn artwork_snapshot_for_render(
+        &mut self,
+    ) -> (
+        canvas::ArtworkCacheKey,
+        Option<Arc<editor_core::ArtworkSnapshot>>,
+        bool,
+    ) {
+        let key = self.artwork_cache_key();
+        let stale = self
+            .artwork_snapshot_cache
+            .as_ref()
+            .is_none_or(|cached| cached.key != key);
+        if stale {
+            let snapshot = self.editor.artwork_snapshot().map(Arc::new);
+            let requires_raster = snapshot.as_ref().is_some_and(|snapshot| {
+                canvas::requires_rasterized_artwork(&snapshot.display_list)
+            });
+            self.artwork_snapshot_cache = Some(CachedArtworkSnapshot {
+                key,
+                snapshot,
+                requires_raster,
+            });
+        }
+        let cached = self
+            .artwork_snapshot_cache
+            .as_ref()
+            .expect("the artwork snapshot cache was populated");
+        (cached.key, cached.snapshot.clone(), cached.requires_raster)
+    }
+
+    fn ensure_artwork_raster(
+        &mut self,
+        request: canvas::ArtworkRasterRequest,
+        interactive: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let identity = request.identity();
+        let action = self.artwork_raster_scheduler.request(
+            identity,
+            interactive,
+            self.artwork_image_cache.contains(&request),
+        );
+        match action {
+            ArtworkRasterRequestAction::Ready => {
+                self.artwork_raster_task.take();
+                return;
+            }
+            ArtworkRasterRequestAction::Wait => return,
+            ArtworkRasterRequestAction::Replace => {
+                self.artwork_raster_task.take();
+            }
+            ArtworkRasterRequestAction::Start => {}
+        }
+
+        let background = cx.background_executor().clone();
+        self.artwork_raster_task = Some(cx.spawn_in(window, async move |editor, cx| {
+            if !interactive {
+                gpui::Timer::after(ARTWORK_RASTER_DEBOUNCE).await;
+            }
+            let prepared = background
+                .spawn(async move { canvas::prepare_artwork_raster(request) })
+                .await;
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    if !editor
+                        .artwork_raster_scheduler
+                        .complete(identity, prepared.is_some())
+                    {
+                        cx.notify();
+                        return;
+                    }
+                    if let Some(prepared) = prepared {
+                        editor.artwork_image_cache.install(prepared);
+                    } else {
+                        editor.show_render_error(
+                            "Could not render advanced artwork",
+                            "The bounded canvas rasterizer could not prepare this artwork. The document is unchanged and can still be exported as SVG."
+                                .to_owned(),
+                            window,
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+
+    fn clear_document_render_cache(&mut self) {
+        self.text_image_cache.clear();
+        self.artwork_image_cache.clear();
+        self.document_epoch = self.document_epoch.wrapping_add(1);
+        self.artwork_snapshot_cache = None;
+        self.artwork_raster_scheduler.clear();
+        self.artwork_raster_task.take();
     }
 
     fn document_name(&self) -> String {
@@ -688,7 +901,7 @@ impl Strek {
         self.color_library_open = false;
         self.color_library_panel = None;
         self.layer_name_input = None;
-        self.text_image_cache = canvas::TextImageCache::default();
+        self.clear_document_render_cache();
         self.fit_artwork_on_first_layout = false;
         self.current_cursor = gpui::CursorStyle::Arrow;
         self.dismiss_menus();
@@ -732,7 +945,7 @@ impl Strek {
         self.color_library_open = false;
         self.color_library_panel = None;
         self.layer_name_input = None;
-        self.text_image_cache = canvas::TextImageCache::default();
+        self.clear_document_render_cache();
         self.current_cursor = gpui::CursorStyle::Arrow;
         self.dismiss_menus();
     }
@@ -1501,6 +1714,21 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.file_operation = FileOperation::Idle;
+        let prompt = window.prompt(PromptLevel::Critical, title, Some(&detail), &["OK"], cx);
+        cx.spawn(async move |_, _| {
+            let _ = prompt.await;
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn show_render_error(
+        &mut self,
+        title: &str,
+        detail: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let prompt = window.prompt(PromptLevel::Critical, title, Some(&detail), &["OK"], cx);
         cx.spawn(async move |_, _| {
             let _ = prompt.await;
@@ -3926,6 +4154,19 @@ impl Strek {
         }
     }
 
+    fn on_canvas_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Middle-button drags are routed by a window-level listener so panning
+        // remains live after the pointer leaves the canvas hitbox.
+        if event.pressed_button != Some(MouseButton::Middle) {
+            self.on_mouse_move(event, window, cx);
+        }
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_operation == FileOperation::Opening {
             return;
@@ -4470,6 +4711,18 @@ impl Render for Strek {
             self.did_focus = true;
         }
         self.update_window_title(window);
+        if let Some(identity) = self.artwork_image_cache.take_paint_failure() {
+            if self.artwork_raster_scheduler.fail_desired(identity) {
+                self.artwork_raster_task.take();
+                self.show_render_error(
+                    "Could not display advanced artwork",
+                    "GPUI could not upload the prepared canvas image. The last successfully painted image is retained when available, the document is unchanged, and SVG export remains available."
+                        .to_owned(),
+                    window,
+                    cx,
+                );
+            }
+        }
         let tool = self.editor.tool;
         let interaction = self.editor.interaction_kind();
         let key_context = editor_key_context(
@@ -4689,6 +4942,34 @@ impl Render for Strek {
         });
         let properties_snapshot =
             properties_panel::snapshot(&mut self.editor, color_input, numeric_input);
+        let view = *self.editor.view();
+        let (artwork_key, world_snapshot, requires_raster) = self.artwork_snapshot_for_render();
+        let display_list = if requires_raster {
+            self.editor.build_overlay_display_list()
+        } else {
+            self.editor.build_display_list()
+        };
+        let interactive_raster = self.editor.has_active_artwork_gesture()
+            || self.numeric_property_scrub.is_some()
+            || !self.artwork_image_cache.has_artwork_for_key(artwork_key);
+        let artwork_snapshot = if requires_raster {
+            world_snapshot.map(|snapshot| {
+                if let Some(request) = canvas::artwork_raster_request(
+                    artwork_key,
+                    Arc::clone(&snapshot),
+                    view,
+                    window.scale_factor(),
+                    interactive_raster,
+                ) {
+                    self.ensure_artwork_raster(request, interactive_raster, window, cx);
+                }
+                artwork_key
+            })
+        } else {
+            self.artwork_raster_scheduler.clear();
+            self.artwork_raster_task.take();
+            None
+        };
         let zoom_input = self
             .zoom_input
             .as_ref()
@@ -4697,13 +4978,21 @@ impl Render for Strek {
                 invalid: input.invalid,
             });
 
-        // Build display list for canvas
-        let display_list = self.editor.build_display_list();
-
         // Build layer entries for panel
         let layer_entries = self.editor.build_layer_tree();
         let canvas_child_index = usize::from(show_layers_panel);
         let editor_entity = cx.entity().downgrade();
+        let middle_pan_entity = editor_entity.clone();
+        let middle_pan_handler: canvas::WindowMouseMoveHandler =
+            Rc::new(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.pressed_button == Some(MouseButton::Middle)
+                {
+                    middle_pan_entity
+                        .update(cx, |editor, cx| editor.on_mouse_move(event, window, cx))
+                        .ok();
+                }
+            });
         let canvas_bounds_entity = editor_entity.clone();
 
         div()
@@ -4923,6 +5212,7 @@ impl Render for Strek {
                     .child(
                         div()
                             .id("canvas")
+                            .debug_selector(|| "canvas".to_owned())
                             .relative()
                             .flex_1()
                             .overflow_hidden()
@@ -4937,7 +5227,7 @@ impl Render for Strek {
                             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
                             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
-                            .on_mouse_move(cx.listener(Self::on_mouse_move))
+                            .on_mouse_move(cx.listener(Self::on_canvas_mouse_move))
                             .on_scroll_wheel(cx.listener(Self::on_scroll))
                             // Keep the grid beneath artwork. Guides and rulers are
                             // rendered by the foreground precision overlay below.
@@ -4946,7 +5236,11 @@ impl Render for Strek {
                             ))
                             .child(canvas::render_canvas(
                                 display_list,
+                                artwork_snapshot,
+                                view,
                                 self.text_image_cache.clone(),
+                                self.artwork_image_cache.clone(),
+                                middle_pan_handler,
                             ))
                             .child(precision_ui::render_precision_overlay(precision_overlay))
                             .child(text_input::canvas_text_input(cx.entity().clone()))
@@ -5475,8 +5769,10 @@ fn core_color_sort_direction(
 }
 
 fn rgba_color_from_paint(paint: &editor_core::Paint) -> Result<editor_core::RgbaColor, String> {
-    let editor_core::Paint::Solid(rgba) = paint;
-    editor_core::RgbaColor::from_array(*rgba).map_err(|error| error.to_string())
+    let Some(rgba) = paint.solid_color() else {
+        return Err("gradient paints cannot be stored as a solid saved color".to_owned());
+    };
+    editor_core::RgbaColor::from_array(rgba).map_err(|error| error.to_string())
 }
 
 fn build_picker_saved_color_groups(
@@ -5616,7 +5912,7 @@ fn color_input_paint(
     scope: ColorInputScope,
     target: properties_panel::ColorTarget,
 ) -> Option<editor_core::Paint> {
-    match (scope, target) {
+    let paint = match (scope, target) {
         (ColorInputScope::Selection, properties_panel::ColorTarget::Fill) => editor
             .selection()
             .primary()
@@ -5654,7 +5950,8 @@ fn color_input_paint(
             })
         }
         (ColorInputScope::Creation, properties_panel::ColorTarget::FrameBackground) => None,
-    }
+    };
+    paint.filter(|paint| matches!(paint, editor_core::Paint::Solid(_)))
 }
 
 fn apply_color_input(
@@ -6237,6 +6534,7 @@ mod layout_tests {
                         editor_core::Paint::rgb(0.0, 0.0, 0.0),
                     )),
                     opacity: 1.0,
+                    ..editor_core::Style::default()
                 }),
             )
             .unwrap();
@@ -6446,6 +6744,118 @@ mod layout_tests {
             );
             assert!(strek.property_color_input.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn middle_button_pan_updates_before_mouse_up_outside_canvas(cx: &mut gpui::TestAppContext) {
+        let (strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        cx.run_until_parked();
+        let canvas = cx
+            .debug_bounds("canvas")
+            .expect("canvas should be rendered");
+        let start = gpui::point(
+            canvas.origin.x + canvas.size.width / 2.0,
+            canvas.origin.y + canvas.size.height / 2.0,
+        );
+        let end = gpui::point(canvas.origin.x - px(10.0), start.y);
+        let start_pan = cx.read(|cx| strek.read(cx).editor.view().pan);
+
+        cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Middle, gpui::Modifiers::default());
+
+        assert_eq!(
+            cx.read(|cx| strek.read(cx).editor.view().pan),
+            start_pan + glam::Vec2::new(end.x.0 - start.x.0, end.y.0 - start.y.0)
+        );
+        assert_eq!(
+            cx.read(|cx| strek.read(cx).editor.interaction_kind()),
+            editor_core::InteractionKind::Panning
+        );
+    }
+
+    fn raster_identity(revision: u64) -> ArtworkRasterIdentity {
+        (
+            canvas::ArtworkCacheKey {
+                document_epoch: 1,
+                history_revision: revision,
+                transient_revision: 0,
+            },
+            editor_core::Rect::new(glam::Vec2::ZERO, glam::Vec2::splat(100.0)),
+            256,
+            256,
+        )
+    }
+
+    #[test]
+    fn raster_scheduler_rejects_stale_completion_after_cached_undo() {
+        let mut scheduler = ArtworkRasterScheduler::default();
+        let a = raster_identity(1);
+        let b = raster_identity(2);
+
+        assert_eq!(
+            scheduler.request(a, false, false),
+            ArtworkRasterRequestAction::Start
+        );
+        assert!(scheduler.complete(a, true));
+        assert_eq!(
+            scheduler.request(b, false, false),
+            ArtworkRasterRequestAction::Start
+        );
+        assert_eq!(
+            scheduler.request(a, false, true),
+            ArtworkRasterRequestAction::Ready
+        );
+        assert!(!scheduler.complete(b, true));
+    }
+
+    #[test]
+    fn raster_scheduler_replaces_settled_work_but_coalesces_interactive_work() {
+        let mut scheduler = ArtworkRasterScheduler::default();
+        let settled = raster_identity(1);
+        let interactive = raster_identity(2);
+        let latest = raster_identity(3);
+
+        assert_eq!(
+            scheduler.request(settled, false, false),
+            ArtworkRasterRequestAction::Start
+        );
+        assert_eq!(
+            scheduler.request(interactive, true, false),
+            ArtworkRasterRequestAction::Replace
+        );
+        assert_eq!(
+            scheduler.request(latest, true, false),
+            ArtworkRasterRequestAction::Wait
+        );
+        assert!(!scheduler.complete(interactive, false));
+        assert_eq!(scheduler.failed, None);
+        assert_eq!(scheduler.desired, Some(latest));
+        assert_eq!(
+            scheduler.request(latest, true, false),
+            ArtworkRasterRequestAction::Start
+        );
+    }
+
+    #[test]
+    fn raster_scheduler_marks_a_rejected_upload_as_failed() {
+        let mut scheduler = ArtworkRasterScheduler::default();
+        let identity = raster_identity(1);
+
+        assert_eq!(
+            scheduler.request(identity, false, false),
+            ArtworkRasterRequestAction::Start
+        );
+        assert!(scheduler.complete(identity, true));
+        assert_eq!(
+            scheduler.request(identity, false, true),
+            ArtworkRasterRequestAction::Ready
+        );
+        assert!(scheduler.fail_desired(identity));
+        assert_eq!(scheduler.failed, Some(identity));
+        assert_eq!(
+            scheduler.request(identity, false, false),
+            ArtworkRasterRequestAction::Wait
+        );
     }
 
     #[test]

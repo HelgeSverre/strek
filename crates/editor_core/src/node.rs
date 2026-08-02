@@ -4,7 +4,7 @@ use slotmap::{new_key_type, Key, KeyData};
 
 use crate::layout::AutoLayout;
 use crate::path::PathData;
-use crate::style::{Paint, Style};
+use crate::style::{FillRule, Paint, Style};
 
 // Generate a new key type for node IDs using slotmap's generational arena
 new_key_type! {
@@ -233,6 +233,33 @@ pub struct FrameData {
     pub background: Option<Paint>,
 }
 
+/// One path participating in a node's clip region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipShape {
+    pub path: PathData,
+    #[serde(default)]
+    pub transform: Affine2,
+    #[serde(default)]
+    pub fill_rule: FillRule,
+}
+
+/// One node in a clip-path subtree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ClipNode {
+    Group(ClipPath),
+    Shape(ClipShape),
+}
+
+/// A clip region applied to a node and its descendants.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClipPath {
+    #[serde(default)]
+    pub transform: Affine2,
+    pub children: Vec<ClipNode>,
+    #[serde(default)]
+    pub clip_path: Option<Box<ClipPath>>,
+}
+
 fn default_frame_background() -> Option<Paint> {
     Some(Paint::white())
 }
@@ -322,6 +349,10 @@ pub struct Node {
     /// Visual style (fill, stroke, opacity)
     pub style: Style,
 
+    /// Optional clip region in this node's local coordinate system.
+    #[serde(default)]
+    pub clip_path: Option<ClipPath>,
+
     /// Layout mode (free or auto-layout)
     pub layout: Layout,
 
@@ -347,6 +378,7 @@ impl Node {
             kind: NodeKind::Group,
             transform: Affine2::IDENTITY,
             style: Style::default(),
+            clip_path: None,
             layout: Layout::Free,
             visible: true,
             locked: false,
@@ -363,6 +395,7 @@ impl Node {
             kind: NodeKind::Shape(path),
             transform: Affine2::IDENTITY,
             style: Style::default(),
+            clip_path: None,
             layout: Layout::Free,
             visible: true,
             locked: false,
@@ -382,6 +415,7 @@ impl Node {
             }),
             transform: Affine2::IDENTITY,
             style: Style::default(),
+            clip_path: None,
             layout: Layout::Free,
             visible: true,
             locked: false,
@@ -398,6 +432,7 @@ impl Node {
             kind: NodeKind::Frame(FrameData::new(width, height)),
             transform: Affine2::IDENTITY,
             style: Style::default(),
+            clip_path: None,
             layout: Layout::Free,
             visible: true,
             locked: false,
@@ -474,6 +509,12 @@ impl Node {
     /// Set the style.
     pub fn with_style(mut self, style: Style) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Set the clip region applied to this node and its descendants.
+    pub fn with_clip_path(mut self, clip_path: ClipPath) -> Self {
+        self.clip_path = Some(clip_path);
         self
     }
 

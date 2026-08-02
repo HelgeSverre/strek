@@ -55,8 +55,8 @@ pub enum Patch {
     /// Change a node's style
     SetStyle {
         id: NodeId,
-        before: Style,
-        after: Style,
+        before: Box<Style>,
+        after: Box<Style>,
     },
 
     /// Change a shape's path data
@@ -157,7 +157,7 @@ impl Patch {
 
             Patch::SetStyle { id, after, .. } => {
                 if let Some(node) = doc.nodes.get_mut(*id) {
-                    node.style = after.clone();
+                    node.style.clone_from(after);
                 }
                 doc.mark_bounds_dirty(*id);
             }
@@ -316,7 +316,7 @@ impl Patch {
 
             Patch::SetStyle { id, before, .. } => {
                 if let Some(node) = doc.nodes.get_mut(*id) {
-                    node.style = before.clone();
+                    node.style.clone_from(before);
                 }
                 doc.mark_bounds_dirty(*id);
             }

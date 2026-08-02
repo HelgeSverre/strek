@@ -282,26 +282,45 @@ impl PathData {
 
     /// Test whether a point lies inside the path using the even-odd fill rule.
     pub fn contains_point(&self, point: Vec2) -> bool {
-        let mut inside = false;
+        self.contains_point_with_rule(point, crate::FillRule::EvenOdd)
+    }
+
+    /// Test whether a point lies inside the path using an explicit fill rule.
+    pub fn contains_point_with_rule(&self, point: Vec2, fill_rule: crate::FillRule) -> bool {
+        let mut crossings = 0_i32;
 
         for contour in &self.contours {
-            if !contour.closed {
-                continue;
+            let mut points = flatten_contour(contour, 0.25);
+            // SVG fill and clip geometry implicitly closes every open subpath.
+            // Stroke distance continues to use the authored open contour.
+            if points.len() >= 3 && points.first() != points.last() {
+                points.push(points[0]);
             }
-            let points = flatten_contour(contour, 0.25);
             for pair in points.windows(2) {
                 let a = pair[0];
                 let b = pair[1];
-                if (a.y > point.y) != (b.y > point.y) {
-                    let intersection_x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
-                    if point.x < intersection_x {
-                        inside = !inside;
+                match fill_rule {
+                    crate::FillRule::EvenOdd => {
+                        if (a.y > point.y) != (b.y > point.y) {
+                            let intersection_x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
+                            if point.x < intersection_x {
+                                crossings ^= 1;
+                            }
+                        }
+                    }
+                    crate::FillRule::NonZero => {
+                        let side = (b.x - a.x) * (point.y - a.y) - (point.x - a.x) * (b.y - a.y);
+                        if a.y <= point.y && b.y > point.y && side > 0.0 {
+                            crossings += 1;
+                        } else if a.y > point.y && b.y <= point.y && side < 0.0 {
+                            crossings -= 1;
+                        }
                     }
                 }
             }
         }
 
-        inside
+        crossings != 0
     }
 
     /// Distance from a point to the nearest flattened path segment.
@@ -542,6 +561,16 @@ impl Rect {
             && self.max.y >= other.min.y
     }
 
+    /// Check if this rect fully encloses another rect, including shared edges.
+    pub fn contains_rect(&self, other: &Rect) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && self.min.x <= other.min.x
+            && self.min.y <= other.min.y
+            && self.max.x >= other.max.x
+            && self.max.y >= other.max.y
+    }
+
     /// Calculate the intersection of two rects, if any.
     pub fn intersection(&self, other: &Rect) -> Option<Rect> {
         if !self.intersects(other) {
@@ -604,6 +633,39 @@ mod tests {
     }
 
     #[test]
+    fn compound_path_hit_testing_respects_fill_rule() {
+        let path = PathData::from_commands(&[
+            PathCmd::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCmd::LineTo(Vec2::new(10.0, 0.0)),
+            PathCmd::LineTo(Vec2::new(10.0, 10.0)),
+            PathCmd::LineTo(Vec2::new(0.0, 10.0)),
+            PathCmd::Close,
+            PathCmd::MoveTo(Vec2::new(2.0, 2.0)),
+            PathCmd::LineTo(Vec2::new(8.0, 2.0)),
+            PathCmd::LineTo(Vec2::new(8.0, 8.0)),
+            PathCmd::LineTo(Vec2::new(2.0, 8.0)),
+            PathCmd::Close,
+        ]);
+
+        assert!(path.contains_point_with_rule(Vec2::splat(5.0), crate::FillRule::NonZero));
+        assert!(!path.contains_point_with_rule(Vec2::splat(5.0), crate::FillRule::EvenOdd));
+    }
+
+    #[test]
+    fn fill_hit_testing_implicitly_closes_open_contours() {
+        let triangle = PathData {
+            contours: vec![PathContour::open([
+                PathAnchor::corner(Vec2::new(0.0, 0.0)),
+                PathAnchor::corner(Vec2::new(10.0, 0.0)),
+                PathAnchor::corner(Vec2::new(10.0, 10.0)),
+            ])],
+        };
+
+        assert!(triangle.contains_point_with_rule(Vec2::new(8.0, 2.0), crate::FillRule::NonZero));
+        assert!(!triangle.contains_point_with_rule(Vec2::new(2.0, 8.0), crate::FillRule::NonZero));
+    }
+
+    #[test]
     fn legacy_commands_deserialize_into_contours() {
         let json = r#"{"commands":[{"MoveTo":[0.0,0.0]},{"LineTo":[10.0,0.0]},{"LineTo":[10.0,10.0]},"Close"]}"#;
         let path: PathData = serde_json::from_str(json).unwrap();
@@ -618,5 +680,8 @@ mod tests {
         let rect = Rect::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0));
         assert!(rect.contains(Vec2::new(50.0, 50.0)));
         assert!(!rect.contains(Vec2::new(150.0, 50.0)));
+        assert!(rect.contains_rect(&Rect::new(Vec2::ZERO, Vec2::splat(100.0))));
+        assert!(rect.contains_rect(&Rect::new(Vec2::splat(25.0), Vec2::splat(75.0))));
+        assert!(!rect.contains_rect(&Rect::new(Vec2::new(-1.0, 25.0), Vec2::splat(75.0),)));
     }
 }

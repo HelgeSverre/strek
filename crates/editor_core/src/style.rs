@@ -1,10 +1,61 @@
+use glam::{Affine2, Vec2};
 use serde::{Deserialize, Serialize};
+
+/// How colors outside a gradient's 0-1 range are extended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SpreadMethod {
+    /// Extend the first and last stop colors.
+    #[default]
+    Pad,
+    /// Mirror the gradient on every repetition.
+    Reflect,
+    /// Repeat the gradient on every repetition.
+    Repeat,
+}
+
+/// A color stop in a gradient.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    /// Stop position in the normalized 0-1 gradient range.
+    pub offset: f32,
+    /// Stop color [R, G, B, A] in the 0.0-1.0 range.
+    pub color: [f32; 4],
+}
+
+/// A linear gradient in the painted node's local coordinate system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearGradient {
+    pub start: Vec2,
+    pub end: Vec2,
+    #[serde(default)]
+    pub transform: Affine2,
+    #[serde(default)]
+    pub spread: SpreadMethod,
+    pub stops: Vec<GradientStop>,
+}
+
+/// A radial gradient in the painted node's local coordinate system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RadialGradient {
+    pub center: Vec2,
+    pub focal: Vec2,
+    pub radius: f32,
+    #[serde(default)]
+    pub transform: Affine2,
+    #[serde(default)]
+    pub spread: SpreadMethod,
+    pub stops: Vec<GradientStop>,
+}
 
 /// Paint defines how a shape is filled or stroked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Paint {
     /// Solid color [R, G, B, A] in 0.0-1.0 range
     Solid([f32; 4]),
+    /// Linear gradient paint.
+    LinearGradient(LinearGradient),
+    /// Radial gradient paint.
+    RadialGradient(RadialGradient),
 }
 
 impl Paint {
@@ -27,6 +78,14 @@ impl Paint {
     pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Paint::Solid([r, g, b, a])
     }
+
+    /// Return this paint's color when it is solid.
+    pub fn solid_color(&self) -> Option<[f32; 4]> {
+        match self {
+            Self::Solid(color) => Some(*color),
+            Self::LinearGradient(_) | Self::RadialGradient(_) => None,
+        }
+    }
 }
 
 impl Default for Paint {
@@ -43,12 +102,59 @@ pub struct Stroke {
 
     /// Stroke paint
     pub paint: Paint,
+
+    /// Shape drawn at the ends of open subpaths.
+    #[serde(default)]
+    pub line_cap: LineCap,
+
+    /// Shape drawn where path segments meet.
+    #[serde(default)]
+    pub line_join: LineJoin,
+
+    /// Maximum ratio between miter length and stroke width.
+    #[serde(default = "default_miter_limit")]
+    pub miter_limit: f32,
+
+    /// Alternating dash and gap lengths. Empty means a solid stroke.
+    #[serde(default)]
+    pub dash_array: Vec<f32>,
+
+    /// Offset into the dash pattern.
+    #[serde(default)]
+    pub dash_offset: f32,
+}
+
+fn default_miter_limit() -> f32 {
+    4.0
+}
+
+/// Shape drawn at the ends of open stroked subpaths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LineCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// Shape drawn where stroked path segments meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    MiterClip,
+    Round,
+    Bevel,
 }
 
 impl Stroke {
     /// Create a new stroke with given width and paint.
     pub fn new(width: f32, paint: Paint) -> Self {
-        Self { width, paint }
+        Self {
+            width,
+            paint,
+            ..Self::default()
+        }
     }
 
     /// Create a black stroke with given width.
@@ -56,6 +162,7 @@ impl Stroke {
         Self {
             width,
             paint: Paint::black(),
+            ..Self::default()
         }
     }
 }
@@ -65,8 +172,29 @@ impl Default for Stroke {
         Self {
             width: 1.0,
             paint: Paint::black(),
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+            miter_limit: default_miter_limit(),
+            dash_array: Vec::new(),
+            dash_offset: 0.0,
         }
     }
+}
+
+/// Rule used to decide which regions of a path are filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
+/// Ordering of a path's fill and stroke paints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PaintOrder {
+    #[default]
+    FillAndStroke,
+    StrokeAndFill,
 }
 
 /// Visual style for a node.
@@ -80,6 +208,14 @@ pub struct Style {
 
     /// Overall opacity (0.0 - 1.0)
     pub opacity: f32,
+
+    /// Rule used when filling compound paths.
+    #[serde(default)]
+    pub fill_rule: FillRule,
+
+    /// Whether the fill or stroke is painted first.
+    #[serde(default)]
+    pub paint_order: PaintOrder,
 }
 
 impl Style {
@@ -89,6 +225,8 @@ impl Style {
             fill: Some(paint),
             stroke: None,
             opacity: 1.0,
+            fill_rule: FillRule::NonZero,
+            paint_order: PaintOrder::FillAndStroke,
         }
     }
 
@@ -98,6 +236,8 @@ impl Style {
             fill: None,
             stroke: Some(stroke),
             opacity: 1.0,
+            fill_rule: FillRule::NonZero,
+            paint_order: PaintOrder::FillAndStroke,
         }
     }
 
@@ -107,6 +247,8 @@ impl Style {
             fill: Some(fill),
             stroke: Some(stroke),
             opacity: 1.0,
+            fill_rule: FillRule::NonZero,
+            paint_order: PaintOrder::FillAndStroke,
         }
     }
 }
@@ -117,6 +259,8 @@ impl Default for Style {
             fill: Some(Paint::black()),
             stroke: None,
             opacity: 1.0,
+            fill_rule: FillRule::NonZero,
+            paint_order: PaintOrder::FillAndStroke,
         }
     }
 }

@@ -1518,7 +1518,18 @@ fn horizontal_fraction(point: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
 }
 
 pub(crate) fn format_paint(paint: &Paint) -> String {
-    let channels = normalized_paint_channels(paint).map(|channel| (channel * 255.0).round() as u8);
+    let Paint::Solid(channels) = paint else {
+        return match paint {
+            Paint::LinearGradient(gradient) => {
+                format!("Linear gradient ({} stops)", gradient.stops.len())
+            }
+            Paint::RadialGradient(gradient) => {
+                format!("Radial gradient ({} stops)", gradient.stops.len())
+            }
+            Paint::Solid(_) => unreachable!("solid paint handled above"),
+        };
+    };
+    let channels = normalize_channels(*channels).map(|channel| (channel * 255.0).round() as u8);
     if channels[3] == u8::MAX {
         format!("#{:02X}{:02X}{:02X}", channels[0], channels[1], channels[2])
     } else {
@@ -1639,13 +1650,24 @@ fn append_hex_input(value: &mut String, text: &str) {
 }
 
 fn paint_channels(paint: &Paint) -> [f32; 4] {
-    let Paint::Solid(channels) = paint;
-    *channels
+    match paint {
+        Paint::Solid(channels) => *channels,
+        Paint::LinearGradient(gradient) => gradient
+            .stops
+            .first()
+            .map_or([0.0, 0.0, 0.0, 1.0], |stop| stop.color),
+        Paint::RadialGradient(gradient) => gradient
+            .stops
+            .first()
+            .map_or([0.0, 0.0, 0.0, 1.0], |stop| stop.color),
+    }
 }
 
 fn normalize_paint(paint: Paint) -> Paint {
-    let Paint::Solid(channels) = paint;
-    Paint::Solid(normalize_channels(channels))
+    match paint {
+        Paint::Solid(channels) => Paint::Solid(normalize_channels(channels)),
+        gradient @ (Paint::LinearGradient(_) | Paint::RadialGradient(_)) => gradient,
+    }
 }
 
 fn normalized_paint_channels(paint: &Paint) -> [f32; 4] {
@@ -1883,6 +1905,25 @@ mod tests {
     fn paint_format_omits_opaque_alpha_and_preserves_transparency() {
         assert_eq!(format_paint(&Paint::rgb(1.0, 0.5, 0.0)), "#FF8000");
         assert_eq!(format_paint(&Paint::rgba(0.2, 0.4, 0.6, 0.5)), "#33669980");
+        assert_eq!(
+            format_paint(&Paint::LinearGradient(editor_core::LinearGradient {
+                start: glam::Vec2::ZERO,
+                end: glam::Vec2::X,
+                transform: glam::Affine2::IDENTITY,
+                spread: editor_core::SpreadMethod::Pad,
+                stops: vec![
+                    editor_core::GradientStop {
+                        offset: 0.0,
+                        color: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    editor_core::GradientStop {
+                        offset: 1.0,
+                        color: [0.0, 0.0, 1.0, 1.0],
+                    },
+                ],
+            })),
+            "Linear gradient (2 stops)"
+        );
     }
 
     #[test]

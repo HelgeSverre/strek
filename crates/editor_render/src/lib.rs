@@ -6,7 +6,7 @@
 use glam::{Affine2, Vec2};
 
 /// A list of display items to render.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DisplayList {
     pub items: Vec<DisplayItem>,
 }
@@ -39,12 +39,26 @@ impl DisplayList {
 }
 
 /// A single item to render.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DisplayItem {
+    /// Begin an isolated artwork group.
+    ///
+    /// Group opacity is applied after its children are composited. An optional
+    /// clip path is expressed in the same screen-space coordinate system as
+    /// the group's child display items.
+    BeginGroup {
+        opacity: f32,
+        clip_path: Option<ClipPath>,
+    },
+
+    /// Finish the most recently opened artwork group.
+    EndGroup,
+
     /// Fill a path with a paint.
     FillPath {
         path: PathData,
         paint: Paint,
+        fill_rule: FillRule,
         transform: Affine2,
         opacity: f32,
     },
@@ -117,7 +131,7 @@ pub enum DisplayItem {
 }
 
 /// Path data for rendering.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PathData {
     pub commands: Vec<PathCmd>,
 }
@@ -197,6 +211,10 @@ pub enum PathCmd {
 pub enum Paint {
     /// Solid color [R, G, B, A] in 0.0-1.0 range
     Solid([f32; 4]),
+    /// Linear gradient paint.
+    LinearGradient(LinearGradient),
+    /// Radial gradient paint.
+    RadialGradient(RadialGradient),
 }
 
 impl Paint {
@@ -218,6 +236,14 @@ impl Paint {
     /// Create a solid color from RGBA values.
     pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Paint::Solid([r, g, b, a])
+    }
+
+    /// Return this paint's color when it is solid.
+    pub fn solid_color(&self) -> Option<[f32; 4]> {
+        match self {
+            Self::Solid(color) => Some(*color),
+            Self::LinearGradient(_) | Self::RadialGradient(_) => None,
+        }
     }
 }
 
@@ -241,6 +267,15 @@ pub struct Stroke {
 
     /// Line join style
     pub line_join: LineJoin,
+
+    /// Maximum ratio between miter length and stroke width.
+    pub miter_limit: f32,
+
+    /// Alternating dash and gap lengths. Empty means a solid stroke.
+    pub dash_array: Vec<f32>,
+
+    /// Offset into the dash pattern.
+    pub dash_offset: f32,
 }
 
 impl Stroke {
@@ -251,6 +286,9 @@ impl Stroke {
             paint,
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
+            miter_limit: 4.0,
+            dash_array: Vec::new(),
+            dash_offset: 0.0,
         }
     }
 
@@ -267,6 +305,9 @@ impl Default for Stroke {
             paint: Paint::black(),
             line_cap: LineCap::Butt,
             line_join: LineJoin::Miter,
+            miter_limit: 4.0,
+            dash_array: Vec::new(),
+            dash_offset: 0.0,
         }
     }
 }
@@ -285,8 +326,76 @@ pub enum LineCap {
 pub enum LineJoin {
     #[default]
     Miter,
+    MiterClip,
     Round,
     Bevel,
+}
+
+/// Rule used to decide which regions of a path are filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
+/// How colors outside a gradient's 0-1 range are extended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpreadMethod {
+    #[default]
+    Pad,
+    Reflect,
+    Repeat,
+}
+
+/// A color stop in a gradient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: [f32; 4],
+}
+
+/// Linear gradient in the painted path's local coordinate system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    pub start: Vec2,
+    pub end: Vec2,
+    pub transform: Affine2,
+    pub spread: SpreadMethod,
+    pub stops: Vec<GradientStop>,
+}
+
+/// Radial gradient in the painted path's local coordinate system.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialGradient {
+    pub center: Vec2,
+    pub focal: Vec2,
+    pub radius: f32,
+    pub transform: Affine2,
+    pub spread: SpreadMethod,
+    pub stops: Vec<GradientStop>,
+}
+
+/// One path participating in a clip region.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipShape {
+    pub path: PathData,
+    pub transform: Affine2,
+    pub fill_rule: FillRule,
+}
+
+/// One node in a clip-path subtree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipNode {
+    Group(ClipPath),
+    Shape(ClipShape),
+}
+
+/// A clip region applied to an artwork group.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClipPath {
+    pub children: Vec<ClipNode>,
+    pub clip_path: Option<Box<ClipPath>>,
 }
 
 /// Horizontal text alignment.
@@ -322,7 +431,7 @@ pub struct ResolvedTextLayout {
 }
 
 /// Text item for rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextItem {
     /// Text content
     pub content: String,
@@ -409,6 +518,7 @@ mod tests {
         list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 100.0, 100.0),
             paint: Paint::black(),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::IDENTITY,
             opacity: 1.0,
         });

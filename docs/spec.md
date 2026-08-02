@@ -270,6 +270,9 @@ pub struct Node {
     /// Visual style (fill, stroke, opacity)
     pub style: Style,
 
+    /// Optional recursive vector clip in local coordinates
+    pub clip_path: Option<ClipPath>,
+
     /// Layout mode (free or auto-layout)
     pub layout: Layout,
 
@@ -459,6 +462,12 @@ pub struct Style {
 
     /// Overall opacity (0.0 - 1.0)
     pub opacity: f32,
+
+    /// Compound-path fill rule
+    pub fill_rule: FillRule,
+
+    /// Whether fill or stroke paints first
+    pub paint_order: PaintOrder,
 }
 
 impl Default for Style {
@@ -467,6 +476,8 @@ impl Default for Style {
             fill: Some(Paint::Solid([0.0, 0.0, 0.0, 1.0])),
             stroke: None,
             opacity: 1.0,
+            fill_rule: FillRule::NonZero,
+            paint_order: PaintOrder::FillAndStroke,
         }
     }
 }
@@ -479,8 +490,8 @@ impl Default for Style {
 pub enum Paint {
     /// Solid color [R, G, B, A] in 0.0-1.0 range
     Solid([f32; 4]),
-
-    // Future: LinearGradient, RadialGradient, Pattern
+    LinearGradient(LinearGradient),
+    RadialGradient(RadialGradient),
 }
 ```
 
@@ -494,8 +505,11 @@ pub struct Stroke {
 
     /// Stroke paint
     pub paint: Paint,
-
-    // Future: line cap, line join, dash pattern
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
+    pub miter_limit: f32,
+    pub dash_array: Vec<f32>,
+    pub dash_offset: f32,
 }
 ```
 
@@ -935,9 +949,15 @@ pub struct DisplayList {
 
 #[derive(Debug, Clone)]
 pub enum DisplayItem {
+    BeginGroup {
+        opacity: f32,
+        clip_path: Option<ClipPath>,
+    },
+    EndGroup,
     FillPath {
         path: PathData,
         paint: Paint,
+        fill_rule: FillRule,
         transform: Affine2,
         opacity: f32,
     },
@@ -952,7 +972,7 @@ pub enum DisplayItem {
         transform: Affine2,
         opacity: f32,
     },
-    // Future: explicit masks, blend modes, filters
+    // Future: masks, blend modes, filters
 }
 
 #[derive(Debug, Clone)]
@@ -968,129 +988,31 @@ pub struct TextItem {
 
 ### 11.2 Display List Generation
 
-```rust
-impl Document {
-    pub fn build_display_list(&mut self, view: &View) -> DisplayList {
-        let mut items = Vec::new();
-
-        for id in self.paint_order() {
-            let node = &self.nodes[id];
-            if !node.visible {
-                continue;
-            }
-
-            let world_transform = self.world_transform(id);
-            let screen_transform = view.screen_from_world() * world_transform;
-            let opacity = self.compute_opacity_chain(id);
-
-            match &node.kind {
-                NodeKind::Group => {
-                    // Groups don't render directly (children handle it)
-                }
-                NodeKind::Frame(frame) => {
-                    // Render background if present
-                    if let Some(bg) = &frame.background {
-                        items.push(DisplayItem::FillPath {
-                            path: PathData::rect(frame.width, frame.height),
-                            paint: bg.clone(),
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
-                    // Frames are unclipped artboards.
-                }
-                NodeKind::Shape(path) => {
-                    if let Some(fill) = &node.style.fill {
-                        items.push(DisplayItem::FillPath {
-                            path: path.clone(),
-                            paint: fill.clone(),
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
-                    if let Some(stroke) = &node.style.stroke {
-                        items.push(DisplayItem::StrokePath {
-                            path: path.clone(),
-                            stroke: stroke.clone(),
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
-                }
-                NodeKind::Text(text) => {
-                    if let Some(fill) = &node.style.fill {
-                        items.push(DisplayItem::Text {
-                            text: TextItem {
-                                content: text.content.clone(),
-                                font_family: text.font.family.clone(),
-                                font_size: text.font_size,
-                                font_weight: text.font.weight,
-                                font_italic: text.font.italic,
-                                fill: fill.clone(),
-                            },
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
-                }
-            }
-        }
-
-        DisplayList { items }
-    }
-}
-```
+`Document::build_display_list` performs an iterative depth-first traversal so
+hidden containers suppress their descendants without depending on recursive
+stack depth. Nodes with opacity or clipping emit balanced `BeginGroup` and
+`EndGroup` items. Their artwork items use unit opacity, preserving post-composite
+group opacity instead of multiplying opacity into each fill and stroke. Paths
+carry fill rules, paint order determines item order, and clip geometry is
+resolved into screen space with the rest of the display list.
 
 ### 11.3 SVG Backend (`render_svg`)
 
 For file export and interchange:
 
 ```rust
-pub fn to_svg_string(display_list: &DisplayList) -> String {
-    let mut svg = String::new();
-
-    for (index, item) in display_list.items.iter().enumerate() {
-        match item {
-            DisplayItem::FillPath { path, paint, transform, opacity } => {
-                let d = path_to_d_attribute(path);
-                let fill = paint_to_css(paint);
-                let matrix = transform_to_matrix(transform);
-                svg.push_str(&format!(
-                    r#"<path data-node-id="{}" d="{}" fill="{}" opacity="{}" transform="{}"/>"#,
-                    index, d, fill, opacity, matrix
-                ));
-            }
-            DisplayItem::Text { text, transform, opacity } => {
-                let fill = paint_to_css(&text.fill);
-                let matrix = transform_to_matrix(transform);
-                svg.push_str(&format!(
-                    r#"<text data-node-id="{}" font-family="{}" font-size="{}" fill="{}" opacity="{}" transform="{}">{}</text>"#,
-                    index, text.font_family, text.font_size, fill, opacity, matrix,
-                    html_escape(&text.content)
-                ));
-            }
-            // ... stroke, etc.
-        }
-    }
-
-    svg
-}
-
-fn path_to_d_attribute(path: &PathData) -> String {
-    let mut d = String::new();
-    for cmd in &path.commands {
-        match cmd {
-            PathCmd::MoveTo(p) => write!(d, "M{} {} ", p.x, p.y).unwrap(),
-            PathCmd::LineTo(p) => write!(d, "L{} {} ", p.x, p.y).unwrap(),
-            PathCmd::CubicTo { c1, c2, p } => {
-                write!(d, "C{} {} {} {} {} {} ", c1.x, c1.y, c2.x, c2.y, p.x, p.y).unwrap()
-            }
-            PathCmd::Close => d.push_str("Z "),
-        }
-    }
-    d
-}
+pub fn to_svg_string(display_list: &DisplayList, width: f32, height: f32) -> String;
+pub fn to_svg_string_export(display_list: &DisplayList, width: f32, height: f32) -> String;
+pub fn to_svg_string_export_with_view_box(
+    display_list: &DisplayList,
+    view_min: Vec2,
+    size: Vec2,
+) -> String;
 ```
+
+The backend writes gradient and clip definitions, isolated groups, fill rules,
+full stroke geometry, and text. Editor-only overlays are collected separately so
+they paint above artwork in the canvas SVG and are omitted from exports.
 
 ---
 
@@ -1292,10 +1214,11 @@ display list.
 
 ### 14.1 Native Format (JSON)
 
-The current native format is version 3, stored as pretty-printed JSON with the
+The current native format is version 4, stored as pretty-printed JSON with the
 `.strek.json` extension. It persists the scene graph, grid, guides, and document
-Color Library while excluding runtime editor state. The format is not stable
-yet and is not a public interchange contract. See
+Color Library, including gradient paints, advanced strokes, fill rules, paint
+order, and vector clip paths, while excluding runtime editor state. The format
+is not stable yet and is not a public interchange contract. See
 [`file-format.md`](file-format.md) for the current representation, migrations,
 validation rules, and compatibility warning.
 
@@ -1323,20 +1246,46 @@ backend-neutral display-list contract.
 ### 14.3 SVG Import
 
 The native frontend can open `.svg` files by converting a deliberately limited
-subset into editable document nodes. Supported source elements are groups,
-paths, rectangles, circles, ellipses, lines, polylines, and polygons. The
-conversion preserves affine transforms, visibility, solid fills and strokes,
-and per-fill or per-stroke opacity. Shape primitives and quadratic path segments
-become native path commands.
+subset into editable document nodes. The conversion preserves root viewport
+dimensions and viewBox mapping, affine transforms, visibility, solid and
+linear/radial gradient paints, paint opacity, isolated object/group opacity,
+clipping, compound fill rules, paint order, and advanced stroke geometry. Shape
+primitives and quadratic path segments become native cubic paths. CSS without
+the unsupported features below, links, switches, reuse and symbol content,
+nested SVG, and markers are accepted after `usvg` normalization. CSS type, class,
+and ID compound selectors may contain at most one descendant combinator; selector
+matching is charged against candidate attribute bytes and pre-normalization work
+limits. Other combinators, attribute selectors, and pseudo-classes are rejected
+before matching. CSS becomes visual native nodes rather than a structural round
+trip. Link behavior and metadata are not retained. Text is flattened through installed or fallback
+system fonts and imported as path-editable outlines, not semantic text.
+
+Gradient, advanced-stroke, and clip values are persisted and rendered but do not
+yet have dedicated native editing controls. Advanced GPUI artwork uses a bounded
+world-space software-raster cache; simple solid artwork keeps native path
+rendering. Every new artwork revision and active geometry scrub gets an immediate
+preview limited to 4,096 pixels per axis and 1,000,000 pixels total. Settled renders use a
+50 ms trailing-edge delay and are limited to 16,384 pixels per axis and
+16,000,000 pixels total. These limits are about 4 MB and 64 MB of RGBA pixels;
+artwork beyond either limit is proportionally downsampled. Density follows
+power-of-two zoom/display-scale tiers; CPU rasterization runs off the UI thread.
+The cache retains one active image and at most one rollback image until a
+replacement paints successfully, for a transient two-settled-image ceiling of
+about 128 MB, and clears both on document replacement. Pan and zoom reuse the
+world-space image, and selection/tool overlays remain native. Dashed-stroke hit
+testing currently treats dash gaps as part of the continuous stroke centerline.
 
 Import is strict: the entire operation fails with a descriptive error when the
 source contains a feature Strek cannot represent faithfully. Unsupported
-features include text, images, gradients, patterns, clipping, masks, filters,
-markers, nested SVG documents, CSS style blocks, even-odd fills, dashed strokes,
-object/group opacity, and advanced stroke caps, joins, or paint order. Imports
-also enforce bounded nesting, node counts, path segments, and geometry attribute
-sizes before native document construction. This avoids silently producing
-artwork that differs from the source or accepting unreasonable conversion work.
+features include images, patterns, masks, filters, blend modes and isolation,
+non-scaling strokes, context-dependent paints, CSS at-rules, SVG 2 radial focal
+radii, arcs joins, and non-sRGB gradient interpolation. External resource
+references and duplicate, ambiguous, missing, wrong-typed, or cyclic local
+resource references fail before normalization. Imports also enforce bounded
+nesting, normalization expansion, node counts, path segments, text, gradient
+stops, dash values, and geometry attribute sizes before native document
+construction. This avoids silently producing artwork that differs from the
+source or accepting unreasonable conversion work.
 
 SVG is an interchange format, not a native save format. A successful import is
 treated as an unsaved native document: Save prompts for a `.strek.json`
@@ -1438,6 +1387,7 @@ intentional product backlog.
 - [x] Rectangle tool with constrained and centered drawing
 - [x] Ellipse tool with constrained and centered drawing
 - [x] Line tool with 45-degree and centered drawing
+- [x] Click-to-create defaults: 100 × 100 closed shapes; frames use 100 × 100 initially/nested and remember the last top-level frame size
 - [x] Pen tool with anchor and handle editing
 - [x] Text tool with point and fixed-width creation
 - [x] Context bar with per-tool fill and stroke creation defaults
@@ -1490,7 +1440,8 @@ Important next candidates:
 
 Nice-to-have candidates:
 
-- Gradients and advanced stroke controls such as caps, joins, and dash patterns
+- Native editing controls for gradients and advanced strokes; import, rendering,
+  persistence, and export support already exist
 - Actual cross-axis stretch and size constraints in auto layout
 
 ### Implemented: Canvas precision controls
@@ -1543,10 +1494,10 @@ collection may remain a snap target, but the precision popover must make that
 state explicit. Rulers and the grid use a fixed document origin of `(0, 0)` in
 version one.
 
-The native format is version 3.
-Version 1 and 2 files load with default grid settings and no guides. Validation
-must reject non-finite positions, invalid spacing, duplicate IDs, and more than
-10,000 guides.
+The current native format is version 4; precision metadata was introduced in
+version 3. Version 1 and 2 files load with default grid settings and no guides.
+Validation must reject non-finite positions, invalid spacing, duplicate IDs, and
+more than 10,000 guides.
 
 #### Grid and ruler rendering
 

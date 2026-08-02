@@ -1,6 +1,6 @@
 [package]
 name = "strek"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Native vector editor for logos and icons"
@@ -27,6 +27,7 @@ roxmltree = "0.20"
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+simplecss = "0.2.2"
 smallvec = "1"
 tokio = { version = "1", features = ["io-std", "rt", "sync"] }
 unicode-segmentation = { workspace = true }

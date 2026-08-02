@@ -1,8 +1,9 @@
 //! Display list generation from the document.
 
 use editor_render::{
-    DisplayItem, DisplayList, Paint, PathCmd, PathData, ResolvedTextLayout, ResolvedTextLine,
-    Stroke, TextAlignment, TextItem,
+    ClipNode, ClipPath, ClipShape, DisplayItem, DisplayList, FillRule, GradientStop, LineCap,
+    LineJoin, LinearGradient, Paint, PathCmd, PathData, RadialGradient, ResolvedTextLayout,
+    ResolvedTextLine, SpreadMethod, Stroke, TextAlignment, TextItem,
 };
 
 use crate::node::NodeKind;
@@ -35,97 +36,117 @@ impl Document {
         let mut items = Vec::new();
         let screen_from_world = view.screen_from_world();
 
-        for id in self.paint_order().collect::<Vec<_>>() {
-            // Extract node data first to avoid borrow conflicts
-            let (visible, kind, style) = match self.nodes.get(id) {
-                Some(n) => (n.visible && !n.deleted, n.kind.clone(), n.style.clone()),
-                None => continue,
+        enum Traversal {
+            Enter(crate::NodeId),
+            EndGroup,
+        }
+        let mut stack = vec![Traversal::Enter(self.root)];
+        while let Some(step) = stack.pop() {
+            let Traversal::Enter(id) = step else {
+                items.push(DisplayItem::EndGroup);
+                continue;
             };
-
-            // Visibility is inherited. A hidden frame or group must not leak
-            // visible descendants into the display list.
-            if !visible
-                || self.ancestors(id).any(|ancestor| {
-                    self.nodes
-                        .get(ancestor)
-                        .is_some_and(|node| !node.visible || node.deleted)
-                })
-            {
+            let Some(node) = self.nodes.get(id).cloned() else {
+                continue;
+            };
+            if !node.visible || node.deleted {
                 continue;
             }
 
-            let world_transform = self.world_transform(id);
-            let screen_transform = screen_from_world * world_transform;
-            let opacity = self.compute_opacity_chain(id);
+            let screen_transform = screen_from_world * self.world_transform(id);
+            let node_opacity = node.style.opacity.clamp(0.0, 1.0);
+            let inline_opacity = node.clip_path.is_none()
+                && node.children.is_empty()
+                && painted_item_count(&node) == 1;
+            let opens_group =
+                node.clip_path.is_some() || (node.style.opacity != 1.0 && !inline_opacity);
+            let item_opacity = if opens_group { 1.0 } else { node_opacity };
+            if opens_group {
+                items.push(DisplayItem::BeginGroup {
+                    opacity: node_opacity,
+                    clip_path: node
+                        .clip_path
+                        .as_ref()
+                        .map(|clip| convert_clip_path(clip, screen_transform)),
+                });
+                stack.push(Traversal::EndGroup);
+            }
 
-            match kind {
-                NodeKind::Group => {
-                    // Groups don't render directly
-                }
+            match node.kind {
+                NodeKind::Group => {}
                 NodeKind::Shape(path) => {
-                    let render_path = convert_path(&path);
-
-                    // Fill
-                    if let Some(fill) = &style.fill {
-                        items.push(DisplayItem::FillPath {
-                            path: render_path.clone(),
-                            paint: convert_paint(fill),
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
-
-                    // Stroke
-                    if let Some(stroke) = &style.stroke {
-                        items.push(DisplayItem::StrokePath {
-                            path: render_path,
-                            stroke: convert_stroke(stroke),
-                            transform: screen_transform,
-                            opacity,
-                        });
-                    }
+                    append_shape_items(
+                        &mut items,
+                        convert_path(&path),
+                        &node.style,
+                        screen_transform,
+                        item_opacity,
+                    );
                 }
                 NodeKind::Text(text) => {
-                    if let Some(fill) = &style.fill {
+                    if let Some(fill) = &node.style.fill {
                         let layout = self.text_layout(id).map(convert_text_layout);
                         items.push(DisplayItem::Text {
                             text: convert_text_item(&text, fill, layout),
                             transform: screen_transform,
-                            opacity,
+                            opacity: item_opacity,
                         });
                     }
                 }
                 NodeKind::Frame(frame) => {
-                    // Render background if present
                     if let Some(bg) = &frame.background {
-                        let rect_path = PathData::rect(0.0, 0.0, frame.width, frame.height);
                         items.push(DisplayItem::FillPath {
-                            path: rect_path,
+                            path: PathData::rect(0.0, 0.0, frame.width, frame.height),
                             paint: convert_paint(bg),
+                            fill_rule: FillRule::NonZero,
                             transform: screen_transform,
-                            opacity,
+                            opacity: item_opacity,
                         });
                     }
-                    // Frames are artboards, not implicit clipping masks.
-                    // Children render through the normal paint-order traversal.
                 }
             }
+
+            stack.extend(node.children.into_iter().rev().map(Traversal::Enter));
         }
 
         DisplayList { items }
     }
+}
 
-    /// Compute the effective opacity for a node by multiplying through the ancestor chain.
-    fn compute_opacity_chain(&self, id: crate::NodeId) -> f32 {
-        let mut opacity = self.nodes.get(id).map(|n| n.style.opacity).unwrap_or(1.0);
+fn append_shape_items(
+    items: &mut Vec<DisplayItem>,
+    path: PathData,
+    style: &crate::Style,
+    transform: glam::Affine2,
+    opacity: f32,
+) {
+    let fill = style.fill.as_ref().map(|paint| DisplayItem::FillPath {
+        path: path.clone(),
+        paint: convert_paint(paint),
+        fill_rule: convert_fill_rule(style.fill_rule),
+        transform,
+        opacity,
+    });
+    let stroke = style.stroke.as_ref().map(|stroke| DisplayItem::StrokePath {
+        path,
+        stroke: convert_stroke(stroke),
+        transform,
+        opacity,
+    });
+    match style.paint_order {
+        crate::PaintOrder::FillAndStroke => items.extend(fill.into_iter().chain(stroke)),
+        crate::PaintOrder::StrokeAndFill => items.extend(stroke.into_iter().chain(fill)),
+    }
+}
 
-        for ancestor_id in self.ancestors(id) {
-            if let Some(ancestor) = self.nodes.get(ancestor_id) {
-                opacity *= ancestor.style.opacity;
-            }
+fn painted_item_count(node: &crate::Node) -> usize {
+    match &node.kind {
+        NodeKind::Group => 0,
+        NodeKind::Shape(_) => {
+            usize::from(node.style.fill.is_some()) + usize::from(node.style.stroke.is_some())
         }
-
-        opacity
+        NodeKind::Text(_) => usize::from(node.style.fill.is_some()),
+        NodeKind::Frame(frame) => usize::from(frame.background.is_some()),
     }
 }
 
@@ -187,12 +208,93 @@ pub(crate) fn convert_path(path: &crate::path::PathData) -> PathData {
 fn convert_paint(paint: &crate::style::Paint) -> Paint {
     match paint {
         crate::style::Paint::Solid(color) => Paint::Solid(*color),
+        crate::style::Paint::LinearGradient(gradient) => Paint::LinearGradient(LinearGradient {
+            start: gradient.start,
+            end: gradient.end,
+            transform: gradient.transform,
+            spread: convert_spread_method(gradient.spread),
+            stops: convert_gradient_stops(&gradient.stops),
+        }),
+        crate::style::Paint::RadialGradient(gradient) => Paint::RadialGradient(RadialGradient {
+            center: gradient.center,
+            focal: gradient.focal,
+            radius: gradient.radius,
+            transform: gradient.transform,
+            spread: convert_spread_method(gradient.spread),
+            stops: convert_gradient_stops(&gradient.stops),
+        }),
     }
 }
 
 /// Convert core stroke to render stroke.
 fn convert_stroke(stroke: &crate::style::Stroke) -> Stroke {
-    Stroke::new(stroke.width, convert_paint(&stroke.paint))
+    Stroke {
+        width: stroke.width,
+        paint: convert_paint(&stroke.paint),
+        line_cap: match stroke.line_cap {
+            crate::LineCap::Butt => LineCap::Butt,
+            crate::LineCap::Round => LineCap::Round,
+            crate::LineCap::Square => LineCap::Square,
+        },
+        line_join: match stroke.line_join {
+            crate::LineJoin::Miter => LineJoin::Miter,
+            crate::LineJoin::MiterClip => LineJoin::MiterClip,
+            crate::LineJoin::Round => LineJoin::Round,
+            crate::LineJoin::Bevel => LineJoin::Bevel,
+        },
+        miter_limit: stroke.miter_limit,
+        dash_array: stroke.dash_array.clone(),
+        dash_offset: stroke.dash_offset,
+    }
+}
+
+fn convert_fill_rule(fill_rule: crate::FillRule) -> FillRule {
+    match fill_rule {
+        crate::FillRule::NonZero => FillRule::NonZero,
+        crate::FillRule::EvenOdd => FillRule::EvenOdd,
+    }
+}
+
+fn convert_spread_method(spread: crate::SpreadMethod) -> SpreadMethod {
+    match spread {
+        crate::SpreadMethod::Pad => SpreadMethod::Pad,
+        crate::SpreadMethod::Reflect => SpreadMethod::Reflect,
+        crate::SpreadMethod::Repeat => SpreadMethod::Repeat,
+    }
+}
+
+fn convert_gradient_stops(stops: &[crate::GradientStop]) -> Vec<GradientStop> {
+    stops
+        .iter()
+        .map(|stop| GradientStop {
+            offset: stop.offset,
+            color: stop.color,
+        })
+        .collect()
+}
+
+fn convert_clip_path(clip: &crate::ClipPath, transform: glam::Affine2) -> ClipPath {
+    let content_transform = transform * clip.transform;
+    ClipPath {
+        children: clip
+            .children
+            .iter()
+            .map(|child| match child {
+                crate::ClipNode::Group(group) => {
+                    ClipNode::Group(convert_clip_path(group, content_transform))
+                }
+                crate::ClipNode::Shape(shape) => ClipNode::Shape(ClipShape {
+                    path: convert_path(&shape.path),
+                    transform: content_transform * shape.transform,
+                    fill_rule: convert_fill_rule(shape.fill_rule),
+                }),
+            })
+            .collect(),
+        clip_path: clip
+            .clip_path
+            .as_ref()
+            .map(|nested| Box::new(convert_clip_path(nested, transform))),
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +353,54 @@ mod tests {
         let list = doc.build_display_list(&view);
         // Should have both fill and stroke
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn shape_style_preserves_isolated_opacity_order_fill_rule_and_stroke_details() {
+        let mut doc = Document::new();
+        let mut stroke = crate::Stroke::black(3.0);
+        stroke.line_cap = crate::LineCap::Round;
+        stroke.line_join = crate::LineJoin::Bevel;
+        stroke.miter_limit = 6.0;
+        stroke.dash_array = vec![5.0, 2.0];
+        stroke.dash_offset = 1.0;
+        let mut style = Style::fill_and_stroke(CorePaint::white(), stroke);
+        style.opacity = 0.5;
+        style.fill_rule = crate::FillRule::EvenOdd;
+        style.paint_order = crate::PaintOrder::StrokeAndFill;
+        doc.add_child(
+            doc.root,
+            Node::shape("Styled", CorePathData::rect(0.0, 0.0, 10.0, 10.0)).with_style(style),
+        );
+
+        let list = doc.build_display_list(&View::default());
+
+        assert_eq!(list.len(), 4);
+        assert!(matches!(
+            list.items[0],
+            DisplayItem::BeginGroup { opacity, .. } if opacity == 0.5
+        ));
+        let DisplayItem::StrokePath {
+            stroke, opacity, ..
+        } = &list.items[1]
+        else {
+            panic!("expected stroke before fill");
+        };
+        assert_eq!(stroke.line_cap, LineCap::Round);
+        assert_eq!(stroke.line_join, LineJoin::Bevel);
+        assert_eq!(stroke.miter_limit, 6.0);
+        assert_eq!(stroke.dash_array, [5.0, 2.0]);
+        assert_eq!(stroke.dash_offset, 1.0);
+        assert_eq!(*opacity, 1.0);
+        assert!(matches!(
+            list.items[2],
+            DisplayItem::FillPath {
+                fill_rule: FillRule::EvenOdd,
+                opacity: 1.0,
+                ..
+            }
+        ));
+        assert!(matches!(list.items[3], DisplayItem::EndGroup));
     }
 
     #[test]
@@ -323,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_opacity_chain() {
+    fn container_opacity_is_isolated_while_single_paint_leaf_opacity_is_inline() {
         let mut doc = Document::new();
         let view = View::default();
 
@@ -338,15 +488,16 @@ mod tests {
         doc.add_child(group_id, shape);
 
         let list = doc.build_display_list(&view);
-        assert_eq!(list.len(), 1);
-
-        match &list.items[0] {
-            DisplayItem::FillPath { opacity, .. } => {
-                // 0.5 * 0.5 = 0.25
-                assert!((opacity - 0.25).abs() < 0.001);
-            }
-            _ => panic!("Expected FillPath"),
-        }
+        assert_eq!(list.len(), 3);
+        assert!(matches!(
+            list.items[0],
+            DisplayItem::BeginGroup { opacity, .. } if opacity == 0.5
+        ));
+        assert!(matches!(
+            list.items[1],
+            DisplayItem::FillPath { opacity, .. } if opacity == 0.5
+        ));
+        assert!(matches!(list.items[2], DisplayItem::EndGroup));
     }
 
     #[test]

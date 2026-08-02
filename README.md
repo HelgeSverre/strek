@@ -60,8 +60,9 @@ the file format and UI should not yet be treated as stable.
   perceptual sorting, drag reordering, and remembered modeless panel placement
 - Command palette, menus, and configurable shortcuts
 - Native JSON document open/save with validated scene graphs and recent files
-- Editable SVG import for paths and basic shape primitives, with explicit errors
-  for unsupported features
+- SVG import into editable native layers, preserving root viewport dimensions
+  and viewBox mapping plus outlined text, gradients, clips, compound fills, and
+  advanced strokes, with explicit errors for unsupported features
 - SVG, outlined-text SVG, PNG, JPEG, and WebP export
 - Copy visible artwork to the clipboard in the image formats supported by the
   current platform
@@ -282,19 +283,48 @@ for portable appearance. Strek does not automatically embed fonts in SVG files.
 ### SVG import
 
 Opening an `.svg` file imports its supported contents as editable native layers.
-The supported subset includes groups, paths, rectangles, circles, ellipses,
-lines, polylines, and polygons; affine transforms; solid fills and strokes;
-fill and stroke opacity; and visibility. Quadratic curves and SVG shape
-primitives are converted to the editor's path representation.
+The supported subset includes groups and shape primitives; affine transforms;
+solid and linear/radial gradient paints; fill and stroke opacity; object/group
+opacity; clipping; fill rules and paint order; stroke caps, joins, miter limits,
+and dash patterns; and visibility. Root viewport dimensions and viewBox mapping
+are represented by a transparent frame and content transform. CSS without the
+unsupported features below, links, switches, reusable symbols, nested SVG, and
+markers are accepted after `usvg` normalization. CSS type, class, and ID compound
+selectors may contain at most one descendant combinator; selector matching is
+charged against candidate attribute bytes and pre-normalization work limits.
+Other combinators, attribute selectors, and pseudo-classes are rejected before
+matching. CSS becomes visual native nodes; its original structure, link behavior,
+and metadata are not round-tripped.
+Text is converted using installed or fallback system fonts and imported as
+path-editable outlines, not semantic text. Quadratic curves and shape primitives
+are converted to the editor's cubic path representation.
+
+Gradient, advanced-stroke, and clip values survive native save/load and render
+and export correctly, but they do not yet have dedicated native editing controls.
+Advanced canvas artwork is displayed through a bounded world-space software
+raster cache; simple solid artwork retains native GPUI path rendering. Every new
+artwork revision and active geometry scrub gets an immediate preview at most
+4,096 pixels per axis and 1,000,000 pixels total (about 4 MB of RGBA pixels).
+Settled artwork refines after a 50 ms
+trailing-edge delay at most 16,384 pixels per axis and 16,000,000 pixels total,
+about 64 MB of RGBA pixels, using power-of-two density tiers derived from zoom
+and display scale. Artwork beyond either cap is proportionally downsampled. CPU
+rasterization runs off the UI thread. The cache keeps one active image and, only
+while replacing it, one rollback image until the replacement paints successfully;
+the transient two-image ceiling is about 128 MB for settled images, and document
+replacement clears both. Pan and zoom reuse the active world-space image while
+selection and tool overlays remain native. Dashed strokes currently use continuous
+centerline hit testing, including dash gaps.
 
 Strek rejects the whole import with a descriptive error when the SVG uses a
-feature that cannot be represented faithfully. This includes text, images,
-gradients, patterns, clipping, masks, filters, markers, nested SVG documents,
-CSS style blocks, even-odd fills, dashed strokes, and advanced stroke caps,
-joins, object/group opacity, or paint order. Excessive nesting, node counts, path
-segments, and geometry attribute sizes are also rejected before conversion.
-Convert unsupported features to ordinary paths and solid paints before
-importing.
+feature that cannot be represented faithfully. This includes images, patterns,
+masks, filters, blend modes or isolation, non-scaling strokes, context-dependent
+paints, CSS at-rules, SVG 2 focal radii, arcs joins, and non-sRGB gradient color
+interpolation. External resource references and duplicate, ambiguous, missing,
+wrong-typed, or cyclic local resource references are rejected before
+normalization. Excessive nesting, normalization expansion, node counts, path
+segments, gradient stops, dash values, text, and geometry attribute sizes are
+also rejected before conversion.
 
 An imported SVG is treated as an unsaved native document. Saving opens a Save As
 dialog and writes `.strek.json`; Strek never overwrites the source SVG.

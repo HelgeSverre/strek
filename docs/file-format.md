@@ -16,7 +16,7 @@ application-level reading and writing live in `apps/gpui/src/document_io.rs`.
 
 | Property | Current value |
 | --- | --- |
-| Format version | `3` |
+| Format version | `4` |
 | Filename extension | `.strek.json` |
 | Encoding | UTF-8 JSON |
 | Writer output | Pretty-printed JSON |
@@ -34,7 +34,7 @@ The top-level object is the serialized `SavedDocument`:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | unsigned integer | Native format version. Writers currently emit `3`. |
+| `version` | unsigned integer | Native format version. Writers currently emit `4`. |
 | `nodes` | serialized slot-map array | Generational arena containing the scene graph. |
 | `root` | node ID | ID of the single live root group. |
 | `grid` | object | Document grid spacing and major-line interval. |
@@ -45,7 +45,7 @@ An empty document currently serializes as:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "nodes": [
     {
       "value": null,
@@ -75,8 +75,11 @@ An empty document currently serializes as:
             ]
           },
           "stroke": null,
-          "opacity": 1.0
+          "opacity": 1.0,
+          "fill_rule": "NonZero",
+          "paint_order": "FillAndStroke"
         },
+        "clip_path": null,
         "layout": "Free",
         "visible": true,
         "locked": false,
@@ -126,6 +129,7 @@ Every node contains:
 | `kind` | Type-specific group, frame, shape, or text data. |
 | `transform` | Six-number local affine transform, relative to the parent. |
 | `style` | Optional fill, optional stroke, and overall opacity. |
+| `clip_path` | Optional recursive vector clip region in node-local coordinates. |
 | `layout` | `"Free"` or an `{"Auto": ...}` configuration. |
 | `visible` | Visibility flag. |
 | `locked` | Editing lock flag. |
@@ -139,11 +143,14 @@ The externally tagged `kind` variants are:
 - `{"Text": {"content": ..., "font": ..., "font_size": ...,
   "line_height": ..., "align": ..., "sizing": ...}}`
 
-Paint is currently limited to normalized sRGB solid color and is encoded as
-`{"Solid": [r, g, b, a]}`. A stroke contains `width` and `paint`. Path data is
-stored as contours containing anchors. Each anchor has a local `position`,
-optional relative `in_handle` and `out_handle`, and a handle `mode` of
-`Corner`, `Mirrored`, `Aligned`, or `Independent`.
+Paint supports normalized sRGB solids, linear gradients, and radial gradients.
+Gradients store user-space geometry, an affine transform, a spread method, and
+ordered RGBA stops. A stroke stores its width, paint, cap, join, miter limit,
+dash array, and dash offset. Styles also store the compound-path fill rule and
+fill/stroke paint order. A node may contain a recursive vector clip-path tree.
+Path data is stored as contours containing anchors. Each anchor has a local
+`position`, optional relative `in_handle` and `out_handle`, and a handle `mode`
+of `Corner`, `Mirrored`, `Aligned`, or `Independent`.
 
 These representations follow the current Rust `serde` output. They are
 descriptive, not a separately governed schema.
@@ -162,10 +169,11 @@ library entries.
 
 ## Compatibility behavior
 
-- Strek writes version 3.
+- Strek writes version 4.
 - Version 1 and 2 documents are accepted. Grid, guides, and Color Library data
   are replaced with version-3 defaults during migration.
-- Versions newer than 3 are rejected.
+- Version 3 documents are accepted with version-4 visual-style defaults.
+- Versions newer than 4 are rejected.
 - Legacy shape data using a `commands` array is accepted and converted to the
   current contour-and-anchor representation. Writers emit `contours`.
 - Unknown JSON fields are not a preservation mechanism. A load-save cycle may
@@ -184,6 +192,9 @@ include:
 - 100,000 children per node;
 - 10,000 contours and 1,000,000 anchors per shape;
 - 4 MiB of UTF-8 text per text node;
+- 4,096 stops per gradient and 4,096 dash values per stroke;
+- 100,000 clip nodes, 10,000 contours per clip shape, 100,000 total clip
+  contours, 1,000,000 clip anchors, and 128 clip nesting levels per node;
 - 10,000 guides;
 - 256 color groups and 10,000 saved colors;
 - 256 UTF-8 bytes per color or group name.

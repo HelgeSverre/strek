@@ -75,6 +75,14 @@ explicit artwork view box and omits editor chrome. The GPUI app also rasterizes
 the exported SVG representation for PNG, JPEG, and WebP, keeping vector and
 raster output on the same settled artwork snapshot.
 
+GPUI paints advanced canvas artwork from a world-space software-raster cache.
+Every new artwork revision and active preview is capped at 4,096 pixels per axis
+and 1,000,000 pixels;
+50 ms trailing-edge settled tiers are capped at 16,384 pixels per axis and
+16,000,000 pixels. Oversized artwork is proportionally downsampled. CPU raster
+work runs in the background. One prior image is retained only until a replacement
+paints successfully, then dropped; document replacement clears both images.
+
 ### `apps/gpui`
 
 The application crate owns platform and presentation concerns:
@@ -114,13 +122,14 @@ action/command surface instead.
 
 ### Save and load
 
-The current native format is version 3. `SavedDocument` contains the version,
+The current native format is version 4. `SavedDocument` contains the version,
 node arena, root ID, grid settings, persistent guides, and the document Color
-Library. Version 1 and 2 documents migrate with bounded defaults. Loading rejects
-future versions, excessive input, and invalid scene graphs. Saving validates
-first, serializes a snapshot, and replaces the destination through a
-same-directory temporary file. [`file-format.md`](file-format.md) documents the
-current representation and its unstable compatibility status.
+Library. Version 1 and 2 documents migrate with bounded metadata defaults, and
+version 3 documents receive the version-4 visual defaults. Loading rejects future
+versions, excessive input, and invalid scene graphs. Saving validates first,
+serializes a snapshot, and replaces the destination through a same-directory
+temporary file. [`file-format.md`](file-format.md) documents the current
+representation and its unstable compatibility status.
 
 Runtime-only state is intentionally absent: selection, viewport, open panels,
 undo history, caches, text layouts, tool state, and current interaction.
@@ -182,8 +191,9 @@ Workspace-owned preferences:
 
 Current core behavior:
 
-- stores document metadata in native format version 3 with defaults
-  for version 1 and 2 files;
+- stores document metadata in the current native format; the fields were
+  introduced in version 3 and receive defaults when loading version 1 and 2
+  files;
 - represents snap targets by category rather than inferring guides from a missing
   node ID;
 - chooses X and Y corrections independently, using deterministic tie breaking;
@@ -228,8 +238,8 @@ Current core behavior:
   CRUD/reorder operations;
 - defines perceptual sorting in OKLCH and brightness sorting by relative
   luminance;
-- includes library data in native version 3 without adding references from nodes
-  to saved colors.
+- includes library data in the current native format without adding references
+  from nodes to saved colors; the fields were introduced in version 3.
 
 Current GPUI behavior:
 
@@ -248,8 +258,8 @@ semantics.
 
 The implementation proceeded in this order:
 
-1. Add typed document metadata, version-3 migration, limits, and round-trip
-   tests.
+1. Add typed document metadata, migration from pre-version-3 files, limits, and
+   round-trip tests.
 2. Add guide/grid and Color Library domain operations in separate core modules.
 3. Extend snapping and canvas overlays, then add rulers and precision controls.
 4. Add Saved Colors to the shared picker, then build the Color Library panel.

@@ -1,5 +1,7 @@
 //! Cross-platform font families used by the application chrome.
 
+use std::sync::{Arc, LazyLock};
+
 #[cfg(target_os = "macos")]
 pub(crate) const MONOSPACE_FONT_FAMILY: &str = "Menlo";
 
@@ -9,7 +11,13 @@ pub(crate) const MONOSPACE_FONT_FAMILY: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(crate) const MONOSPACE_FONT_FAMILY: &str = "DejaVu Sans Mono";
 
-pub(crate) fn system_font_database() -> resvg::usvg::fontdb::Database {
+static SYSTEM_FONT_DATABASE: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
+    LazyLock::new(|| Arc::new(build_system_font_database()));
+
+static EMPTY_FONT_DATABASE: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
+    LazyLock::new(|| Arc::new(resvg::usvg::fontdb::Database::new()));
+
+fn build_system_font_database() -> resvg::usvg::fontdb::Database {
     let mut database = resvg::usvg::fontdb::Database::new();
     database.load_system_fonts();
 
@@ -23,4 +31,12 @@ pub(crate) fn system_font_database() -> resvg::usvg::fontdb::Database {
     }
 
     database
+}
+
+pub(crate) fn system_font_database() -> Arc<resvg::usvg::fontdb::Database> {
+    Arc::clone(&SYSTEM_FONT_DATABASE)
+}
+
+pub(crate) fn empty_font_database() -> Arc<resvg::usvg::fontdb::Database> {
+    Arc::clone(&EMPTY_FONT_DATABASE)
 }

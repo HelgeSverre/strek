@@ -4,7 +4,6 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
 
 use editor_core::{ArtworkSnapshot, Rect};
 use glam::Vec2;
@@ -17,9 +16,6 @@ const MAX_RASTER_DIMENSION: u32 = 16_384;
 // Keep the base RGBA pixmap below roughly 64 MB before encoder working buffers.
 const MAX_RASTER_PIXELS: u64 = 16_000_000;
 const JPEG_QUALITY: u8 = 92;
-
-static OUTLINE_FONT_DB: LazyLock<Arc<resvg::usvg::fontdb::Database>> =
-    LazyLock::new(|| Arc::new(crate::typography::system_font_database()));
 
 /// User-selectable artwork export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +169,7 @@ pub fn encode_artwork(
 
 fn encode_outlined_svg(svg: &str, view_min: Vec2, size: Vec2) -> Result<Vec<u8>, ExportError> {
     let options = resvg::usvg::Options {
-        fontdb: OUTLINE_FONT_DB.clone(),
+        fontdb: crate::typography::system_font_database(),
         ..Default::default()
     };
     let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &options).map_err(|error| {
@@ -334,7 +330,10 @@ fn raster_dimension(value: f32) -> Result<u32, ExportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_render::{DisplayItem, DisplayList, Paint, PathData, TextItem};
+    use editor_render::{
+        ClipNode, ClipPath, ClipShape, DisplayItem, DisplayList, FillRule, GradientStop,
+        LinearGradient, Paint, PathData, SpreadMethod, TextItem,
+    };
     use glam::Affine2;
     use image::{GenericImageView, Pixel};
 
@@ -343,6 +342,7 @@ mod tests {
         display_list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 20.0, 10.0),
             paint: Paint::rgb(0.2, 0.4, 0.8),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::from_translation(Vec2::new(-25.0, 40.0)),
             opacity: 1.0,
         });
@@ -357,6 +357,7 @@ mod tests {
         display_list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 8.0, 8.0),
             paint: Paint::rgb(1.0, 0.0, 0.0),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::IDENTITY,
             opacity: 0.5,
         });
@@ -432,6 +433,56 @@ mod tests {
 
         assert_eq!(image.dimensions(), (24, 14));
         assert!(image.color().has_alpha());
+    }
+
+    #[test]
+    fn advanced_svg_artwork_parses_and_rasterizes() {
+        let mut display_list = DisplayList::new();
+        display_list.push(DisplayItem::BeginGroup {
+            opacity: 0.6,
+            clip_path: Some(ClipPath {
+                children: vec![ClipNode::Shape(ClipShape {
+                    path: PathData::circle(10.0, 10.0, 9.0),
+                    transform: Affine2::IDENTITY,
+                    fill_rule: FillRule::NonZero,
+                })],
+                clip_path: None,
+            }),
+        });
+        display_list.push(DisplayItem::FillPath {
+            path: PathData::rect(0.0, 0.0, 20.0, 20.0),
+            paint: Paint::LinearGradient(LinearGradient {
+                start: Vec2::ZERO,
+                end: Vec2::new(20.0, 0.0),
+                transform: Affine2::IDENTITY,
+                spread: SpreadMethod::Pad,
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: [1.0, 0.0, 0.0, 1.0],
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: [0.0, 0.0, 1.0, 1.0],
+                    },
+                ],
+            }),
+            fill_rule: FillRule::EvenOdd,
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+        });
+        display_list.push(DisplayItem::EndGroup);
+        let snapshot = ArtworkSnapshot {
+            display_list,
+            bounds: Rect::new(Vec2::ZERO, Vec2::splat(20.0)),
+        };
+
+        let svg = encode_artwork(ExportFormat::Svg, &snapshot).unwrap();
+        resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default()).unwrap();
+        let png = encode_artwork(ExportFormat::Png, &snapshot).unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!(image.dimensions(), (20, 20));
+        assert!(image.get_pixel(10, 10).0[3] > 0);
     }
 
     #[test]

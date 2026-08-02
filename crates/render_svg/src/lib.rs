@@ -3,10 +3,13 @@
 //! This crate provides SVG rendering for the vector editor,
 //! useful for web targets and SVG export.
 
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 
 use editor_render::{
-    DisplayItem, DisplayList, LineCap, LineJoin, Paint, PathCmd, PathData, TextAlignment, TextItem,
+    ClipNode, ClipPath, DisplayItem, DisplayList, FillRule, GradientStop, LineCap, LineJoin, Paint,
+    PathCmd, PathData, SpreadMethod, TextAlignment, TextItem,
 };
 use glam::{Affine2, Vec2};
 use unicode_segmentation::UnicodeSegmentation;
@@ -16,243 +19,20 @@ use unicode_segmentation::UnicodeSegmentation;
 /// The resulting SVG uses the given width and height as the viewport dimensions.
 /// Uses two-pass rendering: document content first, then UI elements (selection, guides) on top.
 pub fn to_svg_string(display_list: &DisplayList, width: f32, height: f32) -> String {
-    let mut svg = String::new();
-    let mut ui_svg = String::new();
-
-    // SVG header
-    write!(
-        svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        width, height, width, height
+    render_svg(
+        display_list,
+        Vec2::ZERO,
+        Vec2::new(width, height),
+        true,
+        true,
     )
-    .unwrap();
-
-    // Render items (document content to svg, UI to ui_svg)
-    for (index, item) in display_list.items.iter().enumerate() {
-        match item {
-            DisplayItem::FillPath {
-                path,
-                paint,
-                transform,
-                opacity,
-            } => {
-                let d = path_to_d(path);
-                let fill = paint_to_css(paint);
-                let matrix = transform_to_matrix(transform);
-
-                write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="{}" opacity="{}" transform="{}"/>"#,
-                    index, d, fill, opacity, matrix
-                )
-                .unwrap();
-            }
-
-            DisplayItem::StrokePath {
-                path,
-                stroke,
-                transform,
-                opacity,
-            } => {
-                let d = path_to_d(path);
-                let stroke_css = paint_to_css(&stroke.paint);
-                let matrix = transform_to_matrix(transform);
-
-                write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="{}" opacity="{}" transform="{}"/>"#,
-                    index,
-                    d,
-                    stroke_css,
-                    stroke.width,
-                    line_cap_to_css(stroke.line_cap),
-                    line_join_to_css(stroke.line_join),
-                    opacity,
-                    matrix
-                )
-                .unwrap();
-            }
-
-            DisplayItem::ToolPreview {
-                path,
-                fill,
-                stroke,
-                transform,
-            } => {
-                write_tool_preview(&mut ui_svg, index, path, fill, stroke, transform);
-            }
-
-            DisplayItem::Text {
-                text,
-                transform,
-                opacity,
-            } => {
-                write_text(&mut svg, index, text, transform, *opacity);
-            }
-
-            // UI elements go to separate buffer (rendered on top)
-            DisplayItem::SnapGuide {
-                start,
-                end,
-                horizontal: _,
-            } => {
-                write!(
-                    ui_svg,
-                    r##"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#ff00ff" stroke-width="1" stroke-dasharray="4,4" opacity="0.8"/>"##,
-                    start.x, start.y, end.x, end.y
-                )
-                .unwrap();
-            }
-
-            DisplayItem::SelectionRect { min, max } => {
-                let w = max.x - min.x;
-                let h = max.y - min.y;
-                write!(
-                    ui_svg,
-                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#0066ff" stroke-width="2" stroke-dasharray="4"/>"##,
-                    min.x, min.y, w, h
-                )
-                .unwrap();
-            }
-            DisplayItem::MarqueeRect { min, max } => {
-                let w = max.x - min.x;
-                let h = max.y - min.y;
-                write!(
-                    ui_svg,
-                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="rgba(0,128,255,0.15)" stroke="#0080ff" stroke-width="1"/>"##,
-                    min.x, min.y, w, h
-                )
-                .unwrap();
-            }
-            DisplayItem::VectorAnchor { .. }
-            | DisplayItem::VectorHandle { .. }
-            | DisplayItem::TextCaret { .. }
-            | DisplayItem::TextSelectionRect { .. }
-            | DisplayItem::TransformHandle { .. } => {}
-        }
-    }
-
-    // Append UI elements at the end (on top)
-    svg.push_str(&ui_svg);
-    svg.push_str("</svg>");
-    svg
 }
 
 /// Convert a display list to an SVG string fragment (no wrapper element).
 /// Useful for embedding in an existing SVG document.
 /// Uses two-pass rendering: document content first, then UI elements (selection, guides) on top.
 pub fn to_svg_fragment(display_list: &DisplayList) -> String {
-    let mut svg = String::new();
-    let mut ui_svg = String::new();
-
-    // First pass: render document content
-    for (index, item) in display_list.items.iter().enumerate() {
-        match item {
-            DisplayItem::FillPath {
-                path,
-                paint,
-                transform,
-                opacity,
-            } => {
-                let d = path_to_d(path);
-                let fill = paint_to_css(paint);
-                let matrix = transform_to_matrix(transform);
-
-                write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="{}" opacity="{}" transform="{}"/>"#,
-                    index, d, fill, opacity, matrix
-                )
-                .unwrap();
-            }
-
-            DisplayItem::StrokePath {
-                path,
-                stroke,
-                transform,
-                opacity,
-            } => {
-                let d = path_to_d(path);
-                let stroke_css = paint_to_css(&stroke.paint);
-                let matrix = transform_to_matrix(transform);
-
-                write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="{}" opacity="{}" transform="{}"/>"#,
-                    index,
-                    d,
-                    stroke_css,
-                    stroke.width,
-                    line_cap_to_css(stroke.line_cap),
-                    line_join_to_css(stroke.line_join),
-                    opacity,
-                    matrix
-                )
-                .unwrap();
-            }
-
-            DisplayItem::ToolPreview {
-                path,
-                fill,
-                stroke,
-                transform,
-            } => {
-                write_tool_preview(&mut ui_svg, index, path, fill, stroke, transform);
-            }
-
-            DisplayItem::Text {
-                text,
-                transform,
-                opacity,
-            } => {
-                write_text(&mut svg, index, text, transform, *opacity);
-            }
-
-            // UI elements go to separate buffer (rendered on top)
-            DisplayItem::SnapGuide {
-                start,
-                end,
-                horizontal: _,
-            } => {
-                write!(
-                    ui_svg,
-                    r##"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#ff00ff" stroke-width="1" stroke-dasharray="4,4" opacity="0.8"/>"##,
-                    start.x, start.y, end.x, end.y
-                )
-                .unwrap();
-            }
-
-            DisplayItem::SelectionRect { min, max } => {
-                let width = max.x - min.x;
-                let height = max.y - min.y;
-                write!(
-                    ui_svg,
-                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#0066ff" stroke-width="2" stroke-dasharray="4"/>"##,
-                    min.x, min.y, width, height
-                )
-                .unwrap();
-            }
-            DisplayItem::MarqueeRect { min, max } => {
-                let width = max.x - min.x;
-                let height = max.y - min.y;
-                write!(
-                    ui_svg,
-                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="rgba(0,128,255,0.15)" stroke="#0080ff" stroke-width="1"/>"##,
-                    min.x, min.y, width, height
-                )
-                .unwrap();
-            }
-            DisplayItem::VectorAnchor { .. }
-            | DisplayItem::VectorHandle { .. }
-            | DisplayItem::TextCaret { .. }
-            | DisplayItem::TextSelectionRect { .. }
-            | DisplayItem::TransformHandle { .. } => {}
-        }
-    }
-
-    // Append UI elements at the end (on top)
-    svg.push_str(&ui_svg);
-    svg
+    render_svg(display_list, Vec2::ZERO, Vec2::ZERO, true, false)
 }
 
 /// Convert a display list to an SVG string for export (excludes UI elements like selection/guides).
@@ -269,85 +49,457 @@ pub fn to_svg_string_export_with_view_box(
     view_min: Vec2,
     size: Vec2,
 ) -> String {
-    let mut svg = String::new();
+    render_svg(display_list, view_min, size, false, true)
+}
 
-    // SVG header
-    write!(
-        svg,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="{} {} {} {}">"#,
-        size.x, size.y, view_min.x, view_min.y, size.x, size.y
-    )
-    .unwrap();
-
-    // Render items, skipping UI-only elements
+fn render_svg(
+    display_list: &DisplayList,
+    view_min: Vec2,
+    size: Vec2,
+    include_ui: bool,
+    wrapper: bool,
+) -> String {
+    let mut writer = SvgWriter::default();
     for (index, item) in display_list.items.iter().enumerate() {
+        writer.write_item(index, item, include_ui);
+    }
+
+    let mut svg = String::new();
+    if wrapper {
+        write!(
+            svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="{} {} {} {}">"#,
+            size.x, size.y, view_min.x, view_min.y, size.x, size.y
+        )
+        .unwrap();
+    }
+    if !writer.defs.is_empty() {
+        svg.push_str("<defs>");
+        svg.push_str(&writer.defs);
+        svg.push_str("</defs>");
+    }
+    svg.push_str(&writer.body);
+    if include_ui {
+        svg.push_str(&writer.ui);
+    }
+    if wrapper {
+        svg.push_str("</svg>");
+    }
+    svg
+}
+
+#[derive(Default)]
+struct SvgWriter {
+    defs: String,
+    body: String,
+    ui: String,
+    next_resource_id: usize,
+    paint_resources: HashMap<u64, Vec<CachedResource<Paint>>>,
+    clip_resources: HashMap<u64, Vec<CachedResource<ClipPath>>>,
+}
+
+struct CachedResource<T> {
+    value: T,
+    id: String,
+}
+
+impl SvgWriter {
+    fn write_item(&mut self, index: usize, item: &DisplayItem, include_ui: bool) {
         match item {
+            DisplayItem::BeginGroup { opacity, clip_path } => {
+                let clip = clip_path.as_ref().map(|clip| self.write_clip_path(clip));
+                write!(self.body, r#"<g opacity="{}""#, opacity).unwrap();
+                if let Some(clip) = clip {
+                    write!(self.body, r#" clip-path="url(#{clip})""#).unwrap();
+                }
+                self.body.push('>');
+            }
+            DisplayItem::EndGroup => self.body.push_str("</g>"),
             DisplayItem::FillPath {
                 path,
                 paint,
+                fill_rule,
                 transform,
                 opacity,
             } => {
-                let d = path_to_d(path);
-                let fill = paint_to_css(paint);
-                let matrix = transform_to_matrix(transform);
-
+                let fill = self.write_paint(paint);
                 write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="{}" opacity="{}" transform="{}"/>"#,
-                    index, d, fill, opacity, matrix
+                    self.body,
+                    r#"<path data-index="{}" d="{}" fill="{}" fill-rule="{}" opacity="{}" transform="{}"/>"#,
+                    index,
+                    path_to_d(path),
+                    fill,
+                    fill_rule_to_css(*fill_rule),
+                    opacity,
+                    transform_to_matrix(transform),
                 )
                 .unwrap();
             }
-
             DisplayItem::StrokePath {
                 path,
                 stroke,
                 transform,
                 opacity,
             } => {
-                let d = path_to_d(path);
-                let stroke_css = paint_to_css(&stroke.paint);
-                let matrix = transform_to_matrix(transform);
-
+                let paint = self.write_paint(&stroke.paint);
                 write!(
-                    svg,
-                    r#"<path data-index="{}" d="{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="{}" opacity="{}" transform="{}"/>"#,
+                    self.body,
+                    r#"<path data-index="{}" d="{}" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="{}" stroke-miterlimit="{}""#,
                     index,
-                    d,
-                    stroke_css,
+                    path_to_d(path),
+                    paint,
                     stroke.width,
                     line_cap_to_css(stroke.line_cap),
                     line_join_to_css(stroke.line_join),
+                    stroke.miter_limit,
+                )
+                .unwrap();
+                if !stroke.dash_array.is_empty() {
+                    let dash_array = stroke
+                        .dash_array
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    write!(
+                        self.body,
+                        r#" stroke-dasharray="{}" stroke-dashoffset="{}""#,
+                        dash_array, stroke.dash_offset
+                    )
+                    .unwrap();
+                }
+                write!(
+                    self.body,
+                    r#" opacity="{}" transform="{}"/>"#,
                     opacity,
-                    matrix
+                    transform_to_matrix(transform),
                 )
                 .unwrap();
             }
-
             DisplayItem::Text {
                 text,
                 transform,
                 opacity,
             } => {
-                write_text(&mut svg, index, text, transform, *opacity);
+                let fill = self.write_paint(&text.fill);
+                write_text_with_fill(&mut self.body, index, text, transform, *opacity, &fill);
             }
-
-            // Skip UI-only elements for export
-            DisplayItem::ToolPreview { .. } => {}
-            DisplayItem::SnapGuide { .. } => {}
-            DisplayItem::SelectionRect { .. } => {}
-            DisplayItem::MarqueeRect { .. } => {}
-            DisplayItem::VectorAnchor { .. } => {}
-            DisplayItem::VectorHandle { .. } => {}
-            DisplayItem::TextCaret { .. } => {}
-            DisplayItem::TextSelectionRect { .. } => {}
-            DisplayItem::TransformHandle { .. } => {}
+            DisplayItem::ToolPreview {
+                path,
+                fill,
+                stroke,
+                transform,
+            } if include_ui => {
+                write_tool_preview(&mut self.ui, index, path, fill, stroke, transform);
+            }
+            DisplayItem::SnapGuide { start, end, .. } if include_ui => {
+                write!(
+                    self.ui,
+                    r##"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#ff00ff" stroke-width="1" stroke-dasharray="4,4" opacity="0.8"/>"##,
+                    start.x, start.y, end.x, end.y
+                )
+                .unwrap();
+            }
+            DisplayItem::SelectionRect { min, max } if include_ui => {
+                write!(
+                    self.ui,
+                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#0066ff" stroke-width="2" stroke-dasharray="4"/>"##,
+                    min.x,
+                    min.y,
+                    max.x - min.x,
+                    max.y - min.y,
+                )
+                .unwrap();
+            }
+            DisplayItem::MarqueeRect { min, max } if include_ui => {
+                write!(
+                    self.ui,
+                    r##"<rect x="{}" y="{}" width="{}" height="{}" fill="rgba(0,128,255,0.15)" stroke="#0080ff" stroke-width="1"/>"##,
+                    min.x,
+                    min.y,
+                    max.x - min.x,
+                    max.y - min.y,
+                )
+                .unwrap();
+            }
+            DisplayItem::ToolPreview { .. }
+            | DisplayItem::SnapGuide { .. }
+            | DisplayItem::SelectionRect { .. }
+            | DisplayItem::MarqueeRect { .. }
+            | DisplayItem::VectorAnchor { .. }
+            | DisplayItem::VectorHandle { .. }
+            | DisplayItem::TextCaret { .. }
+            | DisplayItem::TextSelectionRect { .. }
+            | DisplayItem::TransformHandle { .. } => {}
         }
     }
 
-    svg.push_str("</svg>");
-    svg
+    fn write_paint(&mut self, paint: &Paint) -> String {
+        if matches!(paint, Paint::Solid(_)) {
+            return paint_to_css(paint);
+        }
+
+        let hash = paint_resource_hash(paint);
+        if let Some(id) = cached_resource_id(&self.paint_resources, hash, paint) {
+            return format!("url(#{id})");
+        }
+
+        let id = match paint {
+            Paint::Solid(_) => unreachable!("solid paints return before resource serialization"),
+            Paint::LinearGradient(gradient) => {
+                let id = self.resource_id("linear-gradient");
+                write!(
+                    self.defs,
+                    r#"<linearGradient id="{}" gradientUnits="userSpaceOnUse" x1="{}" y1="{}" x2="{}" y2="{}" gradientTransform="{}" spreadMethod="{}">"#,
+                    id,
+                    gradient.start.x,
+                    gradient.start.y,
+                    gradient.end.x,
+                    gradient.end.y,
+                    transform_to_matrix(&gradient.transform),
+                    spread_method_to_css(gradient.spread),
+                )
+                .unwrap();
+                write_gradient_stops(&mut self.defs, &gradient.stops);
+                self.defs.push_str("</linearGradient>");
+                id
+            }
+            Paint::RadialGradient(gradient) => {
+                let id = self.resource_id("radial-gradient");
+                write!(
+                    self.defs,
+                    r#"<radialGradient id="{}" gradientUnits="userSpaceOnUse" cx="{}" cy="{}" fx="{}" fy="{}" r="{}" gradientTransform="{}" spreadMethod="{}">"#,
+                    id,
+                    gradient.center.x,
+                    gradient.center.y,
+                    gradient.focal.x,
+                    gradient.focal.y,
+                    gradient.radius,
+                    transform_to_matrix(&gradient.transform),
+                    spread_method_to_css(gradient.spread),
+                )
+                .unwrap();
+                write_gradient_stops(&mut self.defs, &gradient.stops);
+                self.defs.push_str("</radialGradient>");
+                id
+            }
+        };
+        self.paint_resources
+            .entry(hash)
+            .or_default()
+            .push(CachedResource {
+                value: paint.clone(),
+                id: id.clone(),
+            });
+        format!("url(#{id})")
+    }
+
+    fn write_clip_path(&mut self, clip: &ClipPath) -> String {
+        let hash = clip_resource_hash(clip);
+        if let Some(id) = cached_resource_id(&self.clip_resources, hash, clip) {
+            return id.to_owned();
+        }
+
+        let id = self.resource_id("clip");
+        let contents = self.clip_contents(clip);
+        write!(
+            self.defs,
+            r#"<clipPath id="{}" clipPathUnits="userSpaceOnUse">{}</clipPath>"#,
+            id, contents
+        )
+        .unwrap();
+        self.clip_resources
+            .entry(hash)
+            .or_default()
+            .push(CachedResource {
+                value: clip.clone(),
+                id: id.clone(),
+            });
+        id
+    }
+
+    fn clip_contents(&mut self, clip: &ClipPath) -> String {
+        let mut output = String::new();
+        let nested = clip
+            .clip_path
+            .as_ref()
+            .map(|nested| self.write_clip_path(nested));
+        if let Some(ref nested) = nested {
+            write!(output, r#"<g clip-path="url(#{nested})">"#).unwrap();
+        }
+        for child in &clip.children {
+            match child {
+                ClipNode::Shape(shape) => {
+                    write!(
+                        output,
+                        r#"<path d="{}" fill-rule="{}" clip-rule="{}" transform="{}"/>"#,
+                        path_to_d(&shape.path),
+                        fill_rule_to_css(shape.fill_rule),
+                        fill_rule_to_css(shape.fill_rule),
+                        transform_to_matrix(&shape.transform),
+                    )
+                    .unwrap();
+                }
+                ClipNode::Group(group) => {
+                    let contents = self.clip_contents(group);
+                    write!(output, "<g>{contents}</g>").unwrap();
+                }
+            }
+        }
+        if nested.is_some() {
+            output.push_str("</g>");
+        }
+        output
+    }
+
+    fn resource_id(&mut self, prefix: &str) -> String {
+        let id = format!("strek-{prefix}-{}", self.next_resource_id);
+        self.next_resource_id += 1;
+        id
+    }
+}
+
+fn cached_resource_id<'a, T: PartialEq>(
+    resources: &'a HashMap<u64, Vec<CachedResource<T>>>,
+    hash: u64,
+    value: &T,
+) -> Option<&'a str> {
+    resources
+        .get(&hash)?
+        .iter()
+        .find(|resource| resource.value == *value)
+        .map(|resource| resource.id.as_str())
+}
+
+fn paint_resource_hash(paint: &Paint) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match paint {
+        Paint::Solid(color) => {
+            0_u8.hash(&mut hasher);
+            hash_color(color, &mut hasher);
+        }
+        Paint::LinearGradient(gradient) => {
+            1_u8.hash(&mut hasher);
+            hash_vec2(gradient.start, &mut hasher);
+            hash_vec2(gradient.end, &mut hasher);
+            hash_affine(gradient.transform, &mut hasher);
+            hash_spread_method(gradient.spread, &mut hasher);
+            hash_gradient_stops(&gradient.stops, &mut hasher);
+        }
+        Paint::RadialGradient(gradient) => {
+            2_u8.hash(&mut hasher);
+            hash_vec2(gradient.center, &mut hasher);
+            hash_vec2(gradient.focal, &mut hasher);
+            hash_f32(gradient.radius, &mut hasher);
+            hash_affine(gradient.transform, &mut hasher);
+            hash_spread_method(gradient.spread, &mut hasher);
+            hash_gradient_stops(&gradient.stops, &mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn clip_resource_hash(clip: &ClipPath) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_clip_path(clip, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_clip_path(clip: &ClipPath, hasher: &mut impl Hasher) {
+    clip.children.len().hash(hasher);
+    for child in &clip.children {
+        match child {
+            ClipNode::Group(group) => {
+                0_u8.hash(hasher);
+                hash_clip_path(group, hasher);
+            }
+            ClipNode::Shape(shape) => {
+                1_u8.hash(hasher);
+                hash_path(&shape.path, hasher);
+                hash_affine(shape.transform, hasher);
+                hash_fill_rule(shape.fill_rule, hasher);
+            }
+        }
+    }
+    match &clip.clip_path {
+        Some(nested) => {
+            1_u8.hash(hasher);
+            hash_clip_path(nested, hasher);
+        }
+        None => 0_u8.hash(hasher),
+    }
+}
+
+fn hash_path(path: &PathData, hasher: &mut impl Hasher) {
+    path.commands.len().hash(hasher);
+    for command in &path.commands {
+        match command {
+            PathCmd::MoveTo(point) => {
+                0_u8.hash(hasher);
+                hash_vec2(*point, hasher);
+            }
+            PathCmd::LineTo(point) => {
+                1_u8.hash(hasher);
+                hash_vec2(*point, hasher);
+            }
+            PathCmd::CubicTo { c1, c2, p } => {
+                2_u8.hash(hasher);
+                hash_vec2(*c1, hasher);
+                hash_vec2(*c2, hasher);
+                hash_vec2(*p, hasher);
+            }
+            PathCmd::Close => 3_u8.hash(hasher),
+        }
+    }
+}
+
+fn hash_gradient_stops(stops: &[GradientStop], hasher: &mut impl Hasher) {
+    stops.len().hash(hasher);
+    for stop in stops {
+        hash_f32(stop.offset, hasher);
+        hash_color(&stop.color, hasher);
+    }
+}
+
+fn hash_color(color: &[f32; 4], hasher: &mut impl Hasher) {
+    for channel in color {
+        hash_f32(*channel, hasher);
+    }
+}
+
+fn hash_affine(transform: Affine2, hasher: &mut impl Hasher) {
+    for value in transform.to_cols_array() {
+        hash_f32(value, hasher);
+    }
+}
+
+fn hash_vec2(vector: Vec2, hasher: &mut impl Hasher) {
+    hash_f32(vector.x, hasher);
+    hash_f32(vector.y, hasher);
+}
+
+fn hash_f32(value: f32, hasher: &mut impl Hasher) {
+    // `PartialEq` treats the two signed zero representations as equal, so the
+    // resource hash must do the same before collision-safe equality checks.
+    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+    bits.hash(hasher);
+}
+
+fn hash_spread_method(spread: SpreadMethod, hasher: &mut impl Hasher) {
+    match spread {
+        SpreadMethod::Pad => 0_u8,
+        SpreadMethod::Reflect => 1,
+        SpreadMethod::Repeat => 2,
+    }
+    .hash(hasher);
+}
+
+fn hash_fill_rule(fill_rule: FillRule, hasher: &mut impl Hasher) {
+    match fill_rule {
+        FillRule::NonZero => 0_u8,
+        FillRule::EvenOdd => 1,
+    }
+    .hash(hasher);
 }
 
 fn write_tool_preview(
@@ -373,12 +525,13 @@ fn write_tool_preview(
     .unwrap();
 }
 
-fn write_text(
+fn write_text_with_fill(
     output: &mut String,
     index: usize,
     text: &TextItem,
     transform: &Affine2,
     opacity: f32,
+    fill: &str,
 ) {
     let resolved_lines = text.layout.as_ref().and_then(|layout| {
         layout
@@ -445,7 +598,7 @@ fn write_text(
         text.font_weight,
         font_style,
         anchor,
-        paint_to_css(&text.fill),
+        fill,
         opacity,
         transform_to_matrix(transform),
     )
@@ -515,6 +668,37 @@ pub fn paint_to_css(paint: &Paint) -> String {
                 )
             }
         }
+        Paint::LinearGradient(_) | Paint::RadialGradient(_) => "none".to_owned(),
+    }
+}
+
+fn write_gradient_stops(output: &mut String, stops: &[GradientStop]) {
+    for stop in stops {
+        let [red, green, blue, alpha] = stop.color;
+        let color = Paint::Solid([red, green, blue, 1.0]);
+        write!(
+            output,
+            r#"<stop offset="{}" stop-color="{}" stop-opacity="{}"/>"#,
+            stop.offset,
+            paint_to_css(&color),
+            alpha,
+        )
+        .unwrap();
+    }
+}
+
+fn spread_method_to_css(spread: SpreadMethod) -> &'static str {
+    match spread {
+        SpreadMethod::Pad => "pad",
+        SpreadMethod::Reflect => "reflect",
+        SpreadMethod::Repeat => "repeat",
+    }
+}
+
+fn fill_rule_to_css(fill_rule: FillRule) -> &'static str {
+    match fill_rule {
+        FillRule::NonZero => "nonzero",
+        FillRule::EvenOdd => "evenodd",
     }
 }
 
@@ -542,6 +726,7 @@ fn line_cap_to_css(cap: LineCap) -> &'static str {
 fn line_join_to_css(join: LineJoin) -> &'static str {
     match join {
         LineJoin::Miter => "miter",
+        LineJoin::MiterClip => "miter-clip",
         LineJoin::Round => "round",
         LineJoin::Bevel => "bevel",
     }
@@ -566,7 +751,10 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_render::{Paint, ResolvedTextLayout, ResolvedTextLine, Stroke, TextItem};
+    use editor_render::{
+        ClipNode, ClipPath, ClipShape, GradientStop, LineJoin, LinearGradient, Paint,
+        RadialGradient, ResolvedTextLayout, ResolvedTextLine, SpreadMethod, Stroke, TextItem,
+    };
     use glam::Vec2;
 
     #[test]
@@ -633,6 +821,7 @@ mod tests {
         list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 100.0, 100.0),
             paint: Paint::rgb(1.0, 0.0, 0.0),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::IDENTITY,
             opacity: 1.0,
         });
@@ -663,6 +852,227 @@ mod tests {
     }
 
     #[test]
+    fn advanced_svg_styles_and_clipping_are_serialized() {
+        let clip = ClipPath {
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::circle(20.0, 20.0, 15.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::EvenOdd,
+            })],
+            clip_path: None,
+        };
+        let mut list = DisplayList::new();
+        list.push(DisplayItem::BeginGroup {
+            opacity: 0.4,
+            clip_path: Some(clip),
+        });
+        list.push(DisplayItem::FillPath {
+            path: PathData::rect(0.0, 0.0, 40.0, 40.0),
+            paint: Paint::LinearGradient(LinearGradient {
+                start: Vec2::ZERO,
+                end: Vec2::new(40.0, 0.0),
+                transform: Affine2::from_translation(Vec2::new(2.0, 3.0)),
+                spread: SpreadMethod::Reflect,
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: [1.0, 0.0, 0.0, 0.5],
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: [0.0, 0.0, 1.0, 1.0],
+                    },
+                ],
+            }),
+            fill_rule: FillRule::EvenOdd,
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+        });
+        let mut stroke = Stroke::new(
+            3.0,
+            Paint::RadialGradient(RadialGradient {
+                center: Vec2::new(20.0, 20.0),
+                focal: Vec2::new(18.0, 18.0),
+                radius: 20.0,
+                transform: Affine2::IDENTITY,
+                spread: SpreadMethod::Repeat,
+                stops: vec![GradientStop {
+                    offset: 0.0,
+                    color: [0.0, 1.0, 0.0, 1.0],
+                }],
+            }),
+        );
+        stroke.line_join = LineJoin::MiterClip;
+        stroke.miter_limit = 7.0;
+        stroke.dash_array = vec![4.0, 2.0];
+        stroke.dash_offset = 1.5;
+        list.push(DisplayItem::StrokePath {
+            path: PathData::rect(0.0, 0.0, 40.0, 40.0),
+            stroke,
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+        });
+        list.push(DisplayItem::EndGroup);
+
+        let svg = to_svg_string_export(&list, 40.0, 40.0);
+
+        assert!(svg.contains("<linearGradient"));
+        assert!(svg.contains("<radialGradient"));
+        assert!(svg.contains(r#"spreadMethod="reflect""#));
+        assert!(svg.contains(r#"stop-opacity="0.5""#));
+        assert!(svg.contains(r#"fill-rule="evenodd""#));
+        assert!(svg.contains(r#"clip-rule="evenodd""#));
+        assert!(svg.contains(r#"stroke-linejoin="miter-clip""#));
+        assert!(svg.contains(r#"stroke-miterlimit="7""#));
+        assert!(svg.contains(r#"stroke-dasharray="4 2""#));
+        assert!(svg.contains(r#"stroke-dashoffset="1.5""#));
+        assert!(svg.contains(r#"<g opacity="0.4" clip-path="url(#strek-clip-"#));
+        assert!(svg.ends_with("</g></svg>"));
+    }
+
+    #[test]
+    fn equivalent_gradients_share_definitions_and_references() {
+        let linear = Paint::LinearGradient(LinearGradient {
+            start: Vec2::ZERO,
+            end: Vec2::new(40.0, 0.0),
+            transform: Affine2::IDENTITY,
+            spread: SpreadMethod::Pad,
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+            ],
+        });
+        let radial = Paint::RadialGradient(RadialGradient {
+            center: Vec2::new(20.0, 20.0),
+            focal: Vec2::new(18.0, 18.0),
+            radius: 20.0,
+            transform: Affine2::IDENTITY,
+            spread: SpreadMethod::Repeat,
+            stops: vec![GradientStop {
+                offset: 0.5,
+                color: [0.0, 1.0, 0.0, 0.75],
+            }],
+        });
+
+        let mut list = DisplayList::new();
+        for y in [0.0, 50.0] {
+            list.push(DisplayItem::FillPath {
+                path: PathData::rect(0.0, y, 40.0, 40.0),
+                paint: linear.clone(),
+                fill_rule: FillRule::NonZero,
+                transform: Affine2::IDENTITY,
+                opacity: 1.0,
+            });
+        }
+        for y in [100.0, 150.0] {
+            list.push(DisplayItem::StrokePath {
+                path: PathData::rect(0.0, y, 40.0, 40.0),
+                stroke: Stroke::new(2.0, radial.clone()),
+                transform: Affine2::IDENTITY,
+                opacity: 1.0,
+            });
+        }
+
+        let svg = to_svg_string_export(&list, 40.0, 190.0);
+
+        assert_eq!(svg.matches("<linearGradient ").count(), 1);
+        assert_eq!(svg.matches("<radialGradient ").count(), 1);
+        assert_eq!(
+            svg.matches(r#"fill="url(#strek-linear-gradient-0)""#)
+                .count(),
+            2
+        );
+        assert_eq!(
+            svg.matches(r#"stroke="url(#strek-radial-gradient-1)""#)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn equivalent_clip_paths_share_a_definition_and_reference() {
+        let clip = ClipPath {
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::circle(20.0, 20.0, 15.0),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::EvenOdd,
+            })],
+            clip_path: None,
+        };
+        let mut list = DisplayList::new();
+        for x in [0.0, 50.0] {
+            list.push(DisplayItem::BeginGroup {
+                opacity: 1.0,
+                clip_path: Some(clip.clone()),
+            });
+            list.push(DisplayItem::FillPath {
+                path: PathData::rect(x, 0.0, 40.0, 40.0),
+                paint: Paint::black(),
+                fill_rule: FillRule::NonZero,
+                transform: Affine2::IDENTITY,
+                opacity: 1.0,
+            });
+            list.push(DisplayItem::EndGroup);
+        }
+
+        let svg = to_svg_string_export(&list, 90.0, 40.0);
+
+        assert_eq!(svg.matches("<clipPath ").count(), 1);
+        assert_eq!(svg.matches(r#"clip-path="url(#strek-clip-0)""#).count(), 2);
+    }
+
+    #[test]
+    fn distinct_gradients_and_clip_paths_keep_separate_definitions() {
+        let gradient = |end_x| {
+            Paint::LinearGradient(LinearGradient {
+                start: Vec2::ZERO,
+                end: Vec2::new(end_x, 0.0),
+                transform: Affine2::IDENTITY,
+                spread: SpreadMethod::Pad,
+                stops: vec![GradientStop {
+                    offset: 0.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                }],
+            })
+        };
+        let clip = |radius| ClipPath {
+            children: vec![ClipNode::Shape(ClipShape {
+                path: PathData::circle(20.0, 20.0, radius),
+                transform: Affine2::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            })],
+            clip_path: None,
+        };
+
+        let mut list = DisplayList::new();
+        for (paint, clip_path) in [(gradient(40.0), clip(15.0)), (gradient(80.0), clip(10.0))] {
+            list.push(DisplayItem::BeginGroup {
+                opacity: 1.0,
+                clip_path: Some(clip_path),
+            });
+            list.push(DisplayItem::FillPath {
+                path: PathData::rect(0.0, 0.0, 40.0, 40.0),
+                paint,
+                fill_rule: FillRule::NonZero,
+                transform: Affine2::IDENTITY,
+                opacity: 1.0,
+            });
+            list.push(DisplayItem::EndGroup);
+        }
+
+        let svg = to_svg_string_export(&list, 40.0, 40.0);
+
+        assert_eq!(svg.matches("<linearGradient ").count(), 2);
+        assert_eq!(svg.matches("<clipPath ").count(), 2);
+    }
+
+    #[test]
     fn tool_preview_is_visible_in_editor_svg_but_not_exported() {
         let mut list = DisplayList::new();
         list.push(DisplayItem::ToolPreview {
@@ -686,6 +1096,7 @@ mod tests {
         list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 20.0, 10.0),
             paint: Paint::black(),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::from_translation(Vec2::new(-25.0, 40.0)),
             opacity: 1.0,
         });
@@ -775,6 +1186,7 @@ mod tests {
         list.push(DisplayItem::FillPath {
             path: PathData::rect(0.0, 0.0, 100.0, 100.0),
             paint: Paint::black(),
+            fill_rule: FillRule::NonZero,
             transform: Affine2::IDENTITY,
             opacity: 1.0,
         });
