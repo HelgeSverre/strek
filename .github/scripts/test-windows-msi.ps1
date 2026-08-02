@@ -16,10 +16,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-MsiExec {
+function Invoke-MsiOperation {
     param(
         [Parameter(Mandatory)]
-        [string[]] $Arguments,
+        [string] $MsiPath,
+
+        [Parameter(Mandatory)]
+        [string] $Properties,
 
         [Parameter(Mandatory)]
         [string] $Operation,
@@ -30,45 +33,30 @@ function Invoke-MsiExec {
         [int] $TimeoutSeconds = 120
     )
 
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = Join-Path $env:WINDIR "System32\msiexec.exe"
-    $startInfo.UseShellExecute = $false
-    foreach ($argument in $Arguments) {
-        $startInfo.ArgumentList.Add($argument)
-    }
+    $job = Start-Job -ScriptBlock {
+        param($PackagePath, $PropertyValues, $InstallerLog)
 
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $installer.UILevel = 2
+        $installer.EnableLog("voicewarmupx", $InstallerLog)
+        $installer.InstallProduct($PackagePath, $PropertyValues)
+    } -ArgumentList $MsiPath, $Properties, $LogPath
+
     try {
-        Get-CimInstance Win32_Process -Filter "Name = 'msiexec.exe'" |
-            ForEach-Object { Write-Host "Existing MSI process: $($_.CommandLine)" }
-        if (-not $process.Start()) {
-            throw "Could not start msiexec for MSI $Operation"
-        }
-        Start-Sleep -Seconds 2
-        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
-        if ($null -ne $processInfo) {
-            Write-Host "MSI $Operation command: $($processInfo.CommandLine)"
-        }
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            $process.Kill($true)
-            $process.WaitForExit()
-            if (Test-Path $LogPath -PathType Leaf) {
-                Get-Content $LogPath -Tail 200
-            }
+        if ($null -eq (Wait-Job $job -Timeout $TimeoutSeconds)) {
+            Stop-Job $job
             throw "MSI $Operation timed out after $TimeoutSeconds seconds"
         }
-        $exitCode = $process.ExitCode
+        Receive-Job $job -ErrorAction Stop
     }
-    finally {
-        $process.Dispose()
-    }
-
-    if ($exitCode -ne 0) {
+    catch {
         if (Test-Path $LogPath -PathType Leaf) {
             Get-Content $LogPath -Tail 200
         }
-        throw "MSI $Operation failed with exit code $exitCode"
+        throw
+    }
+    finally {
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -76,19 +64,12 @@ $msi = Get-Item $MsiPath
 $installedExecutable = Join-Path $InstallDirectory "bin\strek.exe"
 $startMenuShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Strek\Strek.lnk"
 
-Invoke-MsiExec `
+Invoke-MsiOperation `
+    -MsiPath $msi.FullName `
+    -Properties "APPLICATIONFOLDER=`"$InstallDirectory`" REBOOT=ReallySuppress" `
     -Operation "installation" `
     -LogPath $InstallLog `
-    -TimeoutSeconds $TimeoutSeconds `
-    -Arguments @(
-        "/i"
-        $msi.FullName
-        "/qn"
-        "/norestart"
-        "APPLICATIONFOLDER=$InstallDirectory"
-        "/L*v"
-        $InstallLog
-    )
+    -TimeoutSeconds $TimeoutSeconds
 
 try {
     if (-not (Test-Path $installedExecutable -PathType Leaf)) {
@@ -99,18 +80,12 @@ try {
     }
 }
 finally {
-    Invoke-MsiExec `
+    Invoke-MsiOperation `
+        -MsiPath $msi.FullName `
+        -Properties "REMOVE=ALL REBOOT=ReallySuppress" `
         -Operation "uninstall" `
         -LogPath $UninstallLog `
-        -TimeoutSeconds $TimeoutSeconds `
-        -Arguments @(
-            "/x"
-            $msi.FullName
-            "/qn"
-            "/norestart"
-            "/L*v"
-            $UninstallLog
-        )
+        -TimeoutSeconds $TimeoutSeconds
 }
 
 if (Test-Path $installedExecutable) {
