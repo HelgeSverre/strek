@@ -22,6 +22,43 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Link MSI definition
+        shell: pwsh
+        run: |
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP "strek-wix-smoke"
+          $wixObject = Join-Path $smokeDirectory "main.wixobj"
+          $smokeInstaller = Join-Path $smokeDirectory "strek-smoke.msi"
+          $placeholderExecutable = Join-Path $smokeDirectory "strek.exe"
+          New-Item -ItemType Directory -Force $smokeDirectory | Out-Null
+          Copy-Item "$env:WINDIR\System32\where.exe" $placeholderExecutable
+
+          & candle.exe -nologo -arch x64 -ext WixUtilExtension `
+            -dTargetVendor=pc `
+            -dVersion=0.1.0 `
+            -dPlatform=x64 `
+            -dProfile=dist `
+            -dTargetEnv=msvc `
+            -dTargetTriple=x86_64-pc-windows-msvc `
+            -dCargoProfile=dist `
+            "-dCargoTargetDir=$PWD\target" `
+            "-dCargoTargetBinDir=$smokeDirectory" `
+            -out $wixObject `
+            apps/gpui/wix/main.wxs
+          if ($LASTEXITCODE -ne 0) {
+            throw "WiX compiler failed with exit code $LASTEXITCODE"
+          }
+
+          & light.exe -nologo -spdb `
+            -ext WixUIExtension `
+            -ext WixUtilExtension `
+            -cultures:en-us `
+            -out $smokeInstaller `
+            -b apps/gpui `
+            $wixObject
+          if ($LASTEXITCODE -ne 0) {
+            throw "WiX linker failed with exit code $LASTEXITCODE"
+          }
+
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
