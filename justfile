@@ -17,3 +17,7 @@ run:
 # Format code
 format:
     cargo fmt
+
+# Quick check that lock file is in sync (fails if Cargo.toml changed without regenerating Cargo.lock)
+check:
+    cargo check --locked --offline

@@ -155,6 +155,16 @@ If an unrelated or platform-specific failure prevents the full gate, run the
 largest relevant focused suites, report the exact failing test and error, and do
 not describe the workspace as green.
 
+When bumping the version in `apps/gpui/Cargo.toml`, regenerate `Cargo.lock`
+immediately and commit both files together. The easiest way is:
+
+```text
+cargo check  # regenerates Cargo.lock after version bumps
+```
+
+If `cargo check` cannot reach the network, edit `Cargo.lock` manually: find the
+`name = "strek"` entry and update its `version` field to match `Cargo.toml`.
+
 Before completing a substantial implementation, review the diff for correctness,
 security, regressions, performance, maintainability, and adequate tests. Fix
 findings before handoff when they are in scope.
