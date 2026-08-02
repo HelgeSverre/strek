@@ -1,5 +1,6 @@
 //! Native document persistence and recent-file bookkeeping.
 
+use std::borrow::Cow;
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
@@ -112,7 +113,11 @@ pub(crate) enum OpenedDocument {
 
 /// Read and validate a native document, or import a supported SVG.
 pub fn read_document(path: &Path) -> Result<OpenedDocument, DocumentIoError> {
-    let file = File::open(path).map_err(|source| DocumentIoError::Read {
+    let io_path = filesystem_path(path).map_err(|source| DocumentIoError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let file = File::open(io_path.as_ref()).map_err(|source| DocumentIoError::Read {
         path: path.to_path_buf(),
         source,
     })?;
@@ -236,7 +241,7 @@ fn paths_refer_to_same_file(first: &Path, second: &Path) -> bool {
         return true;
     }
     if matches!(
-        (first.canonicalize(), second.canonicalize()),
+        (canonicalize_path(first), canonicalize_path(second)),
         (Ok(first), Ok(second)) if first == second
     ) {
         return true;
@@ -274,7 +279,8 @@ fn windows_file_identity(path: &Path) -> io::Result<(u32, u64)> {
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
 
-    let file = File::open(path)?;
+    let io_path = filesystem_path(path)?;
+    let file = File::open(io_path.as_ref())?;
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: `file` owns a valid handle for the duration of the call, and
     // `information` points to writable storage for the requested structure.
@@ -308,7 +314,7 @@ impl RecentFiles {
         let Some(path) = recent_files_path() else {
             return Self::default();
         };
-        let Ok(json) = fs::read_to_string(path) else {
+        let Ok(json) = read_path_to_string(&path) else {
             return Self::default();
         };
         let Ok(paths) = serde_json::from_str::<Vec<PathBuf>>(&json) else {
@@ -318,7 +324,7 @@ impl RecentFiles {
         Self {
             paths: paths
                 .into_iter()
-                .filter(|path| path.is_file())
+                .filter(|path| path_is_file(path))
                 .take(MAX_RECENT_FILES)
                 .collect(),
         }
@@ -386,13 +392,67 @@ fn config_root() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|directories| directories.config_dir().to_path_buf())
 }
 
+pub(crate) fn read_path_to_string(path: &Path) -> io::Result<String> {
+    let io_path = filesystem_path(path)?;
+    fs::read_to_string(io_path.as_ref())
+}
+
+pub(crate) fn path_exists(path: &Path) -> bool {
+    filesystem_path(path).is_ok_and(|io_path| io_path.exists())
+}
+
+pub(crate) fn path_is_file(path: &Path) -> bool {
+    filesystem_path(path).is_ok_and(|io_path| io_path.is_file())
+}
+
+fn canonicalize_path(path: &Path) -> io::Result<PathBuf> {
+    let io_path = filesystem_path(path)?;
+    io_path.canonicalize()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn filesystem_path(path: &Path) -> io::Result<Cow<'_, Path>> {
+    Ok(Cow::Borrowed(path))
+}
+
+#[cfg(target_os = "windows")]
+fn filesystem_path(path: &Path) -> io::Result<Cow<'_, Path>> {
+    use std::path::{Component, Prefix};
+
+    let absolute = std::path::absolute(path)?;
+    let mut components = absolute.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Ok(Cow::Owned(absolute));
+    };
+
+    match prefix.kind() {
+        Prefix::Disk(_) => {
+            let mut verbatim = OsString::from(r"\\?\");
+            verbatim.push(absolute.as_os_str());
+            Ok(Cow::Owned(PathBuf::from(verbatim)))
+        }
+        Prefix::UNC(server, share) => {
+            let mut verbatim = PathBuf::from(r"\\?\UNC");
+            verbatim.push(server);
+            verbatim.push(share);
+            for component in components {
+                if let Component::Normal(part) = component {
+                    verbatim.push(part);
+                }
+            }
+            Ok(Cow::Owned(verbatim))
+        }
+        Prefix::Verbatim(_)
+        | Prefix::VerbatimDisk(_)
+        | Prefix::VerbatimUNC(_, _)
+        | Prefix::DeviceNS(_) => Ok(Cow::Owned(absolute)),
+    }
+}
+
 pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "save destination has no parent directory",
-        )
-    })?;
+    let io_path = filesystem_path(path)?;
+    let path = io_path.as_ref();
+    let parent = atomic_parent_directory(path)?;
     fs::create_dir_all(parent)?;
 
     let file_name = path.file_name().ok_or_else(|| {
@@ -420,6 +480,17 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary_path);
     }
     result
+}
+
+fn atomic_parent_directory(path: &Path) -> io::Result<&Path> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Ok(Path::new(".")),
+        Some(parent) => Ok(parent),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "save destination has no parent directory",
+        )),
+    }
 }
 
 fn create_temporary_file(path: &Path) -> io::Result<File> {
@@ -567,6 +638,14 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn atomic_parent_directory_supports_relative_file_names() {
+        assert_eq!(
+            atomic_parent_directory(Path::new("drawing.strek.json")).unwrap(),
+            Path::new(".")
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn atomic_writer_supports_non_utf8_file_names() {
@@ -585,7 +664,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn atomic_writer_supports_windows_long_paths() {
+    fn windows_long_paths_support_atomic_write_and_read_helpers() {
         use std::os::windows::ffi::OsStrExt;
 
         let root = temporary_test_directory("atomic-long-path");
@@ -593,14 +672,39 @@ mod tests {
         for index in 0..8 {
             directory = directory.join(format!("segment-{index}-0123456789abcdefghijklmnop"));
         }
-        fs::create_dir_all(&directory).unwrap();
         let path = directory.join("drawing.strek.json");
         assert!(path.as_os_str().encode_wide().count() > 260);
 
         write_atomic(&path, b"contents").unwrap();
 
-        assert_eq!(fs::read(&path).unwrap(), b"contents");
-        fs::remove_dir_all(root).unwrap();
+        assert!(path_exists(&path));
+        assert!(path_is_file(&path));
+        assert_eq!(read_path_to_string(&path).unwrap(), "contents");
+        let io_root = filesystem_path(&root).unwrap();
+        fs::remove_dir_all(io_root.as_ref()).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_filesystem_paths_are_absolute_and_verbatim() {
+        assert_eq!(
+            filesystem_path(Path::new(r"C:\Designs\logo.svg"))
+                .unwrap()
+                .as_ref(),
+            Path::new(r"\\?\C:\Designs\logo.svg")
+        );
+        assert_eq!(
+            filesystem_path(Path::new(r"\\server\share\logo.svg"))
+                .unwrap()
+                .as_ref(),
+            Path::new(r"\\?\UNC\server\share\logo.svg")
+        );
+        assert_eq!(
+            filesystem_path(Path::new(r"\\?\C:\Designs\logo.svg"))
+                .unwrap()
+                .as_ref(),
+            Path::new(r"\\?\C:\Designs\logo.svg")
+        );
     }
 
     #[cfg(target_os = "windows")]

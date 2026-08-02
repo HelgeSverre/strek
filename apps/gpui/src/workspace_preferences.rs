@@ -1,7 +1,6 @@
 //! Per-user presentation and precision preferences.
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 
@@ -83,7 +82,7 @@ impl WorkspacePreferences {
         let Some(path) = preferences_path() else {
             return Self::default();
         };
-        let Ok(contents) = fs::read_to_string(path) else {
+        let Ok(contents) = crate::document_io::read_path_to_string(&path) else {
             return Self::default();
         };
         let Ok(preferences) = serde_json::from_str::<Self>(&contents) else {

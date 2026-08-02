@@ -1186,7 +1186,7 @@ impl Strek {
                             cx,
                         ),
                         Err(error) => {
-                            if !path.is_file() {
+                            if !document_io::path_is_file(&path) {
                                 editor.remove_recent_file(&path, cx);
                             }
                             editor.show_error(

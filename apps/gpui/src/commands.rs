@@ -1,7 +1,6 @@
 //! Shared command catalog and user-configurable keyboard shortcuts.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -881,7 +880,7 @@ impl Keymap {
         let Some(path) = keymap_path() else {
             return Self::default();
         };
-        match fs::read_to_string(&path) {
+        match crate::document_io::read_path_to_string(&path) {
             Ok(json) => match Self::from_json(&json) {
                 Ok((keymap, warnings)) => {
                     for warning in warnings {
@@ -977,7 +976,7 @@ impl Keymap {
 
     pub(crate) fn ensure_user_file() -> Result<PathBuf, String> {
         let path = keymap_path().ok_or_else(|| "no user configuration directory".to_owned())?;
-        if !path.exists() {
+        if !crate::document_io::path_exists(&path) {
             let mut bindings = Map::new();
             for spec in COMMANDS {
                 let value = match spec.default_bindings {
