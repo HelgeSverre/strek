@@ -23,7 +23,9 @@ function Invoke-MsiExec {
         [string] $Operation,
 
         [Parameter(Mandatory)]
-        [string] $LogPath
+        [string] $LogPath,
+
+        [int] $TimeoutSeconds = 120
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -39,7 +41,14 @@ function Invoke-MsiExec {
         if (-not $process.Start()) {
             throw "Could not start msiexec for MSI $Operation"
         }
-        $process.WaitForExit()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            if (Test-Path $LogPath -PathType Leaf) {
+                Get-Content $LogPath -Tail 200
+            }
+            throw "MSI $Operation timed out after $TimeoutSeconds seconds"
+        }
         $exitCode = $process.ExitCode
     }
     finally {
