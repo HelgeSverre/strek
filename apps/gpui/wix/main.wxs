@@ -131,7 +131,7 @@
                     </Directory>
                 </Directory>
             </Directory>
-            <Directory Id='ProgramMenuFolder'>
+            <Directory Id='CommonProgramsFolder'>
                 <Directory Id='ApplicationProgramsFolder' Name='Strek'>
                     <Component Id='ApplicationShortcut' Guid='494613C7-82E4-46A1-883B-668AC3E96B06'>
                         <Shortcut
