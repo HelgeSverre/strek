@@ -34,7 +34,7 @@ jobs:
 
           & candle.exe -nologo -arch x64 -ext WixUtilExtension `
             -dTargetVendor=pc `
-            -dVersion=0.1.0 `
+            "-dVersion=0.1.0" `
             -dPlatform=x64 `
             -dProfile=dist `
             -dTargetEnv=msvc `
