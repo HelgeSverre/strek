@@ -319,11 +319,12 @@ jobs:
 
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
             filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
-            name=$(echo "$filename" | sed "s/\.rb$//")
+            name="${filename%.rb}"
             version=$(echo "$release" | jq .app_version --raw-output)
 
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
+            sed -i -E '/^  version "[^"]+"$/d' "Formula/${filename}"
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
 
             git add "Formula/${filename}"
