@@ -1495,9 +1495,7 @@ Nice-to-have candidates:
 
 ### Implemented: Canvas precision controls
 
-Status: implemented in native format version 3. The comparative rationale and
-source links are in
-[`precision-and-color-library-research.md`](precision-and-color-library-research.md).
+Status: implemented in native format version 3.
 
 #### Vocabulary and scope
 

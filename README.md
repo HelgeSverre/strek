@@ -86,8 +86,13 @@ just run
 
 Strek is under active development. Tagged releases include a universal macOS
 installer for Apple Silicon and Intel. The installer is Developer ID-signed and
-notarized by Apple. There is no Homebrew formula yet; you can also run from
-source or create a local package as described below.
+notarized by Apple. Install the command-line binary through the Homebrew tap:
+
+```sh
+brew install helgesverre/tap/strek
+```
+
+You can also run from source or create a local package as described below.
 
 ## Automation
 
@@ -265,8 +270,8 @@ just format  # format the workspace
 ```
 
 Tagged versions matching `vX.Y.Z` run the cargo-dist release workflow and attach
-Apple Silicon and Intel archives to a GitHub Release. The workflow does not
-currently publish package-manager or shell installers.
+Apple Silicon and Intel archives to a GitHub Release, then publish the matching
+formula to `helgesverre/homebrew-tap`.
 
 ## Package for macOS
 
@@ -284,29 +289,3 @@ in GitHub Actions, signed with separate Developer ID Application and Installer
 certificates, notarized, stapled, verified, and attached to tagged releases.
 See [docs/macos-release.md](docs/macos-release.md) for the one-time Apple and
 GitHub credential setup, manual test workflow, and release procedure.
-
-## Project documentation
-
-The workspace is split by responsibility:
-
-- `apps/gpui` — native application and GPUI interface
-- `crates/editor_core` — document model, commands, history, tools, and state
-  machines
-- `crates/editor_render` — backend-neutral display-list types
-- `crates/render_svg` — SVG serialization
-
-- [`docs/spec.md`](docs/spec.md) describes current behavior, milestones, the product
-  backlog, and bounded specifications for planned work.
-- [`docs/architecture.md`](docs/architecture.md) describes current crate boundaries, data
-  flow, state ownership, and the planned extension points.
-- [`docs/file-format.md`](docs/file-format.md) describes the current unstable
-  native document format.
-- [`docs/precision-and-color-library-research.md`](docs/precision-and-color-library-research.md)
-  records the design-tool comparison behind the next precision and color work.
-- [`docs/automation.md`](docs/automation.md) documents the CLI, AppleScript, and MCP
-  surfaces.
-- [`docs/macos-release.md`](docs/macos-release.md) documents packaging and release
-  operations.
-
-When documentation and working behavior differ, tests and implementation are
-authoritative.

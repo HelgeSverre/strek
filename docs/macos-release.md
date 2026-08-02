@@ -91,7 +91,14 @@ First validate without changing GitHub:
 If validation succeeds, repeat the command without `--dry-run`. The helper
 uploads the secrets and derives all repository variables automatically.
 
-### 6. Run the live CI test
+### 6. Add the Homebrew tap token
+
+Create a fine-grained personal access token with access only to
+`HelgeSverre/homebrew-tap` and grant it **Contents: Read and write**. In the
+`HelgeSverre/strek` repository, add that token as a repository Actions secret
+named `HOMEBREW_TAP_TOKEN` under **Settings → Secrets and variables → Actions**.
+
+### 7. Run the live CI test
 
 ```sh
 .github/scripts/run-macos-package-workflow.sh
@@ -296,7 +303,8 @@ git push origin v0.1.0
 
 The existing `Release` workflow builds the architecture-specific archives and
 calls the reusable macOS packaging workflow. The release is created only after
-the signed and notarized installer job succeeds.
+the signed and notarized installer job succeeds. It then publishes the Homebrew
+formula to `HelgeSverre/homebrew-tap` using `HOMEBREW_TAP_TOKEN`.
 
 Recipients can download the signed installer from the GitHub Release. Publishing
 the `.pkg` on another website is a separate distribution decision and does not
