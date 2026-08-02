@@ -63,7 +63,8 @@ jobs:
             -MsiPath $smokeInstaller `
             -InstallDirectory (Join-Path $env:RUNNER_TEMP "Strek Smoke Install") `
             -InstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-smoke-install.log") `
-            -UninstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-smoke-uninstall.log")
+            -UninstallLog (Join-Path $env:RUNNER_TEMP "strek-msi-smoke-uninstall.log") `
+            -TimeoutSeconds 20
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable

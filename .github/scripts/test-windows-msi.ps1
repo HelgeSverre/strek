@@ -9,7 +9,9 @@ param(
     [string] $InstallLog,
 
     [Parameter(Mandatory)]
-    [string] $UninstallLog
+    [string] $UninstallLog,
+
+    [int] $TimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +43,11 @@ function Invoke-MsiExec {
         if (-not $process.Start()) {
             throw "Could not start msiexec for MSI $Operation"
         }
+        Start-Sleep -Seconds 2
+        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+        if ($null -ne $processInfo) {
+            Write-Host "MSI $Operation command: $($processInfo.CommandLine)"
+        }
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill($true)
             $process.WaitForExit()
@@ -70,6 +77,7 @@ $startMenuShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Pr
 Invoke-MsiExec `
     -Operation "installation" `
     -LogPath $InstallLog `
+    -TimeoutSeconds $TimeoutSeconds `
     -Arguments @(
         "/i"
         $msi.FullName
@@ -92,6 +100,7 @@ finally {
     Invoke-MsiExec `
         -Operation "uninstall" `
         -LogPath $UninstallLog `
+        -TimeoutSeconds $TimeoutSeconds `
         -Arguments @(
             "/x"
             $msi.FullName
