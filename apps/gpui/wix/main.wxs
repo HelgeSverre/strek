@@ -126,30 +126,25 @@
                                 Name='strek.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\strek.exe'
-                                KeyPath='yes'/>
+                                KeyPath='yes'>
+                                <Shortcut
+                                    Id='ApplicationStartMenuShortcut'
+                                    Directory='ApplicationProgramsFolder'
+                                    Name='Strek'
+                                    Description='Native vector editor for logos and icons'
+                                    WorkingDirectory='APPLICATIONFOLDER'
+                                    Advertise='yes'/>
+                            </File>
+                            <RemoveFolder
+                                Id='ApplicationProgramsFolder'
+                                Directory='ApplicationProgramsFolder'
+                                On='uninstall'/>
                         </Component>
                     </Directory>
                 </Directory>
             </Directory>
             <Directory Id='CommonProgramsFolder'>
-                <Directory Id='ApplicationProgramsFolder' Name='Strek'>
-                    <Component Id='ApplicationShortcut' Guid='494613C7-82E4-46A1-883B-668AC3E96B06'>
-                        <Shortcut
-                            Id='ApplicationStartMenuShortcut'
-                            Name='Strek'
-                            Description='Native vector editor for logos and icons'
-                            Target='[#exe0]'
-                            WorkingDirectory='APPLICATIONFOLDER'/>
-                        <RemoveFolder Id='ApplicationProgramsFolder' On='uninstall'/>
-                        <RegistryValue
-                            Root='HKLM'
-                            Key='Software\Liseth Solutions AS\Strek'
-                            Name='installed'
-                            Type='integer'
-                            Value='1'
-                            KeyPath='yes'/>
-                    </Component>
-                </Directory>
+                <Directory Id='ApplicationProgramsFolder' Name='Strek'/>
             </Directory>
         </Directory>
 
@@ -170,7 +165,6 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
-            <ComponentRef Id='ApplicationShortcut'/>
 
             <Feature
                 Id='Environment'
