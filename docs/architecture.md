@@ -1,7 +1,7 @@
 # Strek Architecture
 
 This document describes the current implementation and the boundaries planned
-for the next editor features. [`SPEC.md`](SPEC.md) defines product behavior;
+for the next editor features. [`spec.md`](spec.md) defines product behavior;
 tests and working code remain authoritative when documentation drifts.
 
 ## Design goals
@@ -119,7 +119,8 @@ node arena, root ID, grid settings, persistent guides, and the document Color
 Library. Version 1 and 2 documents migrate with bounded defaults. Loading rejects
 future versions, excessive input, and invalid scene graphs. Saving validates
 first, serializes a snapshot, and replaces the destination through a
-same-directory temporary file.
+same-directory temporary file. [`file-format.md`](file-format.md) documents the
+current representation and its unstable compatibility status.
 
 Runtime-only state is intentionally absent: selection, viewport, open panels,
 undo history, caches, text layouts, tool state, and current interaction.
@@ -163,7 +164,7 @@ document meaning.
 
 ## Precision aids
 
-The bounded design is specified in [`SPEC.md`](SPEC.md#implemented-canvas-precision-controls).
+The bounded design is specified in [`spec.md`](spec.md#implemented-canvas-precision-controls).
 It extends the existing editor and canvas systems rather than adding a parallel
 canvas model.
 
@@ -204,7 +205,7 @@ stroke style; text glyphs and emoji are not used as substitute icons.
 
 ## Document Color Library
 
-The bounded design is specified in [`SPEC.md`](SPEC.md#implemented-document-color-library).
+The bounded design is specified in [`spec.md`](spec.md#implemented-document-color-library).
 Version one is a collection of unlinked solid RGBA values. Applying a Saved
 Color copies its value; editing or deleting it cannot alter existing artwork.
 

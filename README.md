@@ -115,43 +115,42 @@ osascript "/Applications/Strek.app/Contents/Resources/AUTOMATION.applescript" st
 ### Connect the MCP server
 
 Strek includes a local stdio MCP server. The desktop application must already
-be running; the MCP process forwards tool calls to that application. First
-resolve the absolute path to the installed binary:
-
-```sh
-STREK_BIN="$(command -v strek)"
-```
-
-When running from source instead, use an absolute development-build path such
-as `STREK_BIN="$PWD/target/debug/strek"`.
+be running; the MCP process forwards tool calls to that application. Each
+example resolves the absolute path to the installed binary. When running from
+source instead, replace the first line with `STREK_BIN="$PWD/target/debug/strek"`.
 
 Claude Code (user scope):
 
 ```sh
+STREK_BIN="$(command -v strek)"
 claude mcp add --scope user strek -- "$STREK_BIN" mcp
 ```
 
 OpenCode:
 
 ```sh
+STREK_BIN="$(command -v strek)"
 opencode mcp add strek -- "$STREK_BIN" mcp
 ```
 
 Codex:
 
 ```sh
+STREK_BIN="$(command -v strek)"
 codex mcp add strek -- "$STREK_BIN" mcp
 ```
 
 GitHub Copilot CLI:
 
 ```sh
+STREK_BIN="$(command -v strek)"
 copilot mcp add strek -- "$STREK_BIN" mcp
 ```
 
 Amp:
 
 ```sh
+STREK_BIN="$(command -v strek)"
 amp mcp add strek -- "$STREK_BIN" mcp
 ```
 
@@ -161,7 +160,7 @@ session-stable layer IDs, semantic selection/property/color edits, explicit file
 direct SVG/PNG/JPEG/WebP artifacts, editor actions, canvas pointer input with
 modifiers, text insertion, UI visibility controls, and screenshots.
 
-See [AUTOMATION.md](AUTOMATION.md) for the complete CLI, AppleScript, and MCP
+See [docs/automation.md](docs/automation.md) for the complete CLI, AppleScript, and MCP
 surface, client configuration, state schema, coordinates, permissions, and
 troubleshooting.
 
@@ -200,6 +199,9 @@ replaces a binding, an array assigns alternatives, and `null` disables it.
 Documents are stored as versioned JSON. Saving an extensionless filename adds
 the native `.strek.json` extension. The loader validates the scene graph before
 opening it, and writes use a same-directory temporary file before replacement.
+The native format is not stable yet; see
+[docs/file-format.md](docs/file-format.md) for the current representation and
+compatibility limits.
 
 Use the File menu to export visible artwork as standard SVG, outlined-text SVG,
 transparent PNG, JPEG, or lossless WebP. Export bounds are derived from the
@@ -280,7 +282,7 @@ cargo install cargo-packager --version 0.11.8 --locked
 Unsigned local packages must not be distributed. Production packages are built
 in GitHub Actions, signed with separate Developer ID Application and Installer
 certificates, notarized, stapled, verified, and attached to tagged releases.
-See [docs/MACOS_RELEASE.md](docs/MACOS_RELEASE.md) for the one-time Apple and
+See [docs/macos-release.md](docs/macos-release.md) for the one-time Apple and
 GitHub credential setup, manual test workflow, and release procedure.
 
 ## Project documentation
@@ -293,15 +295,17 @@ The workspace is split by responsibility:
 - `crates/editor_render` — backend-neutral display-list types
 - `crates/render_svg` — SVG serialization
 
-- [`SPEC.md`](SPEC.md) describes current behavior, milestones, the product
+- [`docs/spec.md`](docs/spec.md) describes current behavior, milestones, the product
   backlog, and bounded specifications for planned work.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) describes current crate boundaries, data
+- [`docs/architecture.md`](docs/architecture.md) describes current crate boundaries, data
   flow, state ownership, and the planned extension points.
-- [`docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md`](docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md)
+- [`docs/file-format.md`](docs/file-format.md) describes the current unstable
+  native document format.
+- [`docs/precision-and-color-library-research.md`](docs/precision-and-color-library-research.md)
   records the design-tool comparison behind the next precision and color work.
-- [`AUTOMATION.md`](AUTOMATION.md) documents the CLI, AppleScript, and MCP
+- [`docs/automation.md`](docs/automation.md) documents the CLI, AppleScript, and MCP
   surfaces.
-- [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md) documents packaging and release
+- [`docs/macos-release.md`](docs/macos-release.md) documents packaging and release
   operations.
 
 When documentation and working behavior differ, tests and implementation are

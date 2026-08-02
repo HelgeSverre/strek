@@ -92,7 +92,11 @@ The editor follows a three-layer architecture with strict separation of concerns
 ```
 strek/
 ├── Cargo.toml                    # Workspace manifest
-├── SPEC.md                       # This document
+├── docs/
+│   ├── spec.md                   # This document
+│   ├── architecture.md           # Crate boundaries and data flow
+│   ├── automation.md             # CLI, AppleScript, and MCP
+│   └── file-format.md            # Unstable native document format
 ├── crates/
 │   ├── editor_core/              # Document + tools + undo + snapping + layout
 │   │   ├── Cargo.toml
@@ -1288,41 +1292,12 @@ display list.
 
 ### 14.1 Native Format (JSON)
 
-The current native format is version 3. `nodes` is the serialized slot-map
-sequence, including its sentinel slot; node IDs use `{ "idx", "version" }`
-objects. An empty document serializes as:
-
-```json
-{
-  "version": 3,
-  "nodes": [
-    { "value": null, "version": 0 },
-    {
-      "value": {
-        "name": "Root",
-        "parent": null,
-        "children": [],
-        "kind": "Group",
-        "transform": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        "style": {
-          "fill": { "Solid": [0.0, 0.0, 0.0, 1.0] },
-          "stroke": null,
-          "opacity": 1.0
-        },
-        "layout": "Free",
-        "visible": true,
-        "locked": false,
-        "deleted": false
-      },
-      "version": 1
-    }
-  ],
-  "root": { "idx": 1, "version": 1 },
-  "grid": { "spacing": 10.0, "major_every": 5 },
-  "guides": [],
-  "color_library": { "groups": [], "colors": [] }
-}
-```
+The current native format is version 3, stored as pretty-printed JSON with the
+`.strek.json` extension. It persists the scene graph, grid, guides, and document
+Color Library while excluding runtime editor state. The format is not stable
+yet and is not a public interchange contract. See
+[`file-format.md`](file-format.md) for the current representation, migrations,
+validation rules, and compatibility warning.
 
 ### 14.2 SVG Export
 
@@ -1522,7 +1497,7 @@ Nice-to-have candidates:
 
 Status: implemented in native format version 3. The comparative rationale and
 source links are in
-[`docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md`](docs/PRECISION_AND_COLOR_LIBRARY_RESEARCH.md).
+[`precision-and-color-library-research.md`](precision-and-color-library-research.md).
 
 #### Vocabulary and scope
 
