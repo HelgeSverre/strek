@@ -146,9 +146,9 @@ Apply only the gates relevant to the change, but do not omit a relevant layer:
 The normal Rust floor is:
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+just format
+just lint
+just test
 ```
 
 If an unrelated or platform-specific failure prevents the full gate, run the

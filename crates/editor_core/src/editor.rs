@@ -388,7 +388,13 @@ enum InteractionState {
     /// Rotating selected objects around the selection center.
     Rotating(TransformSession),
     /// Marquee selection
-    Marquee { start_pos: Vec2, current_pos: Vec2 },
+    Marquee {
+        start_pos: Vec2,
+        current_pos: Vec2,
+        /// The hit that was suppressed at pointer-down so Cmd/Ctrl
+        /// marquees ignore their initial click target.
+        ignored_hit: Option<NodeId>,
+    },
     /// Drawing a new shape.
     CreatingShape {
         shape: ShapeKind,
@@ -2210,7 +2216,20 @@ impl Editor {
                                 4.0 / self.view.zoom.abs().max(f32::EPSILON),
                             )
                             .map(|node| self.selection_target_for_hit(node, modifiers.primary()));
-                        let action = self.selection.action_for_click(hit, modifiers.shift);
+                        // Cmd/Ctrl alone suppresses the hit from becoming an immediate
+                        // selection so a marquee can start.  The suppressed hit is kept
+                        // so the marquee can exclude the container the user clicked
+                        // inside, and gets restored as a selection when the user
+                        // releases without a meaningful drag.
+                        let ignored_hit = if modifiers.primary() && !modifiers.shift {
+                            hit
+                        } else {
+                            None
+                        };
+                        let effective_hit = ignored_hit.map_or(hit, |_| None);
+                        let action = self
+                            .selection
+                            .action_for_click(effective_hit, modifiers.shift);
 
                         match action {
                             SelectionAction::ClickUnselected(id) => {
@@ -2273,6 +2292,7 @@ impl Editor {
                                 self.drag = DragState::Marquee {
                                     start_pos: world_pos,
                                     current_pos: world_pos,
+                                    ignored_hit,
                                 };
                             }
                         }
@@ -2594,30 +2614,39 @@ impl Editor {
             DragState::Marquee {
                 start_pos,
                 current_pos,
+                ignored_hit,
             } => {
                 // Check if this was a click (minimal drag) vs actual marquee drag
                 let drag_distance = (current_pos - start_pos).length() * self.view.zoom.abs();
                 const MIN_MARQUEE_SIZE: f32 = 3.0;
 
                 if drag_distance < MIN_MARQUEE_SIZE {
-                    // Just a click on empty space - clear selection (unless Shift held)
-                    if !modifiers.shift {
+                    // No meaningful drag: restore the suppressed hit as a
+                    // selection (Cmd‑click deep‑selects), or clear when the
+                    // user clicked empty space.
+                    if let Some(id) = ignored_hit {
+                        self.toggle_selection_target(id);
+                    } else if !modifiers.shift {
                         self.selection.clear();
                     }
                 } else {
-                    // Actual marquee selection
-                    // Ctrl/Cmd enables deep select (bypasses groups, selects children)
+                    // Actual marquee selection.
+                    // Ctrl/Cmd enables deep select (bypasses groups, selects
+                    // children) and intersection matching instead of full
+                    // enclosure.
                     let deep_select = modifiers.ctrl || modifiers.meta;
-                    let selected =
+                    let mut selected =
                         self.compute_marquee_selection(start_pos, current_pos, deep_select);
+                    // Exclude the container the user started the marquee inside.
+                    if let Some(excluded) = ignored_hit {
+                        selected.retain(|&id| id != excluded);
+                    }
 
                     if modifiers.shift {
-                        // Selection depth and set toggling are independent.
                         for id in selected {
                             self.toggle_selection_target(id);
                         }
                     } else {
-                        // No modifiers: Replace selection
                         self.selection.set(selected);
                     }
                 }
@@ -2725,9 +2754,9 @@ impl Editor {
     /// Compute which nodes are within the marquee rectangle.
     ///
     /// The default marquee selects direct children of the active selection
-    /// scope. Deep-select marquee traverses the scope and selects editable
-    /// leaves, never a container together with its descendants, and requires
-    /// those leaves to be fully enclosed like Figma's primary-modifier marquee.
+    /// scope via intersection. Deep-select marquee traverses the scope and
+    /// selects editable leaves via intersection, never a container together
+    /// with its descendants.
     fn compute_marquee_selection(
         &mut self,
         start: Vec2,
@@ -2775,13 +2804,10 @@ impl Editor {
             if deep_select && is_container {
                 continue;
             }
-            let matches_geometry = self.document.world_bounds(id).is_some_and(|bounds| {
-                if deep_select {
-                    marquee.contains_rect(&bounds)
-                } else {
-                    marquee.intersects(&bounds)
-                }
-            });
+            let matches_geometry = self
+                .document
+                .world_bounds(id)
+                .is_some_and(|bounds| marquee.intersects(&bounds));
             if matches_geometry {
                 selected.push(id);
             }
@@ -6471,6 +6497,7 @@ impl Editor {
         if let DragState::Marquee {
             start_pos,
             current_pos,
+            ..
         } = &self.drag
         {
             // Transform world positions to screen coordinates
@@ -8304,12 +8331,27 @@ mod tests {
     }
 
     #[test]
-    fn primary_modifier_drag_deep_selects_and_moves_only_the_child() {
-        let (mut editor, group, first, second) = editor_with_grouped_shapes();
-        let group_before = editor.document.world_transform(group);
-        let first_before = editor.document.world_transform(first);
-        let second_before = editor.document.world_transform(second);
+    fn cmd_click_ignores_initial_hit_and_starts_marquee() {
+        let mut editor = Editor::new();
+        let large = editor
+            .document
+            .add_child(
+                editor.document.root,
+                Node::shape("Container", PathData::rect(0.0, 0.0, 200.0, 200.0))
+                    .with_style(Style::fill(Paint::black())),
+            )
+            .unwrap();
+        let small = editor
+            .document
+            .add_child(
+                large,
+                Node::shape("Child", PathData::rect(50.0, 50.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::black())),
+            )
+            .unwrap();
 
+        // Cmd+Click on the large container — the hit must be ignored and a
+        // marquee started instead.
         editor.handle_event(InputEvent::PointerDown {
             position: Vec2::splat(10.0),
             button: MouseButton::Left,
@@ -8318,27 +8360,31 @@ mod tests {
                 ..Modifiers::default()
             },
         });
-        assert_eq!(editor.selection.primary(), Some(first));
+        assert!(editor.selection.is_empty());
+
+        // Drag the marquee to intersect the small child. The container is
+        // excluded by the suppressed hit.
+        let end = Vec2::new(100.0, 100.0);
+        editor.handle_event(InputEvent::PointerMove {
+            position: end,
+            modifiers: Modifiers {
+                meta: true,
+                ..Modifiers::default()
+            },
+        });
         editor.handle_event(InputEvent::PointerUp {
-            position: Vec2::new(20.0, 10.0),
+            position: end,
             button: MouseButton::Left,
             modifiers: Modifiers {
                 meta: true,
                 ..Modifiers::default()
             },
         });
-
-        let delta = Affine2::from_translation(Vec2::new(10.0, 0.0));
-        assert_affine_approx_eq(editor.document.world_transform(group), group_before);
-        assert_affine_approx_eq(editor.document.world_transform(first), delta * first_before);
-        assert_affine_approx_eq(editor.document.world_transform(second), second_before);
-
-        editor.handle_event(InputEvent::PointerDown {
-            position: Vec2::new(20.0, 10.0),
-            button: MouseButton::Left,
-            modifiers: Modifiers::default(),
-        });
-        assert_eq!(editor.selection.primary(), Some(first));
+        // Only the child is selected; the container is skipped by the deep
+        // marquee because it has children.
+        assert!(editor.selection.contains(small));
+        assert!(!editor.selection.contains(large));
+        assert_eq!(editor.selection.len(), 1);
     }
 
     #[test]
@@ -10649,32 +10695,42 @@ mod tests {
     }
 
     #[test]
-    fn primary_marquee_requires_full_enclosure_while_plain_marquee_accepts_touch() {
+    fn deep_marquee_skips_containers_and_selects_leaves_by_intersection() {
         let mut editor = Editor::new();
         let root = editor.document.root;
+        let group = editor
+            .document
+            .add_child(root, Node::group("Group"))
+            .unwrap();
         let shape = editor
             .document
             .add_child(
-                root,
-                Node::shape("Shape", PathData::rect(0.0, 0.0, 20.0, 20.0)),
+                group,
+                Node::shape("Child", PathData::rect(0.0, 0.0, 20.0, 20.0))
+                    .with_style(Style::fill(Paint::black())),
             )
             .unwrap();
 
+        let start = Vec2::new(5.0, 5.0);
+        let end = Vec2::new(15.0, 15.0);
+
+        // Plain marquee selects the group (a direct child of root that
+        // intersects the marquee via its child-derived world bounds).
         assert_eq!(
-            editor.compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(10.0), false),
-            vec![shape]
+            editor.compute_marquee_selection(start, end, false),
+            vec![group]
         );
-        assert!(editor
-            .compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(10.0), true)
-            .is_empty());
+
+        // Deep marquee skips the container group and selects the leaf shape
+        // inside it instead.
         assert_eq!(
-            editor.compute_marquee_selection(Vec2::splat(-5.0), Vec2::splat(20.0), true),
+            editor.compute_marquee_selection(start, end, true),
             vec![shape]
         );
     }
 
     #[test]
-    fn command_and_control_marquees_select_fully_enclosed_nested_leaves() {
+    fn command_and_control_marquees_select_nested_leaves_by_intersection() {
         for modifiers in [
             Modifiers {
                 meta: true,
