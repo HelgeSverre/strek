@@ -52,6 +52,15 @@ security create-keychain -p "$keychain_password" "$APPLE_SIGNING_KEYCHAIN"
 security set-keychain-settings -lut 7200 "$APPLE_SIGNING_KEYCHAIN"
 security unlock-keychain -p "$keychain_password" "$APPLE_SIGNING_KEYCHAIN"
 
+existing_keychains=()
+while read -r keychain_path; do
+  keychain_path="${keychain_path//\"/}"
+  if [[ -n "$keychain_path" ]]; then
+    existing_keychains+=("$keychain_path")
+  fi
+done < <(security list-keychains -d user)
+security list-keychains -d user -s "$APPLE_SIGNING_KEYCHAIN" "${existing_keychains[@]}"
+
 security import "$application_certificate" \
   -k "$APPLE_SIGNING_KEYCHAIN" \
   -f pkcs12 \
@@ -80,6 +89,12 @@ fi
 
 if ! security find-certificate -c "$APPLE_INSTALLER_SIGNING_IDENTITY" "$APPLE_SIGNING_KEYCHAIN" >/dev/null; then
   echo "error: installer certificate does not match APPLE_INSTALLER_SIGNING_IDENTITY" >&2
+  exit 1
+fi
+
+search_list_identities="$(security find-identity -v -p codesigning)"
+if ! grep -Fq "\"$APPLE_APPLICATION_SIGNING_IDENTITY\"" <<<"$search_list_identities"; then
+  echo "error: application signing identity is not available through the user keychain search list" >&2
   exit 1
 fi
 
