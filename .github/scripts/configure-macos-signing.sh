@@ -16,7 +16,7 @@ Usage: .github/scripts/configure-macos-signing.sh \
   --installer-p12 PATH \
   --notary-key PATH \
   [--notary-key-id ID] \
-  [--notary-issuer-id UUID] \
+  --notary-issuer-id UUID \
   [--repo OWNER/REPO] \
   [--dry-run]
 
@@ -26,8 +26,9 @@ APPLE_APPLICATION_CERTIFICATE_PASSWORD and
 APPLE_INSTALLER_CERTIFICATE_PASSWORD, or requested with hidden prompts.
 
 The notary key ID is inferred from an AuthKey_KEYID.p8 filename when omitted.
-Omit --notary-issuer-id for an individual App Store Connect API key. Team keys
-require the issuer ID shown in App Store Connect.
+Notarization requires a team App Store Connect API key and the issuer ID shown
+under Users and Access -> Integrations. Individual API keys cannot use
+notarytool.
 EOF
 }
 
@@ -89,6 +90,15 @@ if [[ -z "$notary_key_id" ]]; then
     echo "error: --notary-key-id is required unless the key is named AuthKey_KEYID.p8" >&2
     exit 2
   fi
+fi
+
+if [[ -z "$notary_issuer_id" ]]; then
+  echo "error: --notary-issuer-id is required; notarytool does not support individual API keys" >&2
+  exit 2
+fi
+if [[ ! "$notary_issuer_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+  echo "error: --notary-issuer-id must be the UUID shown in App Store Connect" >&2
+  exit 2
 fi
 
 if [[ -z "${APPLE_APPLICATION_CERTIFICATE_PASSWORD:-}" ]]; then
@@ -180,11 +190,7 @@ echo "Application identity: $application_identity"
 echo "Installer identity:   $installer_identity"
 echo "Apple team ID:        $application_team_id"
 echo "Notary key ID:        $notary_key_id"
-if [[ -n "$notary_issuer_id" ]]; then
-  echo "Notary issuer ID:     $notary_issuer_id"
-else
-  echo "Notary key type:      individual (no issuer ID)"
-fi
+echo "Notary issuer ID:     $notary_issuer_id"
 
 if [[ "$dry_run" == true ]]; then
   echo "Dry run complete; no GitHub settings were changed."
@@ -223,10 +229,6 @@ gh variable set APPLE_APPLICATION_SIGNING_IDENTITY --repo "$repository" --body "
 gh variable set APPLE_INSTALLER_SIGNING_IDENTITY --repo "$repository" --body "$installer_identity"
 gh variable set APPLE_TEAM_ID --repo "$repository" --body "$application_team_id"
 gh variable set APPLE_NOTARY_KEY_ID --repo "$repository" --body "$notary_key_id"
-if [[ -n "$notary_issuer_id" ]]; then
-  gh variable set APPLE_NOTARY_ISSUER_ID --repo "$repository" --body "$notary_issuer_id"
-else
-  gh variable delete APPLE_NOTARY_ISSUER_ID --repo "$repository" 2>/dev/null || true
-fi
+gh variable set APPLE_NOTARY_ISSUER_ID --repo "$repository" --body "$notary_issuer_id"
 
 echo "Configured macOS release signing for $repository."

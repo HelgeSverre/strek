@@ -134,6 +134,7 @@ else
   required_signing_variables=(
     APPLE_APPLICATION_SIGNING_IDENTITY
     APPLE_INSTALLER_SIGNING_IDENTITY
+    APPLE_NOTARY_ISSUER_ID
     APPLE_NOTARY_KEY_ID
     APPLE_NOTARY_KEY_PATH
     APPLE_SIGNING_KEYCHAIN
@@ -188,10 +189,8 @@ else
   notary_arguments=(
     --key "$APPLE_NOTARY_KEY_PATH"
     --key-id "$APPLE_NOTARY_KEY_ID"
+    --issuer "$APPLE_NOTARY_ISSUER_ID"
   )
-  if [[ -n "${APPLE_NOTARY_ISSUER_ID:-}" ]]; then
-    notary_arguments+=(--issuer "$APPLE_NOTARY_ISSUER_ID")
-  fi
 
   notarization_result="$output_directory/notarization-submit.json"
   notarization_log="$output_directory/notarization-log.json"

@@ -22,8 +22,17 @@ jobs:
 
       - name: Set signing asset paths
         env:
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
         run: |
+          if [[ -z "$APPLE_NOTARY_ISSUER_ID" ]]; then
+            echo "error: APPLE_NOTARY_ISSUER_ID is required; configure a team App Store Connect API key" >&2
+            exit 1
+          fi
+          if [[ -z "$APPLE_NOTARY_KEY_ID" ]]; then
+            echo "error: APPLE_NOTARY_KEY_ID is required" >&2
+            exit 1
+          fi
           echo "APPLE_SIGNING_KEYCHAIN=$RUNNER_TEMP/strek-signing.keychain-db" >> "$GITHUB_ENV"
           echo "APPLE_NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8" >> "$GITHUB_ENV"
 

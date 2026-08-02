@@ -60,9 +60,11 @@ If its private key is unavailable, use the request/package commands from step
 
 ### 4. Create the notarization API key
 
-Sign in to [App Store Connect](https://appstoreconnect.apple.com/), open your
-profile, generate an **Individual API Key**, record its Key ID, and download
-`AuthKey_KEYID.p8`. The private key can only be downloaded once.
+Sign in to [App Store Connect](https://appstoreconnect.apple.com/), open
+**Users and Access → Integrations → Team Keys**, and generate a team API key.
+Record the page's Issuer ID and the key's Key ID, then download
+`AuthKey_KEYID.p8`. The private key can only be downloaded once. Individual API
+keys cannot use `notarytool`.
 
 At this point, the three required files are:
 
@@ -85,6 +87,7 @@ First validate without changing GitHub:
   --application-p12 /path/to/strek-application.p12 \
   --installer-p12 target/apple-signing/strek-installer.p12 \
   --notary-key /path/to/AuthKey_KEYID.p8 \
+  --notary-issuer-id ISSUER_UUID \
   --dry-run
 ```
 
@@ -181,18 +184,16 @@ by Git, it is not a backup. The intermediate `.key` file is unencrypted and
 permission-restricted, so move the finished `.p12` into secure storage and
 remove the raw key after the `.p12` has been validated and backed up.
 
-For notarization, the simplest credential is an individual App Store Connect
-API key:
+For notarization, create a team App Store Connect API key:
 
 1. Sign in to [App Store Connect](https://appstoreconnect.apple.com/).
-2. Open your profile and generate an **Individual API Key**.
-3. Record its Key ID and download `AuthKey_KEYID.p8`. Apple allows the private
-   key to be downloaded only once.
+2. Open **Users and Access → Integrations → Team Keys** and generate a key.
+3. Record the Issuer ID shown on the page and the new key's Key ID.
+4. Download `AuthKey_KEYID.p8`. Apple allows the private key to be downloaded
+   only once.
 
-An Account Holder or Admin can use a team key from **Users and Access →
-Integrations → Team Keys** instead. A team key additionally needs the Issuer ID
-shown on that page. See [Apple's App Store Connect API key
-instructions](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api).
+Individual API keys cannot use `notarytool`. See [Apple's App Store Connect API
+key instructions](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api).
 
 ## Upload the credentials to GitHub
 
@@ -211,6 +212,7 @@ IDs without changing GitHub:
   --application-p12 /path/to/strek-application.p12 \
   --installer-p12 /path/to/strek-installer.p12 \
   --notary-key /path/to/AuthKey_KEYID.p8 \
+  --notary-issuer-id ISSUER_UUID \
   --dry-run
 ```
 
@@ -221,12 +223,12 @@ succeeds, run the same command without `--dry-run`:
 .github/scripts/configure-macos-signing.sh \
   --application-p12 /path/to/strek-application.p12 \
   --installer-p12 /path/to/strek-installer.p12 \
-  --notary-key /path/to/AuthKey_KEYID.p8
+  --notary-key /path/to/AuthKey_KEYID.p8 \
+  --notary-issuer-id ISSUER_UUID
 ```
 
-For a team API key, add `--notary-issuer-id UUID`. If the `.p8` filename does
-not contain the Key ID, add `--notary-key-id KEYID`. Use `--repo OWNER/REPO`
-when running outside this checkout.
+If the `.p8` filename does not contain the Key ID, add `--notary-key-id KEYID`.
+Use `--repo OWNER/REPO` when running outside this checkout.
 
 The helper stores these encrypted GitHub Actions secrets:
 
@@ -242,7 +244,7 @@ It derives and stores these non-secret repository variables:
 - `APPLE_INSTALLER_SIGNING_IDENTITY`
 - `APPLE_TEAM_ID`
 - `APPLE_NOTARY_KEY_ID`
-- `APPLE_NOTARY_ISSUER_ID` for a team API key only
+- `APPLE_NOTARY_ISSUER_ID`
 
 You can confirm the names, but not secret values, with:
 
