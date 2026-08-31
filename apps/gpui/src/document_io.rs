@@ -15,7 +15,7 @@ use editor_core::{Document, DocumentLoadError, DocumentValidationError};
 use crate::svg_import::{self, SvgImportError};
 
 const DOCUMENT_EXTENSION: &str = "strek.json";
-const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECENT_FILES: usize = 8;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

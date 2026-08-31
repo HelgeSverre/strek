@@ -23,6 +23,11 @@ workflows rather than general-purpose illustration.
 The project is under active development. Core editing workflows are usable, but
 the file format and UI should not yet be treated as stable.
 
+Architecture and contributor-facing design live in
+[`docs/architecture.md`](docs/architecture.md). The planned self-describing,
+revision-safe automation system is described in
+[`docs/agent-control-plane.md`](docs/agent-control-plane.md).
+
 <p align="center">
   <img src="docs/assets/strek-showcase.gif" width="960" alt="Strek editing a layered vector brand board through background automation">
 </p>

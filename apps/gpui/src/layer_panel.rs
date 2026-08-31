@@ -2,7 +2,7 @@
 
 use std::borrow::BorrowMut;
 
-use editor_core::{Editor, EditorAction, LayerEntry, LayerIcon, NodeId};
+use editor_core::{Editor, EditorAction, LayerEntry, LayerIcon, NodeId, NodeKind};
 use gpui::{
     anchored, div, prelude::*, px, rgb, rgba, Action, Context, Corner, Entity, MouseButton,
     MouseDownEvent, Pixels, Point, Render, SharedString, StatefulInteractiveElement, WeakEntity,
@@ -24,6 +24,10 @@ pub const MAX_PANEL_WIDTH: f32 = 420.0;
 pub const MIN_CANVAS_WIDTH: f32 = 320.0;
 
 const CONTEXT_MENU_WIDTH: f32 = 224.0;
+const LAYER_ROW_HEIGHT: f32 = 28.0;
+const LAYER_INDENT_STEP: f32 = 12.0;
+const LAYER_ROW_PADDING_LEFT: f32 = 6.0;
+const LAYER_EXPAND_WIDTH: f32 = 18.0;
 
 /// Layer and window-space anchor for the currently open layer-row menu.
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +41,12 @@ enum ContextSelectionPolicy {
     Preserve,
     SelectTarget,
     TargetUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayerMenuInvocation {
+    ContextClick,
+    MoreButton,
 }
 
 fn context_selection_policy(
@@ -61,8 +71,20 @@ struct LayerMenuAvailability {
 }
 
 fn layer_menu_availability(editor: &Editor, target: NodeId) -> LayerMenuAvailability {
-    if !editor.selection().contains(target) {
+    if !editor.document().is_effectively_editable(target) {
         return LayerMenuAvailability::default();
+    }
+
+    if !editor.selection().contains(target) {
+        return LayerMenuAvailability {
+            duplicate: true,
+            group: false,
+            ungroup: editor
+                .document()
+                .get(target)
+                .is_some_and(|node| matches!(node.kind, NodeKind::Group)),
+            delete: true,
+        };
     }
 
     LayerMenuAvailability {
@@ -78,18 +100,20 @@ impl Strek {
         &mut self,
         target: NodeId,
         position: Point<Pixels>,
+        invocation: LayerMenuInvocation,
         cx: &mut Context<Self>,
     ) {
         self.finish_layer_rename(true, cx);
         self.open_menu = None;
         let target_selected = self.editor.selection().contains(target);
         let target_editable = self.editor.document().is_effectively_editable(target);
-        match context_selection_policy(target_selected, target_editable) {
-            ContextSelectionPolicy::Preserve => {}
-            ContextSelectionPolicy::SelectTarget => self.editor.select_layer(target, false),
-            ContextSelectionPolicy::TargetUnavailable => return,
-        }
-        if !self.editor.selection().contains(target) {
+        if invocation == LayerMenuInvocation::ContextClick {
+            match context_selection_policy(target_selected, target_editable) {
+                ContextSelectionPolicy::Preserve => {}
+                ContextSelectionPolicy::SelectTarget => self.editor.select_layer(target, false),
+                ContextSelectionPolicy::TargetUnavailable => return,
+            }
+        } else if !target_editable {
             return;
         }
         self.layer_context_menu = Some(LayerContextMenu { target, position });
@@ -181,7 +205,7 @@ pub fn render_layers_panel(
                 .id("layer-list-scroll")
                 .flex_1()
                 .overflow_y_scroll()
-                .py(px(5.0))
+                .py(px(3.0))
                 .children(rows),
         )
         .child(panel_resize_handle(PanelSide::Layers))
@@ -240,6 +264,7 @@ pub(crate) fn render_layer_context_menu(
                                 .child(title),
                         )
                         .child(layer_action_menu_item(
+                            menu.target,
                             "Duplicate",
                             shortcut_for(keymap, EditorAction::Duplicate),
                             availability.duplicate,
@@ -247,6 +272,7 @@ pub(crate) fn render_layer_context_menu(
                             cx,
                         ))
                         .child(layer_action_menu_item(
+                            menu.target,
                             "Group Selection",
                             shortcut_for(keymap, EditorAction::Group),
                             availability.group,
@@ -254,6 +280,7 @@ pub(crate) fn render_layer_context_menu(
                             cx,
                         ))
                         .child(layer_action_menu_item(
+                            menu.target,
                             "Ungroup Selection",
                             shortcut_for(keymap, EditorAction::Ungroup),
                             availability.ungroup,
@@ -262,6 +289,7 @@ pub(crate) fn render_layer_context_menu(
                         ))
                         .child(layer_menu_separator())
                         .child(layer_action_menu_item(
+                            menu.target,
                             "Delete",
                             shortcut_for(keymap, EditorAction::Delete),
                             availability.delete,
@@ -280,6 +308,7 @@ fn shortcut_for(keymap: &Keymap, action: EditorAction) -> SharedString {
 }
 
 fn layer_action_menu_item<A: Action + Clone>(
+    target: NodeId,
     label: &'static str,
     shortcut: SharedString,
     enabled: bool,
@@ -313,6 +342,9 @@ fn layer_action_menu_item<A: Action + Clone>(
                 .hover(|style| style.bg(rgb(0x35363b)))
                 .on_click(cx.listener(move |editor, _, window, cx| {
                     editor.layer_context_menu = None;
+                    if !editor.editor.selection().contains(target) {
+                        editor.editor.select_layer(target, false);
+                    }
                     cx.stop_propagation();
                     window.dispatch_action(Box::new(action.clone()), cx.borrow_mut());
                     cx.notify();
@@ -424,7 +456,18 @@ fn render_layer_entry(
     cx: &mut Context<Strek>,
 ) -> impl IntoElement {
     let is_renaming = name_input.is_some();
-    let indent = entry.depth as f32 * 16.0;
+    let indent = entry.depth as f32 * LAYER_INDENT_STEP;
+    let indent_guides = (0..entry.depth).map(|depth| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(LAYER_ROW_PADDING_LEFT
+                + LAYER_EXPAND_WIDTH / 2.0
+                + depth as f32 * LAYER_INDENT_STEP))
+            .w(px(1.0))
+            .bg(rgba(0xffffff12))
+    });
     let bg = if entry.selected {
         rgb(0x164f73)
     } else {
@@ -486,14 +529,15 @@ fn render_layer_entry(
 
     div()
         .id(SharedString::from(format!("layer-{:?}", entry.id)))
-        .h(px(32.0))
+        .relative()
+        .h(px(LAYER_ROW_HEIGHT))
         .w_full()
         .flex()
         .flex_row()
         .items_center()
-        .pl(px(8.0 + indent))
-        .pr(px(8.0))
-        .gap(px(5.0))
+        .pl(px(LAYER_ROW_PADDING_LEFT + indent))
+        .pr(px(6.0))
+        .gap(px(4.0))
         .bg(bg)
         .hover(|s| s.bg(hover_bg))
         .cursor_pointer()
@@ -531,7 +575,12 @@ fn render_layer_entry(
             row.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |editor, event: &MouseDownEvent, _window, cx| {
-                    editor.open_layer_context_menu(context_menu_id, event.position, cx);
+                    editor.open_layer_context_menu(
+                        context_menu_id,
+                        event.position,
+                        LayerMenuInvocation::ContextClick,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             )
@@ -548,12 +597,13 @@ fn render_layer_entry(
                 cx.notify();
             }),
         )
+        .children(indent_guides)
         // Expand/collapse chevron
         .child(
             div()
                 .id(SharedString::from(format!("expand-{:?}", entry.id)))
-                .w(px(20.0))
-                .h(px(24.0))
+                .w(px(LAYER_EXPAND_WIDTH))
+                .h(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -587,24 +637,31 @@ fn render_layer_entry(
         // Layer name
         .child(
             div()
+                .min_w(px(0.0))
                 .flex_1()
+                .relative()
+                .top(px(1.0))
                 .overflow_hidden()
                 .when_some(name_input, |name, input| name.child(input))
-                .when(!is_renaming, |name| name.child(entry.name.clone())),
+                .when(!is_renaming, |name| {
+                    name.text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(entry.name.clone())
+                }),
         )
         // Explicit context-menu trigger for discoverability.
         .child(
             div()
                 .id(SharedString::from(format!("more-{:?}", entry.id)))
-                .w(px(24.0))
-                .h(px(24.0))
+                .w(px(22.0))
+                .h(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(4.0))
                 .opacity(if context_menu_enabled { 0.55 } else { 0.3 })
                 .child(icon(
-                    Icon::MoreHorizontal,
+                    Icon::MoreVertical,
                     15.0,
                     rgb(if context_menu_enabled {
                         0xa8abb2
@@ -630,7 +687,12 @@ fn render_layer_entry(
                 .when(context_menu_enabled, |trigger| {
                     trigger.on_click(cx.listener(
                         move |editor, event: &gpui::ClickEvent, _window, cx| {
-                            editor.open_layer_context_menu(more_menu_id, event.down.position, cx);
+                            editor.open_layer_context_menu(
+                                more_menu_id,
+                                event.down.position,
+                                LayerMenuInvocation::MoreButton,
+                                cx,
+                            );
                             cx.stop_propagation();
                         },
                     ))
@@ -640,8 +702,8 @@ fn render_layer_entry(
         .child(
             div()
                 .id(SharedString::from(format!("visibility-{:?}", entry.id)))
-                .w(px(24.0))
-                .h(px(24.0))
+                .w(px(22.0))
+                .h(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -669,8 +731,8 @@ fn render_layer_entry(
         .child(
             div()
                 .id(SharedString::from(format!("lock-{:?}", entry.id)))
-                .w(px(24.0))
-                .h(px(24.0))
+                .w(px(22.0))
+                .h(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -726,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn context_actions_are_scoped_to_the_target_selection() {
+    fn menu_actions_target_an_unselected_editable_layer_without_grouping_it() {
         let mut document = Document::new();
         let first = document
             .add_child(
@@ -745,7 +807,12 @@ mod tests {
 
         assert_eq!(
             layer_menu_availability(&editor, second),
-            LayerMenuAvailability::default()
+            LayerMenuAvailability {
+                duplicate: true,
+                group: false,
+                ungroup: false,
+                delete: true,
+            }
         );
 
         editor.select_layer(second, true);

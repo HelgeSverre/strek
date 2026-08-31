@@ -307,13 +307,16 @@ struct DocumentComplexityLimits {
     text_bytes_per_node: usize,
 }
 
+/// Maximum UTF-8 text bytes retained by one native text node.
+pub const MAX_TEXT_BYTES_PER_NODE: usize = 4 * 1024 * 1024;
+
 impl DocumentComplexityLimits {
     const DEFAULT: Self = Self {
         nodes: 100_000,
         children_per_node: 100_000,
         path_contours_per_node: 10_000,
         path_anchors_per_node: 1_000_000,
-        text_bytes_per_node: 4 * 1024 * 1024,
+        text_bytes_per_node: MAX_TEXT_BYTES_PER_NODE,
     };
 }
 

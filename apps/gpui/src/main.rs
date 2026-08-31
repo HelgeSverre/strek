@@ -25,6 +25,8 @@ mod toolbar;
 mod typography;
 mod workspace_preferences;
 
+use std::cell::Cell;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -49,11 +51,13 @@ const OBJECT_CLIPBOARD_METADATA: &str = "strek-object-clipboard-v1";
 const MAX_AUTOMATION_SELECTED_LAYERS: usize = 10_000;
 const MAX_AUTOMATION_SELECTED_LAYER_BYTES: usize = 256 * 1024;
 const MAX_AUTOMATION_DOCUMENT_LAYERS: usize = 10_000;
+const MAX_AUTOMATION_QUERY_LAYERS: usize = 512;
 const MAX_AUTOMATION_DOCUMENT_BYTES: usize = 3 * 1024 * 1024;
 const MAX_INLINE_AUTOMATION_ARTIFACT_BYTES: usize = 2 * 1024 * 1024;
 const WORKSPACE_PREFERENCES_DEBOUNCE: Duration = Duration::from_millis(250);
 const RECENT_FILES_DEBOUNCE: Duration = Duration::from_millis(50);
 const ARTWORK_RASTER_DEBOUNCE: Duration = Duration::from_millis(50);
+const AUTOMATION_DEDUPLICATION_LIMIT: usize = 256;
 static OBJECT_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static ARTWORK_CLIPBOARD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -528,8 +532,27 @@ struct Strek {
     artwork_raster_task: Option<gpui::Task<()>>,
     artwork_raster_scheduler: ArtworkRasterScheduler,
     document_epoch: u64,
+    automation_session_nonce: [u8; 16],
+    automation_document_revision: Cell<u64>,
+    automation_document_identity: Cell<(u64, u64)>,
+    automation_workspace_revision: Cell<u64>,
+    automation_workspace_fingerprint: Cell<u64>,
+    automation_artwork_revision: Cell<u64>,
+    automation_artwork_identity: Cell<(u64, u64, u64)>,
+    automation_request_epoch: Cell<u64>,
+    automation_next_request_sequence: Cell<u64>,
+    automation_responses: HashMap<String, CachedAutomationResponse>,
+    automation_response_order: VecDeque<String>,
     fit_artwork_on_first_layout: bool,
     did_focus: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAutomationResponse {
+    session_id: String,
+    sequence: u64,
+    request_id: String,
+    response: automation::AutomationResponse,
 }
 
 impl Strek {
@@ -545,6 +568,9 @@ impl Strek {
                 tolerance: workspace_preferences.snap_tolerance,
             })
             .expect("sanitized workspace snapping preferences must be valid");
+        let mut automation_session_nonce = [0_u8; 16];
+        getrandom::fill(&mut automation_session_nonce)
+            .expect("the operating system must provide automation session randomness");
         Self {
             editor,
             document_origin: DocumentOrigin::Starter,
@@ -585,6 +611,17 @@ impl Strek {
             artwork_raster_task: None,
             artwork_raster_scheduler: ArtworkRasterScheduler::default(),
             document_epoch: 0,
+            automation_session_nonce,
+            automation_document_revision: Cell::new(0),
+            automation_document_identity: Cell::new((0, 0)),
+            automation_workspace_revision: Cell::new(0),
+            automation_workspace_fingerprint: Cell::new(0),
+            automation_artwork_revision: Cell::new(0),
+            automation_artwork_identity: Cell::new((0, 0, 0)),
+            automation_request_epoch: Cell::new(0),
+            automation_next_request_sequence: Cell::new(0),
+            automation_responses: HashMap::new(),
+            automation_response_order: VecDeque::new(),
             fit_artwork_on_first_layout: true,
             did_focus: false,
         }

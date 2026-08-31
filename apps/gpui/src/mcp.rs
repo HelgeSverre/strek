@@ -10,10 +10,27 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::automation::{
-    self, ArtifactFormat, AutomationModifiers, AutomationRequest, ColorGroupAction, ColorTarget,
-    GuideAction, GuideAxis, NumericProperty, PointerButton, PointerPhase, PrecisionSettingsPatch,
-    SavedColorAction, SelectionMode, UiTarget,
+    self, ArtifactFormat, AutomationCall, AutomationModifiers, AutomationRequest,
+    AutomationRequestMetadata, ColorGroupAction, ColorTarget, GuideAction, GuideAxis,
+    NumericProperty, PointerButton, PointerPhase, PrecisionSettingsPatch, SavedColorAction,
+    SelectionMode, UiTarget,
 };
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GuardedCallParams {
+    #[schemars(description = "Unique request identity within this document session")]
+    request_id: String,
+    #[schemars(description = "Exact next_sequence returned by get_state.retry_window")]
+    request_sequence: u64,
+    #[schemars(description = "Session ID returned by get_state.revisions")]
+    session_id: String,
+    #[serde(default)]
+    if_document_revision: Option<u64>,
+    #[serde(default)]
+    if_workspace_revision: Option<u64>,
+    #[schemars(description = "Automation request object containing a type and its arguments")]
+    request: serde_json::Value,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ActionParams {
@@ -59,6 +76,19 @@ struct SelectParams {
     ids: Vec<String>,
     #[serde(default)]
     mode: SelectionMode,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DocumentQueryParams {
+    #[serde(default)]
+    #[schemars(description = "Layer IDs to inspect; empty selects the document root")]
+    ids: Vec<String>,
+    #[serde(default)]
+    include_descendants: bool,
+    #[serde(default)]
+    include_style: bool,
+    #[serde(default)]
+    include_geometry: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -165,10 +195,60 @@ impl StrekMcp {
     }
 
     #[tool(
+        description = "Discover Strek automation operations, parameters, effects, costs, limits, and current availability"
+    )]
+    async fn get_capabilities(&self) -> CallToolResult {
+        response_result(AutomationRequest::Capabilities).await
+    }
+
+    #[tool(
+        description = "Execute any automation request with optimistic revision guards and bounded idempotent retry semantics. Discover request types with get_capabilities."
+    )]
+    async fn guarded_call(
+        &self,
+        Parameters(params): Parameters<GuardedCallParams>,
+    ) -> CallToolResult {
+        let request = match serde_json::from_value(params.request) {
+            Ok(request) => request,
+            Err(error) => {
+                return tool_error(format!("invalid guarded automation request: {error}"))
+            }
+        };
+        response_result_call(AutomationCall {
+            metadata: AutomationRequestMetadata {
+                protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                request_id: Some(params.request_id),
+                request_sequence: Some(params.request_sequence),
+                session_id: Some(params.session_id),
+                if_document_revision: params.if_document_revision,
+                if_workspace_revision: params.if_workspace_revision,
+            },
+            request,
+        })
+        .await
+    }
+
+    #[tool(
         description = "Inspect the current document tree with stable layer IDs, styles, bounds, and transforms"
     )]
     async fn get_document(&self) -> CallToolResult {
         response_result(AutomationRequest::Document).await
+    }
+
+    #[tool(
+        description = "Inspect selected document entities with opt-in descendants, style, and computed geometry"
+    )]
+    async fn query_document(
+        &self,
+        Parameters(params): Parameters<DocumentQueryParams>,
+    ) -> CallToolResult {
+        response_result(AutomationRequest::QueryDocument {
+            ids: params.ids,
+            include_descendants: params.include_descendants,
+            include_style: params.include_style,
+            include_geometry: params.include_geometry,
+        })
+        .await
     }
 
     #[tool(description = "Create a new Strek document")]
@@ -377,7 +457,7 @@ impl ServerHandler for StrekMcp {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "Automate a running Strek window without moving the system cursor. Call get_state first and get_document when editing existing artwork. Prefer stable layer IDs and semantic selection, color, property, file, and export tools; use canvas-local pointer events for spatial drawing or direct manipulation.",
+                "Automate a running Strek window without moving the system cursor. Call get_capabilities to discover the running binary, get_state for revisions and current actions, and get_document when editing existing artwork. Prefer stable layer IDs and semantic selection, color, property, file, and export tools; use canvas-local pointer events for spatial drawing or direct manipulation.",
             )
     }
 }
@@ -390,6 +470,18 @@ async fn response_result(request: AutomationRequest) -> CallToolResult {
             Err(error) => tool_error(format!("could not serialize Strek response: {error}")),
         },
         Err(error) => tool_error(error),
+    }
+}
+
+async fn response_result_call(call: AutomationCall) -> CallToolResult {
+    match tokio::task::spawn_blocking(move || automation::request_call(call)).await {
+        Ok(Ok(response)) => match serde_json::to_value(&response) {
+            Ok(value) if response.ok => CallToolResult::structured(value),
+            Ok(value) => CallToolResult::structured_error(value),
+            Err(error) => tool_error(format!("could not serialize Strek response: {error}")),
+        },
+        Ok(Err(error)) => tool_error(error),
+        Err(error) => tool_error(format!("automation task failed: {error}")),
     }
 }
 

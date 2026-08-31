@@ -17,6 +17,10 @@ Strek is a focused native editor for logos and icons. Its architecture favors:
 The project does not try to provide a general plugin host, a browser-style UI
 runtime, or the full precision and design-system surface of a large layout tool.
 
+For the planned self-describing automation and verification architecture, see
+[`agent-control-plane.md`](agent-control-plane.md). That control plane is a view
+of these same core semantics, not a parallel model or privileged mutation path.
+
 ## Workspace boundaries
 
 ```text
@@ -154,6 +158,14 @@ Automation additions should follow the UI's domain operations. A feature is not
 complete when it can only be driven by coordinates if its intent can be
 represented as a stable command.
 
+The next automation architecture adds session-local document, workspace, and
+artwork revisions around this flow. Queries return capability metadata and
+bounded projections; mutations accept optimistic preconditions and return
+structured effect receipts. These contracts belong at the semantic operation
+boundary so CLI, AppleScript, MCP, tests, and GPUI cannot drift into different
+meanings. The detailed contract and phased delivery gates are in
+[`agent-control-plane.md`](agent-control-plane.md).
+
 ## State ownership rules
 
 Use these rules when adding a feature:
@@ -279,6 +291,11 @@ becoming the only place where new behavior can be exercised.
 - UI and automation use the same semantic operation wherever one exists.
 - Saved Colors are copy-by-value until a separately specified linked system is
   introduced.
+
+Revision-tagged observations, stale-write rejection, and structured mutation
+effects are planned control-plane invariants, not current protocol guarantees.
+They become architectural invariants only when Phase A of
+[`agent-control-plane.md`](agent-control-plane.md) passes its vertical gates.
 
 ## Verification baseline
 

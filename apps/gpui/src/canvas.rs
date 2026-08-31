@@ -739,7 +739,7 @@ fn paint_stroke(
         return;
     };
     let mut builder = PathBuilder::fill();
-    for triangle in mesh.indices.chunks_exact(3) {
+    for triangle in mesh.indices.as_chunks::<3>().0 {
         let points = [
             mesh.vertices[triangle[0] as usize],
             mesh.vertices[triangle[1] as usize],
@@ -1221,7 +1221,7 @@ fn affine_text_raster_dimensions(
 }
 
 fn premultiplied_rgba_to_unpremultiplied_bgra(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u32;
         if alpha > 0 && alpha < 255 {
             for channel in &mut pixel[..3] {
@@ -1864,7 +1864,12 @@ mod tests {
         assert!(rendered.svg.contains("Rotated &amp; scaled"));
         assert!(rendered.size.cmpgt(Vec2::ZERO).all());
         let pixmap = render_svg_pixmap(rendered.svg.as_bytes(), 256, 128).unwrap();
-        assert!(pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(pixmap
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] > 0));
     }
 
     #[test]

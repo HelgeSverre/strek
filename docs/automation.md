@@ -13,6 +13,12 @@ TCP endpoint. They do not move the system cursor. The transport protocol itself
 is an implementation detail; scripts should use one of the supported interfaces
 above.
 
+This document describes the currently implemented protocol. The planned
+self-describing, revision-safe protocol is specified in
+[`agent-control-plane.md`](agent-control-plane.md); fields or tools described
+there must not be treated as implemented until their vertical delivery phase is
+complete.
+
 ## Requirements
 
 Start the Strek desktop application before issuing automation commands. The CLI
@@ -65,14 +71,27 @@ output without changing the user's configuration.
 
 ## Recommended workflow
 
-1. Call `state`/`get_state`, then `document`/`get_document` when the task
-   concerns existing artwork.
+1. Call `capabilities`/`get_capabilities` when discovering a running version,
+   then `state`/`get_state`. Prefer `query-document`/`query_document` for
+   targeted inspection; use `document`/`get_document` when the task genuinely
+   needs the complete tree and document libraries.
 2. Use the returned opaque layer IDs with `select`, `layer`, `color`, and
    `property` for semantic edits.
 3. Use enabled command IDs from `actions` for editor commands.
 4. Read `canvas` and use pointer input only for spatial interactions such as
    drawing, dragging, or editing path anchors.
 5. Reinspect the document, export an artifact, or take a screenshot.
+
+Protocol version 2 reports session-local document, workspace, and artwork
+revisions. Guarded CLI and MCP calls reject stale state and deduplicate terminal
+responses within the running process's bounded 256-response cache. Responses to
+successful non-observation requests include a compact revision/effect receipt.
+
+Atomic semantic batches, delta queries, and entity-level receipt effects are not
+implemented yet. Entity queries are bounded to 512 layers and make style and
+computed geometry opt-in. Evicted sequences fail explicitly instead of being re-executed.
+These limitations are explicit so agents do not infer stronger concurrency
+guarantees from a successful JSON response.
 
 Successful state-changing requests include the settled post-action state, so a
 separate state request is often unnecessary.
@@ -85,7 +104,9 @@ Running `strek automate` without a subcommand is equivalent to
 | Command | Purpose |
 | --- | --- |
 | `strek automate state` | Inspect the editor, window, canvas, selection, and available actions. |
+| `strek automate capabilities` | Discover operation families, parameters, effects, costs, authority classes, limits, and current availability. |
 | `strek automate document` | Inspect the document tree, session-stable layer IDs, styles, world bounds, and transforms. |
+| `strek automate query-document [--descendants] [--style] [--geometry] [layer-id ...]` | Inspect named layers (or the root) with bounded descendants and opt-in expensive projections. |
 | `strek automate new [--discard]` | Create a document, optionally discarding unsaved changes. |
 | `strek automate open <absolute-path> [--discard]` | Open a native document or import a supported SVG. |
 | `strek automate save <absolute-path>` | Save the current document in Strek's native format. |
@@ -101,6 +122,27 @@ Running `strek automate` without a subcommand is equivalent to
 | `strek automate ui <target> <show\|hide>` | Show or hide a supported panel or overlay. |
 | `strek automate screenshot <output.png>` | On macOS, save a complete window screenshot without activating Strek. |
 
+Guard a normal CLI command with the session and revisions returned by `state`:
+
+```sh
+strek automate guarded \
+  --request-id agent-step-7 \
+  --request-sequence 4 \
+  --session-id SESSION_ID \
+  --document-revision 12 \
+  --workspace-revision 9 \
+  -- action edit.undo
+```
+
+`request_id` requires `session_id` and `request_sequence`; it is limited to 128
+ASCII letters, digits, periods, underscores, colons, and hyphens. Use exactly
+`state.retry_window.next_sequence` for a new guarded call. The server returns
+the originally accepted response when that session/sequence is retried with the
+same request ID. A retained retry uses no additional edit or sequence number.
+Once a sequence is older than `retained_from`, it fails with `request_expired`
+instead of executing again. A session changes when the process restarts or the
+document is replaced.
+
 The CLI accepts these UI targets: `main-menu`, `command-palette`,
 `layers-panel`, `design-panel`, `fill-color-picker`, `stroke-color-picker`,
 `frame-background-color-picker`, `color-library`, and `precision-controls`.
@@ -113,9 +155,13 @@ JSON and exit nonzero when the request fails:
 | Field | Meaning |
 | --- | --- |
 | `ok` | Whether Strek accepted and completed the request. |
+| `protocol_version` | Automation response contract version; currently `2`. |
 | `message` | A human-readable result or error. |
+| `error` | Stable machine error code and message for rejected requests. |
+| `receipt` | Operation, request ID, before/after revisions, and coarse document/workspace effect for a successful mutation. |
 | `state` | Current automation state, when available. |
 | `document` | Document-tree inspection result for `document`. |
+| `document_query` | Bounded entity projection returned by `query-document`; `style` and `geometry` are absent unless requested. |
 | `artifact` | Inline export metadata and base64 payload when export has no path. |
 
 `screenshot` prints the output path on success.
@@ -127,6 +173,9 @@ JSON and exit nonzero when the request fails:
 | Field | Meaning |
 | --- | --- |
 | `process_id` | Process ID of the running desktop application. |
+| `protocol_version` | Automation protocol version; currently `2`. |
+| `revisions` | Session ID plus monotonic document, workspace, and artwork revisions. |
+| `retry_window` | Next guarded request sequence, oldest retained response sequence, and bounded cache capacity. |
 | `document` | Current document name. |
 | `dirty` | Whether the document has unsaved changes. |
 | `tool` | Active tool. |
@@ -162,6 +211,19 @@ from `0` to `1`; the other values use document units. Explicit file paths must
 be absolute so the desktop app and its client cannot interpret different
 working directories. Inline artifacts are limited to 2 MiB of encoded artifact
 bytes; use a destination path for larger exports.
+
+### Capabilities
+
+`capabilities` describes the operation families implemented by the running
+binary. Each entry contains a stable `id`, summary, parameter descriptions,
+effect, cost and authority classes, whether revision guards apply, exact limits
+derived from runtime constants where applicable, and current `enabled` state.
+A disabled entry includes `disabled_reason`.
+
+The manifest is bounded metadata and does not replace request validation. Some
+families contain several actions with different parameter requirements, so the
+handler remains authoritative for a concrete call. Command-specific enablement
+continues to live in `state.actions`.
 
 ### Examples
 
@@ -327,7 +389,10 @@ from the stdio server to that application's local automation endpoint.
 | Tool | Parameters | Result |
 | --- | --- | --- |
 | `get_state` | None | Structured automation response containing current state. |
+| `get_capabilities` | None | Runtime operation manifest with current availability and limits. |
+| `guarded_call` | request ID/sequence, session ID, optional revision guards, and an automation request object | Execute any semantic request with stale-write rejection and bounded retry safety. |
 | `get_document` | None | Document tree plus grid, guides, Color Library groups, and Saved Colors with stable IDs. |
+| `query_document` | optional IDs and `include_descendants`, `include_style`, `include_geometry` | Bounded projection of named layers; empty IDs inspect only the root. |
 | `new_document` | optional `discard_changes` | Creates a new document. |
 | `open_document` | absolute `path`, optional `discard_changes` | Opens native JSON or imports supported SVG. |
 | `save_document` | absolute `path` | Saves native JSON. |

@@ -1,6 +1,24 @@
 //! GPUI-thread automation dispatch and state projection.
 
 use super::*;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+fn valid_automation_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn automation_response_key(session_id: &str, sequence: u64) -> String {
+    format!("{session_id}:{sequence}")
+}
+
+fn automation_nonce_hex(nonce: &[u8; 16]) -> String {
+    format!("{:032x}", u128::from_le_bytes(*nonce))
+}
 
 impl Strek {
     pub(super) fn start_automation(
@@ -11,15 +29,24 @@ impl Strek {
     ) {
         cx.spawn_in(window, async move |editor, cx| {
             while let Some(pending) = requests.recv().await {
-                let Some((request, responder)) = pending.begin() else {
+                let Some((call, responder)) = pending.begin() else {
                     continue;
                 };
-                let Ok(dispatch) = editor.update_in(cx, |editor, window, cx| {
-                    editor.dispatch_automation(request, window, cx)
+                let metadata = call.metadata.clone();
+                let operation = call.request.operation_name().to_owned();
+                let observation = call.request.is_observation();
+                let Ok((dispatch, before)) = editor.update_in(cx, |editor, window, cx| {
+                    let before = editor.automation_revisions();
+                    let dispatch = match editor.preflight_automation_call(&call, window) {
+                        Ok(Some(response)) => AutomationDispatch::Immediate(Box::new(response)),
+                        Ok(None) => editor.dispatch_automation(call.request, window, cx),
+                        Err(response) => AutomationDispatch::Immediate(response),
+                    };
+                    (dispatch, before)
                 }) else {
                     break;
                 };
-                let response = match dispatch {
+                let mut response = match dispatch {
                     AutomationDispatch::Immediate(response) => *response,
                     AutomationDispatch::Background(task) => {
                         let result = task.await;
@@ -31,10 +58,212 @@ impl Strek {
                         response
                     }
                 };
+                let Ok(()) = editor.update_in(cx, |editor, _window, _cx| {
+                    editor.finalize_automation_response(
+                        &metadata,
+                        &operation,
+                        observation,
+                        before,
+                        &mut response,
+                    );
+                }) else {
+                    break;
+                };
                 responder.respond(response);
             }
         })
         .detach();
+    }
+
+    fn preflight_automation_call(
+        &self,
+        call: &automation::AutomationCall,
+        window: &Window,
+    ) -> Result<Option<automation::AutomationResponse>, Box<automation::AutomationResponse>> {
+        use automation::{AutomationErrorCode, AUTOMATION_PROTOCOL_VERSION};
+
+        let current = self.automation_revisions();
+        let reject = |code, message| {
+            automation::AutomationResponse::error_with_code(
+                self.automation_state(window),
+                code,
+                message,
+            )
+        };
+        if call
+            .metadata
+            .protocol_version
+            .is_some_and(|version| version != AUTOMATION_PROTOCOL_VERSION)
+        {
+            return Err(Box::new(reject(
+                AutomationErrorCode::ProtocolVersionMismatch,
+                format!("automation protocol {AUTOMATION_PROTOCOL_VERSION} is required"),
+            )));
+        }
+        if call.metadata.request_id.is_some()
+            && (call.metadata.session_id.is_none() || call.metadata.request_sequence.is_none())
+        {
+            return Err(Box::new(reject(
+                AutomationErrorCode::InvalidRequestId,
+                "request_id requires session_id and request_sequence".to_owned(),
+            )));
+        }
+        if call.metadata.request_id.is_none() && call.metadata.request_sequence.is_some() {
+            return Err(Box::new(reject(
+                AutomationErrorCode::InvalidRequestId,
+                "request_sequence requires request_id".to_owned(),
+            )));
+        }
+        if let Some(request_id) = call.metadata.request_id.as_deref() {
+            if !valid_automation_request_id(request_id) {
+                return Err(Box::new(reject(
+                    AutomationErrorCode::InvalidRequestId,
+                    "request_id must contain 1 to 128 ASCII letters, digits, '.', '_', ':', or '-'"
+                        .to_owned(),
+                )));
+            }
+            let sequence = call.metadata.request_sequence.unwrap_or_default();
+            let key = automation_response_key(
+                call.metadata.session_id.as_deref().unwrap_or_default(),
+                sequence,
+            );
+            if let Some(cached) = self.automation_responses.get(&key) {
+                if cached.request_id != request_id {
+                    return Err(Box::new(reject(
+                        AutomationErrorCode::InvalidRequestId,
+                        "request_sequence was already used with another request_id".to_owned(),
+                    )));
+                }
+                return Ok(Some(cached.response.clone()));
+            }
+        }
+        if call
+            .metadata
+            .session_id
+            .as_ref()
+            .is_some_and(|session| session != &current.session_id)
+        {
+            return Err(Box::new(reject(
+                AutomationErrorCode::SessionMismatch,
+                "the guarded automation session no longer matches the open document".to_owned(),
+            )));
+        }
+        if let Some(sequence) = call.metadata.request_sequence {
+            let next = self.automation_next_request_sequence.get();
+            if sequence < next {
+                return Err(Box::new(reject(
+                    AutomationErrorCode::RequestExpired,
+                    format!(
+                        "request_sequence {sequence} is no longer retained; next sequence is {next}"
+                    ),
+                )));
+            }
+            if sequence > next {
+                return Err(Box::new(reject(
+                    AutomationErrorCode::RequestSequenceMismatch,
+                    format!("request_sequence must be {next}"),
+                )));
+            }
+        }
+        if call
+            .metadata
+            .if_document_revision
+            .is_some_and(|revision| revision != current.document)
+        {
+            return Err(Box::new(reject(
+                AutomationErrorCode::DocumentRevisionMismatch,
+                "the document changed after the guarded automation request was prepared".to_owned(),
+            )));
+        }
+        if call
+            .metadata
+            .if_workspace_revision
+            .is_some_and(|revision| revision != current.workspace)
+        {
+            return Err(Box::new(reject(
+                AutomationErrorCode::WorkspaceRevisionMismatch,
+                "the workspace changed after the guarded automation request was prepared"
+                    .to_owned(),
+            )));
+        }
+        Ok(None)
+    }
+
+    fn finalize_automation_response(
+        &mut self,
+        metadata: &automation::AutomationRequestMetadata,
+        operation: &str,
+        observation: bool,
+        before: automation::AutomationRevisions,
+        response: &mut automation::AutomationResponse,
+    ) {
+        if response.receipt.is_none() && response.ok && !observation {
+            let after = self.automation_revisions();
+            let effect = if before.document != after.document {
+                automation::AutomationEffect::DocumentChanged
+            } else if before.workspace != after.workspace {
+                automation::AutomationEffect::WorkspaceOnly
+            } else {
+                automation::AutomationEffect::NoOp
+            };
+            response.receipt = Some(automation::AutomationReceipt {
+                request_id: metadata.request_id.clone(),
+                request_sequence: metadata.request_sequence,
+                operation: operation.to_owned(),
+                before: before.clone(),
+                after,
+                effect,
+            });
+        }
+
+        let (Some(request_id), Some(sequence), Some(session_id)) = (
+            metadata.request_id.as_deref(),
+            metadata.request_sequence,
+            metadata.session_id.as_deref(),
+        ) else {
+            return;
+        };
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|error| !error.code.cacheable())
+        {
+            return;
+        }
+        let key = automation_response_key(session_id, sequence);
+        if self.automation_responses.contains_key(&key) {
+            return;
+        }
+        if session_id == self.automation_revisions().session_id
+            && sequence == self.automation_next_request_sequence.get()
+        {
+            self.automation_next_request_sequence
+                .set(sequence.saturating_add(1));
+        }
+        self.automation_responses.insert(
+            key.clone(),
+            CachedAutomationResponse {
+                session_id: session_id.to_owned(),
+                sequence,
+                request_id: request_id.to_owned(),
+                response: response.clone(),
+            },
+        );
+        self.automation_response_order.push_back(key);
+        while self.automation_response_order.len() > AUTOMATION_DEDUPLICATION_LIMIT {
+            if let Some(expired) = self.automation_response_order.pop_front() {
+                self.automation_responses.remove(&expired);
+            }
+        }
+        if let Some(state) = response.state.as_mut() {
+            state.retry_window = self.automation_retry_window(&state.revisions.session_id);
+        }
+        if let Some(cached) = self
+            .automation_responses
+            .get_mut(&automation_response_key(session_id, sequence))
+        {
+            cached.response = response.clone();
+        }
     }
 
     fn dispatch_automation(
@@ -230,6 +459,13 @@ impl Strek {
 
         let result = match request {
             AutomationRequest::State => Ok("state read".to_owned()),
+            AutomationRequest::Capabilities => {
+                let state = self.automation_state(window);
+                let mut response =
+                    automation::AutomationResponse::success(state, "automation capabilities read");
+                response.capabilities = Some(self.automation_capabilities());
+                return response;
+            }
             AutomationRequest::Document => {
                 let state = self.automation_state(window);
                 return match self.automation_document() {
@@ -237,6 +473,28 @@ impl Strek {
                         let mut response =
                             automation::AutomationResponse::success(state, "document read");
                         response.document = Some(document);
+                        response
+                    }
+                    Err(error) => automation::AutomationResponse::error(state, error),
+                };
+            }
+            AutomationRequest::QueryDocument {
+                ids,
+                include_descendants,
+                include_style,
+                include_geometry,
+            } => {
+                let state = self.automation_state(window);
+                return match self.automation_document_query(
+                    &ids,
+                    include_descendants,
+                    include_style,
+                    include_geometry,
+                ) {
+                    Ok(query) => {
+                        let mut response =
+                            automation::AutomationResponse::success(state, "document query read");
+                        response.document_query = Some(query);
                         response
                     }
                     Err(error) => automation::AutomationResponse::error(state, error),
@@ -853,6 +1111,104 @@ impl Strek {
         }
     }
 
+    fn automation_revisions(&self) -> automation::AutomationRevisions {
+        if self.automation_request_epoch.get() != self.document_epoch {
+            self.automation_request_epoch.set(self.document_epoch);
+            self.automation_next_request_sequence.set(0);
+        }
+        let document_identity = (self.document_epoch, self.editor.current_revision());
+        if document_identity != self.automation_document_identity.get() {
+            self.automation_document_identity.set(document_identity);
+            self.automation_document_revision
+                .set(self.automation_document_revision.get().saturating_add(1));
+        }
+
+        let workspace_fingerprint = self.automation_workspace_fingerprint();
+        if workspace_fingerprint != self.automation_workspace_fingerprint.get() {
+            self.automation_workspace_fingerprint
+                .set(workspace_fingerprint);
+            self.automation_workspace_revision
+                .set(self.automation_workspace_revision.get().saturating_add(1));
+        }
+
+        let artwork_identity = (
+            self.document_epoch,
+            self.editor.current_revision(),
+            self.editor.transient_artwork_revision(),
+        );
+        if artwork_identity != self.automation_artwork_identity.get() {
+            self.automation_artwork_identity.set(artwork_identity);
+            self.automation_artwork_revision
+                .set(self.automation_artwork_revision.get().saturating_add(1));
+        }
+
+        automation::AutomationRevisions {
+            session_id: format!(
+                "{}-{:016x}",
+                automation_nonce_hex(&self.automation_session_nonce),
+                self.document_epoch
+            ),
+            document: self.automation_document_revision.get(),
+            workspace: self.automation_workspace_revision.get(),
+            artwork: self.automation_artwork_revision.get(),
+        }
+    }
+
+    fn automation_workspace_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        format!("{:?}", self.editor.tool).hash(&mut hasher);
+        format!("{:?}", self.editor.interaction_kind()).hash(&mut hasher);
+        self.editor
+            .selection()
+            .iter()
+            .for_each(|id| id.hash(&mut hasher));
+        let view = self.editor.view();
+        view.zoom.to_bits().hash(&mut hasher);
+        view.pan.x.to_bits().hash(&mut hasher);
+        view.pan.y.to_bits().hash(&mut hasher);
+        self.show_layers_panel.hash(&mut hasher);
+        self.show_design_panel.hash(&mut hasher);
+        format!("{:?}", self.open_menu).hash(&mut hasher);
+        self.command_palette.is_some().hash(&mut hasher);
+        self.property_color_input.is_some().hash(&mut hasher);
+        self.color_library_open.hash(&mut hasher);
+        self.precision_menu_open.hash(&mut hasher);
+        self.workspace_preferences.show_rulers.hash(&mut hasher);
+        self.workspace_preferences.show_grid.hash(&mut hasher);
+        self.workspace_preferences.show_guides.hash(&mut hasher);
+        self.workspace_preferences.guides_locked.hash(&mut hasher);
+        self.workspace_preferences
+            .snapping_enabled
+            .hash(&mut hasher);
+        self.workspace_preferences.snap_to_objects.hash(&mut hasher);
+        self.workspace_preferences.snap_to_guides.hash(&mut hasher);
+        self.workspace_preferences.snap_to_grid.hash(&mut hasher);
+        self.workspace_preferences
+            .snap_tolerance
+            .to_bits()
+            .hash(&mut hasher);
+        self.layers_panel_width.to_bits().hash(&mut hasher);
+        self.design_panel_width.to_bits().hash(&mut hasher);
+        self.canvas_input_bounds
+            .map(|bounds| {
+                (
+                    bounds.origin.x.0.to_bits(),
+                    bounds.origin.y.0.to_bits(),
+                    bounds.size.width.0.to_bits(),
+                    bounds.size.height.0.to_bits(),
+                )
+            })
+            .hash(&mut hasher);
+        self.layer_context_menu.is_some().hash(&mut hasher);
+        self.property_color_input.is_some().hash(&mut hasher);
+        self.zoom_input.is_some().hash(&mut hasher);
+        self.numeric_property_input.is_some().hash(&mut hasher);
+        self.guide_position_input.is_some().hash(&mut hasher);
+        self.layer_name_input.is_some().hash(&mut hasher);
+        self.numeric_property_scrub.is_some().hash(&mut hasher);
+        hasher.finish()
+    }
+
     fn automation_state(&self, window: &Window) -> automation::AutomationState {
         let bounds = window.bounds();
         let view = self.editor.view();
@@ -877,8 +1233,13 @@ impl Strek {
             })
             .collect();
 
+        let revisions = self.automation_revisions();
+        let retry_window = self.automation_retry_window(&revisions.session_id);
         automation::AutomationState {
             process_id: std::process::id(),
+            protocol_version: automation::AUTOMATION_PROTOCOL_VERSION,
+            revisions,
+            retry_window,
             document: self.document_name(),
             dirty: self.document_is_dirty(),
             tool: automation_tool_name(self.editor.tool).to_owned(),
@@ -905,6 +1266,22 @@ impl Strek {
             guides_visible: self.workspace_preferences.show_guides,
             numeric_property_scrub_active: self.numeric_property_scrub.is_some(),
             actions,
+        }
+    }
+
+    fn automation_retry_window(&self, session_id: &str) -> automation::AutomationRetryWindow {
+        let next_sequence = self.automation_next_request_sequence.get();
+        let retained_from = self
+            .automation_responses
+            .values()
+            .filter(|entry| entry.session_id == session_id)
+            .map(|entry| entry.sequence)
+            .min()
+            .unwrap_or(next_sequence);
+        automation::AutomationRetryWindow {
+            next_sequence,
+            retained_from,
+            capacity: AUTOMATION_DEDUPLICATION_LIMIT,
         }
     }
 
@@ -1045,6 +1422,235 @@ impl Strek {
         Ok(document)
     }
 
+    fn automation_document_query(
+        &mut self,
+        requested_ids: &[String],
+        include_descendants: bool,
+        include_style: bool,
+        include_geometry: bool,
+    ) -> Result<automation::AutomationDocumentQuery, String> {
+        let root = self.editor.document().root;
+        let requested = if requested_ids.is_empty() {
+            vec![root]
+        } else {
+            requested_ids
+                .iter()
+                .map(|id| parse_automation_node_id(self.editor.document(), id))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut ids = Vec::new();
+        for id in requested {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            if include_descendants {
+                for descendant in self.editor.document().descendants(id) {
+                    if !ids.contains(&descendant) {
+                        ids.push(descendant);
+                    }
+                    if ids.len() > MAX_AUTOMATION_QUERY_LAYERS {
+                        return Err(format!(
+                            "document query exceeds the {MAX_AUTOMATION_QUERY_LAYERS}-layer limit; query a narrower subtree"
+                        ));
+                    }
+                }
+            }
+        }
+        if ids.len() > MAX_AUTOMATION_QUERY_LAYERS {
+            return Err(format!(
+                "document query exceeds the {MAX_AUTOMATION_QUERY_LAYERS}-layer limit"
+            ));
+        }
+
+        let mut layers = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some((parent, children, name, kind, visible, locked, opacity, fill, stroke)) =
+                self.editor.document().get(id).and_then(|node| {
+                    (!node.deleted).then(|| {
+                        (
+                            node.parent,
+                            node.children.clone(),
+                            node.name.clone(),
+                            automation_node_kind(&node.kind).to_owned(),
+                            node.visible,
+                            node.locked,
+                            node.style.opacity,
+                            node.style.fill.as_ref().map(color_picker::format_paint),
+                            node.style
+                                .stroke
+                                .as_ref()
+                                .map(|stroke| automation::AutomationStroke {
+                                    color: color_picker::format_paint(&stroke.paint),
+                                    width: stroke.width,
+                                }),
+                        )
+                    })
+                })
+            else {
+                continue;
+            };
+            let style = include_style.then_some(automation::AutomationProjectedStyle {
+                opacity,
+                fill,
+                stroke,
+            });
+            let geometry = include_geometry.then(|| {
+                let world = self
+                    .editor
+                    .layer_world_transform(id)
+                    .unwrap_or(glam::Affine2::IDENTITY);
+                automation::AutomationProjectedGeometry {
+                    world_bounds: self.editor.layer_world_bounds(id).map(|bounds| {
+                        automation::AutomationBounds {
+                            x: bounds.min.x,
+                            y: bounds.min.y,
+                            width: bounds.width(),
+                            height: bounds.height(),
+                        }
+                    }),
+                    world_transform: [
+                        world.matrix2.x_axis.x,
+                        world.matrix2.x_axis.y,
+                        world.matrix2.y_axis.x,
+                        world.matrix2.y_axis.y,
+                        world.translation.x,
+                        world.translation.y,
+                    ],
+                }
+            });
+            layers.push(automation::AutomationProjectedLayer {
+                id: automation_node_id(id),
+                parent_id: parent.map(automation_node_id),
+                child_ids: children.into_iter().map(automation_node_id).collect(),
+                name,
+                kind,
+                visible,
+                locked,
+                selected: self.editor.selection().contains(id),
+                style,
+                geometry,
+            });
+        }
+        Ok(automation::AutomationDocumentQuery {
+            root_id: automation_node_id(root),
+            layers,
+            truncated: false,
+        })
+    }
+
+    fn automation_capabilities(&self) -> Vec<automation::AutomationCapability> {
+        automation::AUTOMATION_CAPABILITY_SPECS
+            .iter()
+            .zip(automation::AutomationOperationKind::ALL)
+            .map(|(spec, kind)| {
+                let (enabled, disabled_reason) = self.automation_capability_availability(kind);
+                automation::AutomationCapability {
+                    id: spec.id.to_owned(),
+                    summary: spec.summary.to_owned(),
+                    effect: spec.effect,
+                    cost: spec.cost,
+                    authority: spec.authority,
+                    guarded: spec.effect != automation::AutomationEffectClass::Read,
+                    enabled,
+                    disabled_reason,
+                    parameters: spec
+                        .parameters
+                        .iter()
+                        .map(|parameter| automation::AutomationParameter {
+                            name: parameter.name.to_owned(),
+                            required: parameter.required,
+                            value_type: parameter.value_type,
+                            description: parameter.description.to_owned(),
+                        })
+                        .collect(),
+                    limits: automation_capability_limits(kind, spec.limits),
+                }
+            })
+            .collect()
+    }
+
+    fn automation_capability_availability(
+        &self,
+        kind: automation::AutomationOperationKind,
+    ) -> (bool, Option<String>) {
+        use automation::AutomationOperationKind;
+
+        let disabled = |reason: &str| (false, Some(reason.to_owned()));
+        match kind {
+            AutomationOperationKind::State
+            | AutomationOperationKind::Capabilities
+            | AutomationOperationKind::Document
+            | AutomationOperationKind::QueryDocument
+            | AutomationOperationKind::Select
+            | AutomationOperationKind::SetPrecision
+            | AutomationOperationKind::Guide
+            | AutomationOperationKind::ColorGroup
+            | AutomationOperationKind::SavedColor
+            | AutomationOperationKind::SetLayerProperties
+            | AutomationOperationKind::SetUi
+            | AutomationOperationKind::Activate => (true, None),
+            AutomationOperationKind::NewDocument
+            | AutomationOperationKind::OpenDocument
+            | AutomationOperationKind::SaveDocument => {
+                if self.file_operation == FileOperation::Idle {
+                    (true, None)
+                } else {
+                    disabled("a file operation is already running")
+                }
+            }
+            AutomationOperationKind::Export => {
+                if self.file_operation != FileOperation::Idle {
+                    disabled("a file operation is already running")
+                } else if !self.has_visible_artwork() {
+                    disabled("the document has no visible artwork")
+                } else {
+                    (true, None)
+                }
+            }
+            AutomationOperationKind::Action => {
+                let any_enabled = commands::COMMANDS.iter().any(|spec| {
+                    matches!(spec.target, commands::CommandTarget::Editor(_))
+                        && self.command_is_enabled(spec.target)
+                });
+                if any_enabled {
+                    (true, None)
+                } else {
+                    disabled("no semantic editor command is currently enabled")
+                }
+            }
+            AutomationOperationKind::SetColor | AutomationOperationKind::SetNumericProperty => {
+                if self.editor.selection().is_empty() {
+                    disabled("select at least one layer first")
+                } else {
+                    (true, None)
+                }
+            }
+            AutomationOperationKind::Pointer => {
+                if self.canvas_input_bounds.is_none() {
+                    disabled("the canvas has not completed layout")
+                } else if self.file_operation == FileOperation::Opening {
+                    disabled("the document is opening")
+                } else if self.numeric_property_scrub.is_some() {
+                    disabled("a numeric property scrub is active")
+                } else if self.command_palette.is_some()
+                    || self.open_menu.is_some()
+                    || self.layer_context_menu.is_some()
+                {
+                    disabled("an overlay is intercepting canvas input")
+                } else {
+                    (true, None)
+                }
+            }
+            AutomationOperationKind::Text => {
+                if self.editor.text_input_snapshot().is_none() {
+                    disabled("no semantic text edit is active")
+                } else {
+                    (true, None)
+                }
+            }
+        }
+    }
+
     fn automation_selection(
         &mut self,
         ids: &[String],
@@ -1138,6 +1744,69 @@ impl Strek {
     }
 }
 
+fn automation_capability_limits(
+    kind: automation::AutomationOperationKind,
+    declared: &[&str],
+) -> Vec<String> {
+    use automation::AutomationOperationKind;
+
+    let mut limits = declared
+        .iter()
+        .map(|limit| (*limit).to_owned())
+        .collect::<Vec<_>>();
+    match kind {
+        AutomationOperationKind::Capabilities => {
+            limits.push(format!("response_bytes={}", automation::MAX_RESPONSE_BYTES));
+        }
+        AutomationOperationKind::Document => {
+            limits.push(format!("layers={MAX_AUTOMATION_DOCUMENT_LAYERS}"));
+            limits.push(format!("response_bytes={MAX_AUTOMATION_DOCUMENT_BYTES}"));
+        }
+        AutomationOperationKind::QueryDocument => {
+            limits.push(format!("layers={MAX_AUTOMATION_QUERY_LAYERS}"));
+            limits.push(format!("response_bytes={MAX_AUTOMATION_DOCUMENT_BYTES}"));
+        }
+        AutomationOperationKind::OpenDocument | AutomationOperationKind::SaveDocument => {
+            limits.push(format!("native_bytes={}", document_io::MAX_DOCUMENT_BYTES));
+        }
+        AutomationOperationKind::Export => {
+            limits.push(format!(
+                "inline_artifact_bytes={MAX_INLINE_AUTOMATION_ARTIFACT_BYTES}"
+            ));
+        }
+        AutomationOperationKind::Select | AutomationOperationKind::SetLayerProperties => {
+            limits.push(format!("ids={MAX_AUTOMATION_DOCUMENT_LAYERS}"));
+        }
+        AutomationOperationKind::Guide => {
+            limits.push(format!("guides={}", editor_core::MAX_GUIDES));
+        }
+        AutomationOperationKind::ColorGroup => {
+            limits.push(format!("groups={}", editor_core::MAX_COLOR_GROUPS));
+            limits.push(format!("name_bytes={}", editor_core::MAX_COLOR_NAME_BYTES));
+        }
+        AutomationOperationKind::SavedColor => {
+            limits.push(format!("colors={}", editor_core::MAX_SAVED_COLORS));
+            limits.push(format!("name_bytes={}", editor_core::MAX_COLOR_NAME_BYTES));
+        }
+        AutomationOperationKind::Text => {
+            limits.push(format!(
+                "text_bytes={}",
+                editor_core::MAX_TEXT_BYTES_PER_NODE
+            ));
+        }
+        AutomationOperationKind::State
+        | AutomationOperationKind::NewDocument
+        | AutomationOperationKind::Action
+        | AutomationOperationKind::SetColor
+        | AutomationOperationKind::SetNumericProperty
+        | AutomationOperationKind::SetPrecision
+        | AutomationOperationKind::Pointer
+        | AutomationOperationKind::SetUi
+        | AutomationOperationKind::Activate => {}
+    }
+    limits
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1150,6 +1819,387 @@ mod tests {
 
     fn test_editor(cx: &mut gpui::TestAppContext) -> (Entity<Strek>, &mut gpui::VisualTestContext) {
         cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx))
+    }
+
+    #[gpui::test]
+    fn guarded_retry_returns_cached_receipt_without_repeating_edit(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        let (request_sender, request_receiver) = tokio::sync::mpsc::unbounded_channel();
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.start_automation(request_receiver, window, cx)
+            });
+        });
+        let before = editor.update(cx, |editor, _| editor.automation_revisions());
+        let guide_count = editor.update(cx, |editor, _| editor.editor.document().guides.len());
+        let call = automation::AutomationCall {
+            metadata: automation::AutomationRequestMetadata {
+                protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                request_id: Some("retry-guide-1".to_owned()),
+                request_sequence: Some(0),
+                session_id: Some(before.session_id.clone()),
+                if_document_revision: Some(before.document),
+                if_workspace_revision: Some(before.workspace),
+            },
+            request: automation::AutomationRequest::Guide {
+                action: automation::GuideAction::Add,
+                id: None,
+                axis: Some(automation::GuideAxis::Horizontal),
+                position: Some(42.0),
+            },
+        };
+
+        let (first, first_response) = automation::pending_call_for_test(call.clone());
+        request_sender.send(first).unwrap();
+        cx.run_until_parked();
+        let first_response = first_response.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(first_response.ok, "{:?}", first_response.message);
+        let first_receipt = first_response.receipt.as_ref().unwrap();
+        assert_eq!(
+            first_receipt.effect,
+            automation::AutomationEffect::DocumentChanged
+        );
+        assert_eq!(
+            first_response
+                .state
+                .as_ref()
+                .unwrap()
+                .retry_window
+                .next_sequence,
+            1
+        );
+
+        let (retry, retry_response) = automation::pending_call_for_test(call);
+        request_sender.send(retry).unwrap();
+        cx.run_until_parked();
+        let retry_response = retry_response.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(retry_response.ok);
+        assert_eq!(
+            retry_response.receipt.as_ref().unwrap().after,
+            first_receipt.after
+        );
+        editor.update(cx, |editor, _| {
+            assert_eq!(editor.editor.document().guides.len(), guide_count + 1);
+        });
+    }
+
+    #[gpui::test]
+    fn evicted_guarded_request_is_explicitly_expired(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, _| {
+                let revisions = editor.automation_revisions();
+                for sequence in 0..=AUTOMATION_DEDUPLICATION_LIMIT as u64 {
+                    let metadata = automation::AutomationRequestMetadata {
+                        protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                        request_id: Some(format!("request-{sequence}")),
+                        request_sequence: Some(sequence),
+                        session_id: Some(revisions.session_id.clone()),
+                        if_document_revision: None,
+                        if_workspace_revision: None,
+                    };
+                    let mut response = automation::AutomationResponse::success(
+                        editor.automation_state(window),
+                        "state read",
+                    );
+                    editor.finalize_automation_response(
+                        &metadata,
+                        "state",
+                        true,
+                        revisions.clone(),
+                        &mut response,
+                    );
+                }
+                assert_eq!(
+                    editor.automation_responses.len(),
+                    AUTOMATION_DEDUPLICATION_LIMIT
+                );
+                assert_eq!(
+                    editor.automation_next_request_sequence.get(),
+                    AUTOMATION_DEDUPLICATION_LIMIT as u64 + 1
+                );
+
+                let expired = automation::AutomationCall {
+                    metadata: automation::AutomationRequestMetadata {
+                        protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                        request_id: Some("request-0".to_owned()),
+                        request_sequence: Some(0),
+                        session_id: Some(revisions.session_id.clone()),
+                        if_document_revision: None,
+                        if_workspace_revision: None,
+                    },
+                    request: automation::AutomationRequest::State,
+                };
+                let response = editor
+                    .preflight_automation_call(&expired, window)
+                    .unwrap_err();
+                assert_eq!(
+                    response.error.as_ref().unwrap().code,
+                    automation::AutomationErrorCode::RequestExpired
+                );
+
+                let retry_window = editor.automation_retry_window(&revisions.session_id);
+                assert_eq!(retry_window.retained_from, 1);
+                assert_eq!(
+                    retry_window.next_sequence,
+                    AUTOMATION_DEDUPLICATION_LIMIT as u64 + 1
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn future_sequence_rejection_does_not_block_that_sequence(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, _| {
+                let revisions = editor.automation_revisions();
+                let future = automation::AutomationCall {
+                    metadata: automation::AutomationRequestMetadata {
+                        protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                        request_id: Some("future-1".to_owned()),
+                        request_sequence: Some(1),
+                        session_id: Some(revisions.session_id.clone()),
+                        if_document_revision: None,
+                        if_workspace_revision: None,
+                    },
+                    request: automation::AutomationRequest::State,
+                };
+                let mut response = *editor
+                    .preflight_automation_call(&future, window)
+                    .unwrap_err();
+                assert_eq!(
+                    response.error.as_ref().unwrap().code,
+                    automation::AutomationErrorCode::RequestSequenceMismatch
+                );
+                editor.finalize_automation_response(
+                    &future.metadata,
+                    "state",
+                    true,
+                    revisions.clone(),
+                    &mut response,
+                );
+                assert!(editor.automation_responses.is_empty());
+                assert_eq!(editor.automation_next_request_sequence.get(), 0);
+
+                let current = automation::AutomationCall {
+                    metadata: automation::AutomationRequestMetadata {
+                        request_id: Some("current-0".to_owned()),
+                        request_sequence: Some(0),
+                        ..future.metadata
+                    },
+                    request: automation::AutomationRequest::State,
+                };
+                assert!(editor
+                    .preflight_automation_call(&current, window)
+                    .unwrap()
+                    .is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn stale_guard_is_rejected_before_document_mutation(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, _| {
+                let before = editor.automation_revisions();
+                editor
+                    .editor
+                    .add_guide(editor_core::GuideAxis::Horizontal, 12.0)
+                    .unwrap();
+                let guide_count = editor.editor.document().guides.len();
+                let call = automation::AutomationCall {
+                    metadata: automation::AutomationRequestMetadata {
+                        protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                        request_id: None,
+                        request_sequence: None,
+                        session_id: Some(before.session_id),
+                        if_document_revision: Some(before.document),
+                        if_workspace_revision: None,
+                    },
+                    request: automation::AutomationRequest::Guide {
+                        action: automation::GuideAction::Add,
+                        id: None,
+                        axis: Some(automation::GuideAxis::Vertical),
+                        position: Some(24.0),
+                    },
+                };
+
+                let response = editor.preflight_automation_call(&call, window).unwrap_err();
+                assert_eq!(
+                    response.error.unwrap().code,
+                    automation::AutomationErrorCode::DocumentRevisionMismatch
+                );
+                assert_eq!(editor.editor.document().guides.len(), guide_count);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn automation_document_revision_remains_monotonic_across_undo(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        editor.update(cx, |editor, _| {
+            let initial = editor.automation_revisions().document;
+            editor
+                .editor
+                .add_guide(editor_core::GuideAxis::Horizontal, 12.0)
+                .unwrap();
+            let edited = editor.automation_revisions().document;
+            assert!(edited > initial);
+            assert!(editor.editor.execute_action(EditorAction::Undo));
+            let undone = editor.automation_revisions().document;
+            assert!(undone > edited);
+        });
+    }
+
+    #[gpui::test]
+    fn capability_manifest_reports_dynamic_availability(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            let response = editor.update(cx, |editor, cx| {
+                editor.handle_automation(automation::AutomationRequest::Capabilities, window, cx)
+            });
+            assert!(response.ok);
+            let capabilities = response.capabilities.unwrap();
+            assert_eq!(
+                capabilities.len(),
+                automation::AutomationOperationKind::ALL.len()
+            );
+            let state = capabilities
+                .iter()
+                .find(|capability| capability.id == "state")
+                .unwrap();
+            assert!(state.enabled);
+            assert_eq!(state.effect, automation::AutomationEffectClass::Read);
+            assert!(!state.guarded);
+
+            let text = capabilities
+                .iter()
+                .find(|capability| capability.id == "text")
+                .unwrap();
+            assert!(!text.enabled);
+            assert!(text
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("text edit")));
+
+            let set_ui = capabilities
+                .iter()
+                .find(|capability| capability.id == "set_ui")
+                .unwrap();
+            assert_eq!(
+                set_ui
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name == "visible")
+                    .unwrap()
+                    .value_type,
+                automation::AutomationParameterType::Boolean
+            );
+            let guide = capabilities
+                .iter()
+                .find(|capability| capability.id == "guide")
+                .unwrap();
+            assert!(guide
+                .limits
+                .contains(&format!("guides={}", editor_core::MAX_GUIDES)));
+        });
+    }
+
+    #[gpui::test]
+    fn projected_document_query_omits_expensive_fields_until_requested(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            let compact = editor.update(cx, |editor, cx| {
+                editor.handle_automation(
+                    automation::AutomationRequest::QueryDocument {
+                        ids: Vec::new(),
+                        include_descendants: false,
+                        include_style: false,
+                        include_geometry: false,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            let compact = compact.document_query.unwrap();
+            assert_eq!(compact.layers.len(), 1);
+            assert!(compact.layers[0].style.is_none());
+            assert!(compact.layers[0].geometry.is_none());
+
+            let detailed = editor.update(cx, |editor, cx| {
+                editor.handle_automation(
+                    automation::AutomationRequest::QueryDocument {
+                        ids: vec![compact.root_id],
+                        include_descendants: false,
+                        include_style: true,
+                        include_geometry: true,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            let detailed = detailed.document_query.unwrap();
+            assert_eq!(detailed.layers.len(), 1);
+            assert!(detailed.layers[0].style.is_some());
+            assert!(detailed.layers[0].geometry.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn accepted_retry_survives_document_session_replacement(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = test_editor(cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, _| {
+                let before = editor.automation_revisions();
+                let request_id = "open-retry-1";
+                let call = automation::AutomationCall {
+                    metadata: automation::AutomationRequestMetadata {
+                        protocol_version: Some(automation::AUTOMATION_PROTOCOL_VERSION),
+                        request_id: Some(request_id.to_owned()),
+                        request_sequence: Some(0),
+                        session_id: Some(before.session_id.clone()),
+                        if_document_revision: Some(before.document),
+                        if_workspace_revision: None,
+                    },
+                    request: automation::AutomationRequest::NewDocument {
+                        discard_changes: true,
+                    },
+                };
+                let mut accepted = automation::AutomationResponse::success(
+                    editor.automation_state(window),
+                    "opened replacement",
+                );
+                accepted.receipt = Some(automation::AutomationReceipt {
+                    request_id: Some(request_id.to_owned()),
+                    request_sequence: Some(0),
+                    operation: "open_document".to_owned(),
+                    before: before.clone(),
+                    after: before.clone(),
+                    effect: automation::AutomationEffect::NoOp,
+                });
+                let key = automation_response_key(&before.session_id, 0);
+                editor.automation_responses.insert(
+                    key,
+                    CachedAutomationResponse {
+                        session_id: before.session_id.clone(),
+                        sequence: 0,
+                        request_id: request_id.to_owned(),
+                        response: accepted.clone(),
+                    },
+                );
+                editor.document_epoch += 1;
+
+                let cached = editor
+                    .preflight_automation_call(&call, window)
+                    .unwrap()
+                    .expect("an accepted request must remain retryable after replacement");
+                assert_eq!(cached.message, accepted.message);
+            });
+        });
     }
 
     #[gpui::test]

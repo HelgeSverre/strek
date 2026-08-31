@@ -253,7 +253,7 @@ fn checked_raster_dimensions(size: Vec2) -> Result<(u32, u32), ExportError> {
 
 fn encode_jpeg(premultiplied_rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ExportError> {
     let mut rgb = Vec::with_capacity(premultiplied_rgba.len() / 4 * 3);
-    for pixel in premultiplied_rgba.chunks_exact(4) {
+    for pixel in premultiplied_rgba.as_chunks::<4>().0 {
         let white = 255 - pixel[3];
         rgb.extend_from_slice(&[
             pixel[0].saturating_add(white),
@@ -284,7 +284,7 @@ fn encode_webp(
 }
 
 fn unpremultiply_rgba(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = u32::from(pixel[3]);
         if alpha > 0 && alpha < 255 {
             for channel in &mut pixel[..3] {

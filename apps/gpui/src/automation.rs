@@ -41,14 +41,59 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
 const CONNECTION_WORKERS: usize = 4;
 const MAX_QUEUED_CONNECTIONS: usize = 16;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const EXECUTION_HEARTBEAT: Duration = Duration::from_millis(250);
+pub(crate) const AUTOMATION_PROTOCOL_VERSION: u16 = 2;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AutomationRequestMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_document_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_workspace_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationCall {
+    #[serde(flatten)]
+    pub metadata: AutomationRequestMetadata,
+    #[serde(flatten)]
+    pub request: AutomationRequest,
+}
+
+impl AutomationCall {
+    pub(crate) fn legacy(request: AutomationRequest) -> Self {
+        Self {
+            metadata: AutomationRequestMetadata::default(),
+            request,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AutomationRequest {
     State,
+    Capabilities,
     Document,
+    QueryDocument {
+        #[serde(default)]
+        ids: Vec<String>,
+        #[serde(default)]
+        include_descendants: bool,
+        #[serde(default)]
+        include_style: bool,
+        #[serde(default)]
+        include_geometry: bool,
+    },
     NewDocument {
         #[serde(default)]
         discard_changes: bool,
@@ -142,6 +187,586 @@ pub(crate) enum AutomationRequest {
         visible: bool,
     },
     Activate,
+}
+
+impl AutomationRequest {
+    pub(crate) fn kind(&self) -> AutomationOperationKind {
+        match self {
+            Self::State => AutomationOperationKind::State,
+            Self::Capabilities => AutomationOperationKind::Capabilities,
+            Self::Document => AutomationOperationKind::Document,
+            Self::QueryDocument { .. } => AutomationOperationKind::QueryDocument,
+            Self::NewDocument { .. } => AutomationOperationKind::NewDocument,
+            Self::OpenDocument { .. } => AutomationOperationKind::OpenDocument,
+            Self::SaveDocument { .. } => AutomationOperationKind::SaveDocument,
+            Self::Export { .. } => AutomationOperationKind::Export,
+            Self::Action { .. } => AutomationOperationKind::Action,
+            Self::Select { .. } => AutomationOperationKind::Select,
+            Self::SetColor { .. } => AutomationOperationKind::SetColor,
+            Self::SetNumericProperty { .. } => AutomationOperationKind::SetNumericProperty,
+            Self::SetPrecision { .. } => AutomationOperationKind::SetPrecision,
+            Self::Guide { .. } => AutomationOperationKind::Guide,
+            Self::ColorGroup { .. } => AutomationOperationKind::ColorGroup,
+            Self::SavedColor { .. } => AutomationOperationKind::SavedColor,
+            Self::SetLayerProperties { .. } => AutomationOperationKind::SetLayerProperties,
+            Self::Pointer { .. } => AutomationOperationKind::Pointer,
+            Self::Text { .. } => AutomationOperationKind::Text,
+            Self::SetUi { .. } => AutomationOperationKind::SetUi,
+            Self::Activate => AutomationOperationKind::Activate,
+        }
+    }
+
+    pub(crate) fn operation_name(&self) -> &'static str {
+        self.kind().spec().id
+    }
+
+    pub(crate) fn is_observation(&self) -> bool {
+        self.kind().spec().effect == AutomationEffectClass::Read
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum AutomationOperationKind {
+    State,
+    Capabilities,
+    Document,
+    QueryDocument,
+    NewDocument,
+    OpenDocument,
+    SaveDocument,
+    Export,
+    Action,
+    Select,
+    SetColor,
+    SetNumericProperty,
+    SetPrecision,
+    Guide,
+    ColorGroup,
+    SavedColor,
+    SetLayerProperties,
+    Pointer,
+    Text,
+    SetUi,
+    Activate,
+}
+
+impl AutomationOperationKind {
+    pub(crate) const ALL: [Self; 21] = [
+        Self::State,
+        Self::Capabilities,
+        Self::Document,
+        Self::QueryDocument,
+        Self::NewDocument,
+        Self::OpenDocument,
+        Self::SaveDocument,
+        Self::Export,
+        Self::Action,
+        Self::Select,
+        Self::SetColor,
+        Self::SetNumericProperty,
+        Self::SetPrecision,
+        Self::Guide,
+        Self::ColorGroup,
+        Self::SavedColor,
+        Self::SetLayerProperties,
+        Self::Pointer,
+        Self::Text,
+        Self::SetUi,
+        Self::Activate,
+    ];
+
+    pub(crate) fn spec(self) -> &'static AutomationCapabilitySpec {
+        &AUTOMATION_CAPABILITY_SPECS[self as usize]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationEffectClass {
+    Read,
+    Document,
+    Workspace,
+    Filesystem,
+    DocumentAndWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationCostClass {
+    Metadata,
+    DocumentTraversal,
+    Layout,
+    Render,
+    Filesystem,
+    Platform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationAuthorityClass {
+    Inspect,
+    Edit,
+    FilesystemRead,
+    FilesystemWrite,
+    Platform,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AutomationParameterSpec {
+    pub name: &'static str,
+    pub required: bool,
+    pub value_type: AutomationParameterType,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationParameterType {
+    String,
+    Boolean,
+    UnsignedInteger,
+    FiniteNumber,
+    StringList,
+    Object,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AutomationCapabilitySpec {
+    pub id: &'static str,
+    pub summary: &'static str,
+    pub effect: AutomationEffectClass,
+    pub cost: AutomationCostClass,
+    pub authority: AutomationAuthorityClass,
+    pub parameters: &'static [AutomationParameterSpec],
+    pub limits: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationCapability {
+    pub id: String,
+    pub summary: String,
+    pub effect: AutomationEffectClass,
+    pub cost: AutomationCostClass,
+    pub authority: AutomationAuthorityClass,
+    pub guarded: bool,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+    pub parameters: Vec<AutomationParameter>,
+    pub limits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationParameter {
+    pub name: String,
+    pub required: bool,
+    pub value_type: AutomationParameterType,
+    pub description: String,
+}
+
+const NO_PARAMETERS: &[AutomationParameterSpec] = &[];
+const NO_LIMITS: &[&str] = &[];
+pub(crate) const AUTOMATION_CAPABILITY_SPECS: &[AutomationCapabilitySpec] = &[
+    capability(
+        "state",
+        "Inspect compact editor and workspace state",
+        AutomationEffectClass::Read,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Inspect,
+        NO_PARAMETERS,
+        NO_LIMITS,
+    ),
+    capability(
+        "capabilities",
+        "Discover automation operations and current availability",
+        AutomationEffectClass::Read,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Inspect,
+        NO_PARAMETERS,
+        NO_LIMITS,
+    ),
+    capability(
+        "document",
+        "Inspect the authored document tree and computed geometry",
+        AutomationEffectClass::Read,
+        AutomationCostClass::Layout,
+        AutomationAuthorityClass::Inspect,
+        NO_PARAMETERS,
+        NO_LIMITS,
+    ),
+    capability(
+        "query_document",
+        "Inspect selected document entities with opt-in descendants, style, and geometry",
+        AutomationEffectClass::Read,
+        AutomationCostClass::DocumentTraversal,
+        AutomationAuthorityClass::Inspect,
+        &[
+            typed_parameter(
+                "ids",
+                false,
+                AutomationParameterType::StringList,
+                "Layer IDs; empty selects the document root",
+            ),
+            typed_parameter(
+                "include_descendants",
+                false,
+                AutomationParameterType::Boolean,
+                "Include descendants of each requested layer",
+            ),
+            typed_parameter(
+                "include_style",
+                false,
+                AutomationParameterType::Boolean,
+                "Include opacity, fill, and stroke",
+            ),
+            typed_parameter(
+                "include_geometry",
+                false,
+                AutomationParameterType::Boolean,
+                "Include computed world bounds and transforms",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "new_document",
+        "Replace the current document with an empty document",
+        AutomationEffectClass::DocumentAndWorkspace,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[typed_parameter(
+            "discard_changes",
+            false,
+            AutomationParameterType::Boolean,
+            "Allow replacement of a dirty document",
+        )],
+        NO_LIMITS,
+    ),
+    capability(
+        "open_document",
+        "Open native JSON or import a supported SVG",
+        AutomationEffectClass::DocumentAndWorkspace,
+        AutomationCostClass::Filesystem,
+        AutomationAuthorityClass::FilesystemRead,
+        &[
+            parameter("path", true, "Absolute source path"),
+            typed_parameter(
+                "discard_changes",
+                false,
+                AutomationParameterType::Boolean,
+                "Allow replacement of a dirty document",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "save_document",
+        "Validate and atomically save native JSON",
+        AutomationEffectClass::Filesystem,
+        AutomationCostClass::Filesystem,
+        AutomationAuthorityClass::FilesystemWrite,
+        &[parameter("path", true, "Absolute destination path")],
+        NO_LIMITS,
+    ),
+    capability(
+        "export",
+        "Export settled visible artwork",
+        AutomationEffectClass::Filesystem,
+        AutomationCostClass::Render,
+        AutomationAuthorityClass::FilesystemWrite,
+        &[
+            parameter("format", true, "svg, svg_outlined, png, jpeg, or webp"),
+            parameter(
+                "path",
+                false,
+                "Absolute destination; omit for inline artifact",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "action",
+        "Run an enabled semantic editor command",
+        AutomationEffectClass::DocumentAndWorkspace,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[parameter(
+            "id",
+            true,
+            "Enabled command ID returned by state",
+        )],
+        NO_LIMITS,
+    ),
+    capability(
+        "select",
+        "Change selection using session-stable layer IDs",
+        AutomationEffectClass::Workspace,
+        AutomationCostClass::DocumentTraversal,
+        AutomationAuthorityClass::Edit,
+        &[
+            typed_parameter(
+                "ids",
+                true,
+                AutomationParameterType::StringList,
+                "Layer IDs returned by document",
+            ),
+            parameter("mode", false, "replace, add, remove, or toggle"),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "set_color",
+        "Set or remove selection paint",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("target", true, "fill, stroke, or frame_background"),
+            parameter("color", false, "HEX RGBA; omit to remove paint"),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "set_numeric_property",
+        "Set an absolute semantic numeric property",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Layout,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("target", true, "Numeric property target"),
+            typed_parameter(
+                "value",
+                true,
+                AutomationParameterType::FiniteNumber,
+                "Finite value in documented model units",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "set_precision",
+        "Configure precision workspace state and document grid",
+        AutomationEffectClass::DocumentAndWorkspace,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[typed_parameter(
+            "settings",
+            false,
+            AutomationParameterType::Object,
+            "Precision settings patch",
+        )],
+        NO_LIMITS,
+    ),
+    capability(
+        "guide",
+        "Add, move, remove, or clear document guides",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("action", true, "add, move, remove, or clear"),
+            typed_parameter(
+                "id",
+                false,
+                AutomationParameterType::UnsignedInteger,
+                "Guide ID",
+            ),
+            parameter("axis", false, "horizontal or vertical"),
+            typed_parameter(
+                "position",
+                false,
+                AutomationParameterType::FiniteNumber,
+                "Finite document-space coordinate",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "color_group",
+        "Manage document Color Library groups",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("action", true, "add, rename, or remove"),
+            typed_parameter(
+                "id",
+                false,
+                AutomationParameterType::UnsignedInteger,
+                "Color group ID",
+            ),
+            parameter("name", false, "UTF-8 group name"),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "saved_color",
+        "Manage or apply document Saved Colors",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("action", true, "add, update, remove, or apply"),
+            typed_parameter(
+                "id",
+                false,
+                AutomationParameterType::UnsignedInteger,
+                "Saved Color ID",
+            ),
+            typed_parameter(
+                "group_id",
+                false,
+                AutomationParameterType::UnsignedInteger,
+                "Color group ID",
+            ),
+            parameter("name", false, "UTF-8 color name"),
+            parameter("color", false, "HEX RGBA"),
+            parameter("target", false, "Paint target when applying"),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "set_layer_properties",
+        "Set layer name, visibility, or locking",
+        AutomationEffectClass::Document,
+        AutomationCostClass::DocumentTraversal,
+        AutomationAuthorityClass::Edit,
+        &[
+            typed_parameter(
+                "ids",
+                true,
+                AutomationParameterType::StringList,
+                "Layer IDs returned by document",
+            ),
+            parameter("name", false, "Name for exactly one layer"),
+            typed_parameter(
+                "visible",
+                false,
+                AutomationParameterType::Boolean,
+                "Layer visibility",
+            ),
+            typed_parameter(
+                "locked",
+                false,
+                AutomationParameterType::Boolean,
+                "Layer lock state",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "pointer",
+        "Send a canvas-local spatial pointer event",
+        AutomationEffectClass::DocumentAndWorkspace,
+        AutomationCostClass::Layout,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("phase", true, "down, move, or up"),
+            typed_parameter(
+                "x",
+                true,
+                AutomationParameterType::FiniteNumber,
+                "Finite canvas-local pixel coordinate",
+            ),
+            typed_parameter(
+                "y",
+                true,
+                AutomationParameterType::FiniteNumber,
+                "Finite canvas-local pixel coordinate",
+            ),
+            parameter("button", false, "left, middle, or right"),
+            typed_parameter(
+                "modifiers",
+                false,
+                AutomationParameterType::Object,
+                "Keyboard modifier state",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "text",
+        "Insert text into the active semantic text edit",
+        AutomationEffectClass::Document,
+        AutomationCostClass::Layout,
+        AutomationAuthorityClass::Edit,
+        &[parameter("text", true, "UTF-8 text")],
+        NO_LIMITS,
+    ),
+    capability(
+        "set_ui",
+        "Show or hide a supported panel or overlay",
+        AutomationEffectClass::Workspace,
+        AutomationCostClass::Metadata,
+        AutomationAuthorityClass::Edit,
+        &[
+            parameter("target", true, "Supported UI target"),
+            typed_parameter(
+                "visible",
+                true,
+                AutomationParameterType::Boolean,
+                "Requested visibility",
+            ),
+        ],
+        NO_LIMITS,
+    ),
+    capability(
+        "activate",
+        "Activate and focus the Strek window",
+        AutomationEffectClass::Workspace,
+        AutomationCostClass::Platform,
+        AutomationAuthorityClass::Platform,
+        NO_PARAMETERS,
+        NO_LIMITS,
+    ),
+];
+
+const fn capability(
+    id: &'static str,
+    summary: &'static str,
+    effect: AutomationEffectClass,
+    cost: AutomationCostClass,
+    authority: AutomationAuthorityClass,
+    parameters: &'static [AutomationParameterSpec],
+    limits: &'static [&'static str],
+) -> AutomationCapabilitySpec {
+    AutomationCapabilitySpec {
+        id,
+        summary,
+        effect,
+        cost,
+        authority,
+        parameters,
+        limits,
+    }
+}
+
+const fn parameter(
+    name: &'static str,
+    required: bool,
+    description: &'static str,
+) -> AutomationParameterSpec {
+    AutomationParameterSpec {
+        name,
+        required,
+        value_type: AutomationParameterType::String,
+        description,
+    }
+}
+
+const fn typed_parameter(
+    name: &'static str,
+    required: bool,
+    value_type: AutomationParameterType,
+    description: &'static str,
+) -> AutomationParameterSpec {
+    AutomationParameterSpec {
+        name,
+        required,
+        value_type,
+        description,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -394,12 +1019,21 @@ impl FromStr for UiTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AutomationResponse {
     pub ok: bool,
+    pub protocol_version: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<AutomationError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<AutomationReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<AutomationState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<AutomationDocument>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_query: Option<AutomationDocumentQuery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<AutomationCapability>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact: Option<AutomationArtifact>,
 }
@@ -408,19 +1042,38 @@ impl AutomationResponse {
     pub(crate) fn success(state: AutomationState, message: impl Into<String>) -> Self {
         Self {
             ok: true,
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
             message: Some(message.into()),
+            error: None,
+            receipt: None,
             state: Some(state),
             document: None,
+            document_query: None,
+            capabilities: None,
             artifact: None,
         }
     }
 
     pub(crate) fn error(state: AutomationState, message: impl Into<String>) -> Self {
+        Self::error_with_code(state, AutomationErrorCode::Rejected, message)
+    }
+
+    pub(crate) fn error_with_code(
+        state: AutomationState,
+        code: AutomationErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
         Self {
             ok: false,
-            message: Some(message.into()),
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            message: Some(message.clone()),
+            error: Some(AutomationError { code, message }),
+            receipt: None,
             state: Some(state),
             document: None,
+            document_query: None,
+            capabilities: None,
             artifact: None,
         }
     }
@@ -436,6 +1089,62 @@ impl AutomationResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationErrorCode {
+    Rejected,
+    ProtocolVersionMismatch,
+    InvalidRequestId,
+    RequestExpired,
+    RequestSequenceMismatch,
+    SessionMismatch,
+    DocumentRevisionMismatch,
+    WorkspaceRevisionMismatch,
+}
+
+impl AutomationErrorCode {
+    pub(crate) fn cacheable(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected | Self::DocumentRevisionMismatch | Self::WorkspaceRevisionMismatch
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationError {
+    pub code: AutomationErrorCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationEffect {
+    DocumentChanged,
+    WorkspaceOnly,
+    NoOp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationReceipt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_sequence: Option<u64>,
+    pub operation: String,
+    pub before: AutomationRevisions,
+    pub after: AutomationRevisions,
+    pub effect: AutomationEffect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AutomationRevisions {
+    pub session_id: String,
+    pub document: u64,
+    pub workspace: u64,
+    pub artwork: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AutomationDocument {
     pub root_id: String,
@@ -444,6 +1153,42 @@ pub(crate) struct AutomationDocument {
     pub guides: Vec<AutomationGuide>,
     pub color_groups: Vec<AutomationColorGroup>,
     pub saved_colors: Vec<AutomationSavedColor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationDocumentQuery {
+    pub root_id: String,
+    pub layers: Vec<AutomationProjectedLayer>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationProjectedLayer {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub child_ids: Vec<String>,
+    pub name: String,
+    pub kind: String,
+    pub visible: bool,
+    pub locked: bool,
+    pub selected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<AutomationProjectedStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<AutomationProjectedGeometry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationProjectedStyle {
+    pub opacity: f32,
+    pub fill: Option<String>,
+    pub stroke: Option<AutomationStroke>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationProjectedGeometry {
+    pub world_bounds: Option<AutomationBounds>,
+    pub world_transform: [f32; 6],
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -511,6 +1256,9 @@ pub(crate) struct AutomationArtifact {
 pub(crate) struct AutomationState {
     #[serde(default)]
     pub process_id: u32,
+    pub protocol_version: u16,
+    pub revisions: AutomationRevisions,
+    pub retry_window: AutomationRetryWindow,
     pub document: String,
     pub dirty: bool,
     pub tool: String,
@@ -544,6 +1292,13 @@ pub(crate) struct AutomationState {
     pub actions: Vec<AutomationAction>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AutomationRetryWindow {
+    pub next_sequence: u64,
+    pub retained_from: u64,
+    pub capacity: usize,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct AutomationPoint {
     pub x: f32,
@@ -566,7 +1321,7 @@ pub(crate) struct AutomationAction {
 }
 
 pub(crate) struct PendingRequest {
-    request: AutomationRequest,
+    call: AutomationCall,
     responder: SyncSender<AutomationResponse>,
     deadline: Instant,
     lifecycle: Arc<RequestLifecycle>,
@@ -924,7 +1679,7 @@ struct QueuedConnection {
 }
 
 impl PendingRequest {
-    pub(crate) fn begin(self) -> Option<(AutomationRequest, AutomationResponder)> {
+    pub(crate) fn begin(self) -> Option<(AutomationCall, AutomationResponder)> {
         if Instant::now() >= self.deadline {
             self.lifecycle.cancel_pending();
             return None;
@@ -937,7 +1692,7 @@ impl PendingRequest {
             sender: self.responder,
             lifecycle: self.lifecycle,
         };
-        Some((self.request, responder))
+        Some((self.call, responder))
     }
 
     #[cfg(test)]
@@ -945,10 +1700,10 @@ impl PendingRequest {
         self,
         make_response: impl FnOnce(AutomationRequest) -> AutomationResponse,
     ) -> bool {
-        let Some((request, responder)) = self.begin() else {
+        let Some((call, responder)) = self.begin() else {
             return false;
         };
-        responder.respond(make_response(request))
+        responder.respond(make_response(call.request))
     }
 }
 
@@ -969,11 +1724,18 @@ impl AutomationResponder {
 pub(crate) fn pending_request_for_test(
     request: AutomationRequest,
 ) -> (PendingRequest, mpsc::Receiver<AutomationResponse>) {
+    pending_call_for_test(AutomationCall::legacy(request))
+}
+
+#[cfg(test)]
+pub(crate) fn pending_call_for_test(
+    call: AutomationCall,
+) -> (PendingRequest, mpsc::Receiver<AutomationResponse>) {
     let (responder, response) = mpsc::sync_channel(1);
     let lifecycle = Arc::new(RequestLifecycle::pending());
     (
         PendingRequest {
-            request,
+            call,
             responder,
             deadline: Instant::now() + RESPONSE_TIMEOUT,
             lifecycle,
@@ -1056,8 +1818,8 @@ fn serve_connection(
             return Ok(());
         }
     };
-    let request = match serde_json::from_str(&request_json) {
-        Ok(request) => request,
+    let call = match serde_json::from_str(&request_json) {
+        Ok(call) => call,
         Err(error) => {
             write_protocol_error(&mut stream, format!("invalid automation request: {error}"))?;
             return Ok(());
@@ -1067,7 +1829,7 @@ fn serve_connection(
     let lifecycle = Arc::new(RequestLifecycle::pending());
     sender
         .send(PendingRequest {
-            request,
+            call,
             responder: response_sender,
             deadline,
             lifecycle: Arc::clone(&lifecycle),
@@ -1184,13 +1946,22 @@ fn read_request_line(stream: &mut transport::Stream, deadline: Instant) -> io::R
 }
 
 fn write_protocol_error(writer: &mut impl Write, message: impl Into<String>) -> io::Result<()> {
+    let message = message.into();
     write_json_line(
         writer,
         &AutomationResponse {
             ok: false,
-            message: Some(message.into()),
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
+            message: Some(message.clone()),
+            error: Some(AutomationError {
+                code: AutomationErrorCode::Rejected,
+                message,
+            }),
+            receipt: None,
             state: None,
             document: None,
+            document_query: None,
+            capabilities: None,
             artifact: None,
         },
     )
@@ -1209,6 +1980,7 @@ fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>>
 
     let fallback = AutomationResponse {
         ok: response.ok,
+        protocol_version: AUTOMATION_PROTOCOL_VERSION,
         message: Some(if response.ok {
             "request completed, but its response payload exceeded the automation response limit"
                 .to_owned()
@@ -1216,8 +1988,12 @@ fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>>
             "request was rejected, but its details exceeded the automation response limit"
                 .to_owned()
         }),
+        error: response.error.clone(),
+        receipt: response.receipt.clone(),
         state: None,
         document: None,
+        document_query: None,
+        capabilities: None,
         artifact: None,
     };
     let mut bytes = serde_json::to_vec(&fallback).map_err(io::Error::other)?;
@@ -1226,7 +2002,11 @@ fn serialize_response_line(response: &AutomationResponse) -> io::Result<Vec<u8>>
 }
 
 pub(crate) fn request(request: AutomationRequest) -> Result<AutomationResponse, String> {
-    let request_line = serialize_request_line(&request)?;
+    request_call(AutomationCall::legacy(request))
+}
+
+pub(crate) fn request_call(call: AutomationCall) -> Result<AutomationResponse, String> {
+    let request_line = serialize_call_line(&call)?;
     let mut stream =
         transport::connect().map_err(|error| format!("could not connect to Strek: {error}"))?;
     stream
@@ -1266,8 +2046,13 @@ fn read_response_line(reader: impl Read) -> io::Result<String> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
 }
 
+#[cfg(test)]
 fn serialize_request_line(request: &AutomationRequest) -> Result<Vec<u8>, String> {
-    let mut bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+    serialize_call_line(&AutomationCall::legacy(request.clone()))
+}
+
+fn serialize_call_line(call: &AutomationCall) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec(call).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(format!(
@@ -1279,6 +2064,15 @@ fn serialize_request_line(request: &AutomationRequest) -> Result<Vec<u8>, String
 
 pub(crate) fn run_cli(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let command = args.next().unwrap_or_else(|| "state".to_owned());
+    if command == "guarded" {
+        let call = parse_guarded_call(&mut args)?;
+        let response = request_call(call)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+        );
+        return response.into_result().map(|_| ());
+    }
     if command == "screenshot" {
         let path = args
             .next()
@@ -1307,13 +2101,87 @@ pub(crate) fn run_cli(mut args: impl Iterator<Item = String>) -> Result<(), Stri
     }
 }
 
+fn parse_guarded_call(args: &mut impl Iterator<Item = String>) -> Result<AutomationCall, String> {
+    let mut metadata = AutomationRequestMetadata {
+        protocol_version: Some(AUTOMATION_PROTOCOL_VERSION),
+        ..AutomationRequestMetadata::default()
+    };
+    let command = loop {
+        let argument = args.next().ok_or_else(|| {
+            "usage: strek automate guarded [guards] -- <command> [arguments]".to_owned()
+        })?;
+        match argument.as_str() {
+            "--" => {
+                break args
+                    .next()
+                    .ok_or_else(|| "guarded automation requires a command after `--`".to_owned())?
+            }
+            "--request-id" => metadata.request_id = Some(required_arg(args, "request id")?),
+            "--request-sequence" => {
+                metadata.request_sequence = Some(parse_u64_arg(args, "request sequence")?)
+            }
+            "--session-id" => metadata.session_id = Some(required_arg(args, "session id")?),
+            "--document-revision" => {
+                metadata.if_document_revision = Some(parse_u64_arg(args, "document revision")?)
+            }
+            "--workspace-revision" => {
+                metadata.if_workspace_revision = Some(parse_u64_arg(args, "workspace revision")?)
+            }
+            _ => return Err(format!("unknown guarded automation option `{argument}`")),
+        }
+    };
+    let request = parse_request(command, args)?;
+    Ok(AutomationCall { metadata, request })
+}
+
+fn required_arg(
+    args: &mut impl Iterator<Item = String>,
+    description: &str,
+) -> Result<String, String> {
+    args.next().ok_or_else(|| format!("missing {description}"))
+}
+
+fn parse_u64_arg(
+    args: &mut impl Iterator<Item = String>,
+    description: &str,
+) -> Result<u64, String> {
+    let value = required_arg(args, description)?;
+    value
+        .parse()
+        .map_err(|_| format!("{description} must be an unsigned integer"))
+}
+
 fn parse_request(
     command: String,
     args: &mut impl Iterator<Item = String>,
 ) -> Result<AutomationRequest, String> {
     match command.as_str() {
         "state" => no_more_args(args, AutomationRequest::State),
+        "capabilities" => no_more_args(args, AutomationRequest::Capabilities),
         "document" => no_more_args(args, AutomationRequest::Document),
+        "query-document" => {
+            let mut ids = Vec::new();
+            let mut include_descendants = false;
+            let mut include_style = false;
+            let mut include_geometry = false;
+            for argument in args {
+                match argument.as_str() {
+                    "--descendants" => include_descendants = true,
+                    "--style" => include_style = true,
+                    "--geometry" => include_geometry = true,
+                    option if option.starts_with("--") => {
+                        return Err(format!("unknown query-document option `{option}`"));
+                    }
+                    _ => ids.push(argument),
+                }
+            }
+            Ok(AutomationRequest::QueryDocument {
+                ids,
+                include_descendants,
+                include_style,
+                include_geometry,
+            })
+        }
         "new" => {
             let discard_changes = match args.next().as_deref() {
                 None => false,
@@ -1624,8 +2492,97 @@ pub(crate) fn endpoint_display() -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn capability_registry_is_complete_unique_and_index_aligned() {
+        assert_eq!(
+            AUTOMATION_CAPABILITY_SPECS.len(),
+            AutomationOperationKind::ALL.len()
+        );
+        let mut ids = HashSet::new();
+        for (kind, spec) in AutomationOperationKind::ALL
+            .into_iter()
+            .zip(AUTOMATION_CAPABILITY_SPECS)
+        {
+            assert_eq!(kind.spec().id, spec.id);
+            assert!(ids.insert(spec.id), "duplicate capability `{}`", spec.id);
+            let mut parameters = HashSet::new();
+            for parameter in spec.parameters {
+                assert!(
+                    parameters.insert(parameter.name),
+                    "duplicate parameter `{}` on `{}`",
+                    parameter.name,
+                    spec.id
+                );
+                assert!(!parameter.description.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_request_shape_deserializes_as_an_automation_call() {
+        let call: AutomationCall = serde_json::from_str(r#"{"type":"state"}"#).unwrap();
+        assert!(matches!(call.request, AutomationRequest::State));
+        assert_eq!(call.metadata.protocol_version, None);
+    }
+
+    #[test]
+    fn capabilities_use_the_legacy_wire_shape() {
+        let line = serialize_request_line(&AutomationRequest::Capabilities).unwrap();
+        assert_eq!(line, b"{\"type\":\"capabilities\"}\n");
+    }
+
+    #[test]
+    fn projected_document_cli_parses_explicit_cost_options() {
+        let mut args = ["--descendants", "--style", "--geometry", "node:7"]
+            .into_iter()
+            .map(str::to_owned);
+        let request = parse_request("query-document".to_owned(), &mut args).unwrap();
+        assert!(matches!(
+            request,
+            AutomationRequest::QueryDocument {
+                ids,
+                include_descendants: true,
+                include_style: true,
+                include_geometry: true,
+            } if ids == ["node:7"]
+        ));
+    }
+
+    #[test]
+    fn guarded_cli_call_carries_revisions_and_request_identity() {
+        let mut args = [
+            "--request-id",
+            "agent-step-7",
+            "--request-sequence",
+            "4",
+            "--session-id",
+            "session-1",
+            "--document-revision",
+            "12",
+            "--workspace-revision",
+            "9",
+            "--",
+            "action",
+            "edit.undo",
+        ]
+        .into_iter()
+        .map(str::to_owned);
+        let call = parse_guarded_call(&mut args).unwrap();
+
+        assert_eq!(call.metadata.request_id.as_deref(), Some("agent-step-7"));
+        assert_eq!(call.metadata.request_sequence, Some(4));
+        assert_eq!(call.metadata.session_id.as_deref(), Some("session-1"));
+        assert_eq!(call.metadata.if_document_revision, Some(12));
+        assert_eq!(call.metadata.if_workspace_revision, Some(9));
+        assert!(matches!(
+            call.request,
+            AutomationRequest::Action { id } if id == "edit.undo"
+        ));
+    }
 
     #[test]
     fn cli_pointer_request_rejects_non_finite_coordinates() {
@@ -1751,7 +2708,7 @@ mod tests {
         let (responder, response) = std::sync::mpsc::sync_channel(1);
         let executed = Cell::new(false);
         let pending = PendingRequest {
-            request: AutomationRequest::State,
+            call: AutomationCall::legacy(AutomationRequest::State),
             responder,
             deadline: Instant::now()
                 .checked_sub(Duration::from_secs(1))
@@ -1775,7 +2732,7 @@ mod tests {
         let (responder, response) = std::sync::mpsc::sync_channel(1);
         let lifecycle = Arc::new(RequestLifecycle::pending());
         let pending = PendingRequest {
-            request: AutomationRequest::State,
+            call: AutomationCall::legacy(AutomationRequest::State),
             responder,
             deadline: Instant::now() + Duration::from_secs(1),
             lifecycle: Arc::clone(&lifecycle),
@@ -1789,9 +2746,14 @@ mod tests {
                 finish_receiver.recv().unwrap();
                 AutomationResponse {
                     ok: true,
+                    protocol_version: AUTOMATION_PROTOCOL_VERSION,
                     message: None,
+                    error: None,
+                    receipt: None,
                     state: None,
                     document: None,
+                    document_query: None,
+                    capabilities: None,
                     artifact: None,
                 }
             })
@@ -1831,9 +2793,14 @@ mod tests {
         response_sender
             .send(AutomationResponse {
                 ok: true,
+                protocol_version: AUTOMATION_PROTOCOL_VERSION,
                 message: None,
+                error: None,
+                receipt: None,
                 state: None,
                 document: None,
+                document_query: None,
+                capabilities: None,
                 artifact: None,
             })
             .unwrap();
@@ -1901,9 +2868,14 @@ mod tests {
     fn response_writer_preserves_outcome_when_state_is_too_large() {
         let response = AutomationResponse {
             ok: true,
+            protocol_version: AUTOMATION_PROTOCOL_VERSION,
             message: Some("x".repeat(MAX_RESPONSE_BYTES)),
+            error: None,
+            receipt: None,
             state: None,
             document: None,
+            document_query: None,
+            capabilities: None,
             artifact: None,
         };
 

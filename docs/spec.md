@@ -1422,6 +1422,28 @@ intentional product backlog.
 - [x] Inline SVG, PNG, JPEG, and WebP artifact responses
 - [x] Matching command-socket, CLI, AppleScript, and MCP access
 
+### Milestone 16: Agent control plane
+
+The architecture and delivery gates are defined in
+[`agent-control-plane.md`](agent-control-plane.md). These items are incomplete
+until exercised through the real editor pipeline; schema-only work does not
+satisfy them.
+
+- [x] Session-local document, workspace, and artwork revisions
+- [x] Optimistic mutation preconditions, bounded sequenced request
+  deduplication with explicit expiry, and stable error codes
+- [ ] Structured mutation receipts with entity, history, and invalidation
+  effects
+- [ ] Runtime capability manifest with generated schemas, applicability, limits,
+  and cost classes; operation metadata and live availability are implemented,
+  while full generated parameter/result schemas remain
+- [ ] Bounded projected queries and changes-since-revision inspection; targeted
+  layer queries with opt-in descendants, style, and geometry are implemented,
+  while revision-delta inspection remains
+- [ ] Atomic semantic batches with intra-batch references and one undo entry
+- [ ] Executable verification recipes and claim-bounded evidence bundles
+- [ ] Recovery and resumable-job state exposed through the same protocol
+
 ### Product backlog
 
 The following candidates are intentionally not marked complete. They are
@@ -1437,6 +1459,8 @@ Important next candidates:
   export presets
 - Autosave and crash recovery for dirty documents
 - Boolean path operations and a more complete path/stroke editing workflow
+- Agent control-plane phases A and B, delivered alongside the first Brand Kit
+  semantic operations rather than as an isolated protocol rewrite
 
 Nice-to-have candidates:
 

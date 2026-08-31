@@ -4548,7 +4548,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strek"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.0",
@@ -4557,6 +4557,7 @@ dependencies = [
  "editor_core",
  "editor_render",
  "env_logger",
+ "getrandom 0.3.4",
  "glam",
  "gpui",
  "image",

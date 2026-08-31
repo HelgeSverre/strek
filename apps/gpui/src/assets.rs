@@ -69,6 +69,10 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/more-horizontal.svg",
         include_bytes!("../assets/icons/more-horizontal.svg"),
     ),
+    (
+        "icons/more-vertical.svg",
+        include_bytes!("../assets/icons/more-vertical.svg"),
+    ),
     ("icons/eye.svg", include_bytes!("../assets/icons/eye.svg")),
     (
         "icons/eye-off.svg",
@@ -186,7 +190,9 @@ pub enum Icon {
     Close,
     Copy,
     GripVertical,
+    #[allow(dead_code)] // Retained for future horizontal overflow controls.
     MoreHorizontal,
+    MoreVertical,
     Eye,
     EyeOff,
     Lock,
@@ -234,6 +240,7 @@ impl Icon {
             Self::Copy => "icons/copy.svg",
             Self::GripVertical => "icons/grip-vertical.svg",
             Self::MoreHorizontal => "icons/more-horizontal.svg",
+            Self::MoreVertical => "icons/more-vertical.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye-off.svg",
             Self::Lock => "icons/lock.svg",

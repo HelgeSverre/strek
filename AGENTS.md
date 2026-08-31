@@ -206,6 +206,20 @@ version-relevant match, then call `query-docs` with the full focused question.
 Use separate queries for separate concepts. Do not use Context7 for ordinary
 refactoring, business-logic debugging, code review, or general programming.
 
+## Agent control-plane work
+
+[`docs/agent-control-plane.md`](docs/agent-control-plane.md) is the design
+authority for self-description, revision-safe automation, semantic batching,
+receipts, and executable evidence. Implement it as user-visible vertical slices
+through the existing core operation path; do not create an automation-only
+document model or mutation semantics.
+
+Keep runtime capability metadata, argument validation, limits, and generated
+protocol documentation derived from one registry. Prefer bounded semantic
+queries and operations over screenshots and pointer gestures when intent has a
+stable domain representation. Evidence claims remain limited to the checks an
+evidence bundle actually records.
+
 ## Pull request branch strategy
 
 - Prefer independent pull requests based on the intended upstream base branch.

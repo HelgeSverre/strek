@@ -84,6 +84,24 @@ display-list fixtures.
 The external products are behavioral comparators, not architecture mandates or
 a demand to clone their complete feature sets.
 
+## Agent operating model
+
+The run also exercises the coherent control system defined in
+[`agent-control-plane.md`](agent-control-plane.md). Its purpose is not to add an
+automation side project: it makes every Brand Kit slice cheaper to discover,
+safer to drive, and easier to verify through the same editor semantics.
+
+For each slice, define one outcome contract containing the user scenario,
+semantic operation(s), applicability and revision preconditions, expected
+receipt, and verification recipe. The durable artifact is executable behavior
+plus evidence; do not maintain a second prose status matrix.
+
+The lead starts from a compact session descriptor and capability manifest,
+requests only the document projections needed by the slice, prefers atomic
+semantic batches to repeated pointer gestures, and uses screenshots only for
+visual or spatial judgments. After interruption, resume from revisions,
+receipts, and artifact hashes rather than relying on conversational memory.
+
 ## Loop contract
 
 1. Do not start until `v0.2.0` is committed, pushed, tagged, published, and
@@ -94,19 +112,20 @@ a demand to clone their complete feature sets.
 3. Split the north star into the smallest user-visible vertical slices that can
    be built and judged independently. Model, UI, persistence, tests, and docs
    for one behavior are one slice, not separate completion units.
-4. Before building a slice, define its user scenario, observable result,
-   positive and negative cases, resource bounds, applicable persistence and
-   history behavior, render/export evidence, semantic automation surface, and
-   focused verification commands.
+4. Before building a slice, define its outcome contract: user scenario,
+   observable result, positive and negative cases, resource bounds, applicable
+   persistence and history behavior, semantic operations and preconditions,
+   expected receipts, render/export evidence, and focused verification recipe.
 5. Give each builder explicit artifact ownership. Builders preserve concurrent
    work and may not weaken limits, assertions, or expected output to pass.
 6. After every builder iteration, use a separate fresh-context critic. Give the
    critic the goal, quality bar, base/head refs, repository rules, and actual
    artifacts, but not the builder's rationale or summary.
 7. The critic inspects the running editor, generated files, raster output,
-   persisted project, code, and tests. A critique names the largest actionable
-   gap with severity, reproduction, expected and actual behavior, and evidence
-   class. Otherwise it returns `PASS` and states what remains unverified.
+   persisted project, code, tests, and—after control-plane Phase D—its evidence
+   bundle. A critique names the largest actionable gap with severity,
+   reproduction, expected and actual behavior, and evidence class. Otherwise it
+   returns `PASS` and states what remains unverified.
 8. Return findings to the builder and send the revised artifacts to another
    fresh critic. Do not choose an arbitrary round count.
 9. After a major integration wave, a fresh smoothing critic may fix conflicts,
@@ -152,6 +171,12 @@ The Gauntlet stops only when:
   limits;
 - semantic automation can reproduce the project without fixture-specific
   hardcoding;
+- the control-plane contracts used by the finished workflow pass their own
+  phased acceptance gates; in particular, stale and retried requests do not
+  cause unintended edits, and receipts identify actual history/entity effects;
+- after control-plane Phase D, a fresh context can discover applicable
+  capabilities and reproduce every claimed check from bounded evidence without
+  the builder's narrative;
 - every latest builder artifact has a fresh critic `PASS`, and an integrated
   smoothing critic has no unresolved Critical or High findings;
 - format, strict workspace Clippy, the full workspace tests, Nextest, and audit
@@ -195,4 +220,3 @@ major integration waves. Follow AGENTS.md exactly; never weaken a gate, inflate
 an evidence claim, or count scaffolding and rejection behavior as product
 delivery.
 ```
-
