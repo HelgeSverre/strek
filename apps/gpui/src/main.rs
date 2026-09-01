@@ -3913,6 +3913,10 @@ impl Strek {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.dismiss_inline_inputs(cx);
+    }
+
+    pub(crate) fn dismiss_inline_inputs(&mut self, cx: &mut Context<Self>) {
         let color_picker_dismissed = self.property_color_input.take().is_some();
         let zoom_dismissed = self.zoom_input.take().is_some();
         let numeric_property_dismissed = self.numeric_property_input.take().is_some();

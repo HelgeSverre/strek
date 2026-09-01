@@ -225,6 +225,7 @@ impl SvgWriter {
             DisplayItem::ToolPreview { .. }
             | DisplayItem::SnapGuide { .. }
             | DisplayItem::SelectionRect { .. }
+            | DisplayItem::SelectionQuad { .. }
             | DisplayItem::MarqueeRect { .. }
             | DisplayItem::VectorAnchor { .. }
             | DisplayItem::VectorHandle { .. }

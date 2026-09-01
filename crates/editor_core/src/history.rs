@@ -1,11 +1,13 @@
 use crate::command::Command;
-use crate::Document;
+use crate::{Document, NodeId, Selection};
 
 #[derive(Debug)]
 struct HistoryEntry {
     command: Command,
     before_revision: u64,
     after_revision: u64,
+    before_selection: Option<Vec<NodeId>>,
+    after_selection: Option<Vec<NodeId>>,
 }
 
 /// Undo/redo history stack.
@@ -55,6 +57,24 @@ impl History {
     /// Push a command onto the history.
     /// This clears the redo stack.
     pub fn push(&mut self, cmd: Command) {
+        self.push_entry(cmd, None, None);
+    }
+
+    pub(crate) fn push_with_selection(
+        &mut self,
+        cmd: Command,
+        before_selection: Vec<NodeId>,
+        after_selection: Vec<NodeId>,
+    ) {
+        self.push_entry(cmd, Some(before_selection), Some(after_selection));
+    }
+
+    fn push_entry(
+        &mut self,
+        cmd: Command,
+        before_selection: Option<Vec<NodeId>>,
+        after_selection: Option<Vec<NodeId>>,
+    ) {
         // Don't push empty commands
         if cmd.is_empty() {
             return;
@@ -66,6 +86,8 @@ impl History {
             command: cmd,
             before_revision: self.current_revision,
             after_revision,
+            before_selection,
+            after_selection,
         });
         self.current_revision = after_revision;
         self.redo_stack.clear();
@@ -108,8 +130,23 @@ impl History {
     /// Undo the last command.
     /// Returns true if a command was undone.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
+        self.undo_entry(doc, None)
+    }
+
+    pub(crate) fn undo_with_selection(
+        &mut self,
+        doc: &mut Document,
+        selection: &mut Selection,
+    ) -> bool {
+        self.undo_entry(doc, Some(selection))
+    }
+
+    fn undo_entry(&mut self, doc: &mut Document, selection: Option<&mut Selection>) -> bool {
         if let Some(entry) = self.undo_stack.pop() {
             entry.command.unapply(doc);
+            if let (Some(selection), Some(before)) = (selection, &entry.before_selection) {
+                selection.set(before.iter().copied());
+            }
             self.current_revision = entry.before_revision;
             self.redo_stack.push(entry);
             true
@@ -121,8 +158,23 @@ impl History {
     /// Redo the last undone command.
     /// Returns true if a command was redone.
     pub fn redo(&mut self, doc: &mut Document) -> bool {
+        self.redo_entry(doc, None)
+    }
+
+    pub(crate) fn redo_with_selection(
+        &mut self,
+        doc: &mut Document,
+        selection: &mut Selection,
+    ) -> bool {
+        self.redo_entry(doc, Some(selection))
+    }
+
+    fn redo_entry(&mut self, doc: &mut Document, selection: Option<&mut Selection>) -> bool {
         if let Some(entry) = self.redo_stack.pop() {
             entry.command.apply(doc);
+            if let (Some(selection), Some(after)) = (selection, &entry.after_selection) {
+                selection.set(after.iter().copied());
+            }
             self.current_revision = entry.after_revision;
             self.undo_stack.push(entry);
             true

@@ -587,12 +587,19 @@ fn render_layer_entry(
         })
         .on_click(
             cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
+                editor.dismiss_inline_inputs(cx);
                 if event.down.click_count >= 2 {
                     editor.begin_layer_rename(layer_id, window, cx);
                 } else {
+                    let modifiers = event.modifiers();
+                    let toggle = if cfg!(target_os = "macos") {
+                        modifiers.platform
+                    } else {
+                        modifiers.control
+                    };
                     editor
                         .editor
-                        .select_layer(layer_id, event.modifiers().shift);
+                        .select_layer_from_panel(layer_id, modifiers.shift, toggle);
                 }
                 cx.notify();
             }),

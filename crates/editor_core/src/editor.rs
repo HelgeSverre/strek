@@ -234,11 +234,20 @@ struct TransformNodeSnapshot {
 struct TransformSession {
     description: &'static str,
     bounds: Rect,
+    frame_to_world: Affine2,
+    world_to_frame: Affine2,
     start: Vec2,
     handle: Option<ResizeHandle>,
     nodes: HashMap<NodeId, TransformNodeSnapshot>,
     preserved_children: HashMap<NodeId, (Affine2, Affine2)>,
     snap_result: Option<SnapResult>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransformFrame {
+    bounds: Rect,
+    to_world: Affine2,
+    to_frame: Affine2,
 }
 
 /// An anchor selected for direct vector editing.
@@ -609,6 +618,15 @@ fn resize_handle_position(handle: ResizeHandle, bounds: Rect) -> Vec2 {
         .into_iter()
         .find_map(|(candidate, position)| (candidate == handle).then_some(position))
         .expect("all resize handles have a position")
+}
+
+fn rect_corners(bounds: Rect) -> [Vec2; 4] {
+    [
+        bounds.min,
+        Vec2::new(bounds.max.x, bounds.min.y),
+        bounds.max,
+        Vec2::new(bounds.min.x, bounds.max.y),
+    ]
 }
 
 fn opposite_handle(handle: ResizeHandle) -> ResizeHandle {
@@ -1608,7 +1626,7 @@ impl Editor {
         let retained = self
             .selection
             .iter()
-            .filter(|id| live_nodes.contains(id) && self.document.is_effectively_editable(*id))
+            .filter(|id| live_nodes.contains(id))
             .collect::<Vec<_>>();
         self.selection.set(retained);
     }
@@ -1675,6 +1693,9 @@ impl Editor {
     /// Toggle visibility of a node.
     pub fn toggle_visibility(&mut self, id: NodeId) {
         self.settle_interaction();
+        if id == self.document.root {
+            return;
+        }
         let Some(before) = self.document.get(id).map(|node| node.visible) else {
             return;
         };
@@ -1692,6 +1713,9 @@ impl Editor {
     /// Toggle locked state of a node.
     pub fn toggle_locked(&mut self, id: NodeId) {
         self.settle_interaction();
+        if id == self.document.root {
+            return;
+        }
         let Some(before) = self.document.get(id).map(|node| node.locked) else {
             return;
         };
@@ -1758,9 +1782,9 @@ impl Editor {
         true
     }
 
-    /// Select a node from the layer panel, or toggle it in a multi-selection.
+    /// Select a node directly, or toggle it in a multi-selection.
     pub fn select_layer(&mut self, id: NodeId, toggle_selection: bool) {
-        if !self.document.is_effectively_editable(id) {
+        if !self.layer_panel_node_is_selectable(id) {
             return;
         }
         self.settle_interaction();
@@ -1772,11 +1796,50 @@ impl Editor {
         self.needs_redraw = true;
     }
 
-    /// Replace the selection with the supplied editable layer IDs.
+    /// Apply conventional layer-panel selection modifiers.
+    ///
+    /// Shift selects the contiguous visible row range from the primary layer;
+    /// the platform toggle modifier adds or removes only the clicked row.
+    pub fn select_layer_from_panel(&mut self, id: NodeId, range: bool, toggle: bool) {
+        if !self.layer_panel_node_is_selectable(id) {
+            return;
+        }
+        self.settle_interaction();
+        if range {
+            let rows = self.build_layer_tree();
+            let anchor = self.selection.primary().unwrap_or(id);
+            let Some(anchor_index) = rows.iter().position(|entry| entry.id == anchor) else {
+                self.selection.select(id);
+                self.needs_redraw = true;
+                return;
+            };
+            let Some(target_index) = rows.iter().position(|entry| entry.id == id) else {
+                return;
+            };
+            let (start, end) = if anchor_index <= target_index {
+                (anchor_index, target_index)
+            } else {
+                (target_index, anchor_index)
+            };
+            self.selection
+                .set(rows[start..=end].iter().map(|entry| entry.id));
+        } else if toggle {
+            self.toggle_selection_target(id);
+        } else {
+            self.selection.select(id);
+        }
+        self.needs_redraw = true;
+    }
+
+    fn layer_panel_node_is_selectable(&self, id: NodeId) -> bool {
+        id != self.document.root && self.document.get(id).is_some_and(|node| !node.deleted)
+    }
+
+    /// Replace the selection with the supplied live layer IDs.
     pub fn set_layer_selection(&mut self, ids: impl IntoIterator<Item = NodeId>) -> bool {
         let ids = ids
             .into_iter()
-            .filter(|id| self.document.is_effectively_editable(*id))
+            .filter(|id| self.layer_panel_node_is_selectable(*id))
             .collect::<Vec<_>>();
         let before = self.selection.to_vec();
         let mut after = Selection::new();
@@ -3002,6 +3065,7 @@ impl Editor {
         path: PathData,
         creation_point: Vec2,
     ) {
+        let before_selection = self.selection.to_vec();
         let parent = self.deepest_frame_at(creation_point);
         let parent_world = self.document.world_transform(parent);
         let style = match shape {
@@ -3026,8 +3090,9 @@ impl Editor {
             });
 
         command.apply(&mut self.document);
-        self.history.push(command);
         self.selection.select(id);
+        self.history
+            .push_with_selection(command, before_selection, self.selection.to_vec());
         self.needs_redraw = true;
     }
 
@@ -3070,6 +3135,7 @@ impl Editor {
     }
 
     fn create_frame(&mut self, bounds: Rect, creation_point: Vec2) {
+        let before_selection = self.selection.to_vec();
         let parent = self.deepest_frame_at(creation_point);
         let parent_world = self.document.world_transform(parent);
         let frame_world = Affine2::from_translation(bounds.min);
@@ -3131,8 +3197,9 @@ impl Editor {
 
         let command = Command::new("Create Frame").with_patches(patches);
         command.apply(&mut self.document);
-        self.history.push(command);
         self.selection.select(frame_id);
+        self.history
+            .push_with_selection(command, before_selection, self.selection.to_vec());
         self.needs_redraw = true;
     }
 
@@ -3701,7 +3768,10 @@ impl Editor {
     }
 
     fn undo_document(&mut self) -> bool {
-        if !self.history.undo(&mut self.document) {
+        if !self
+            .history
+            .undo_with_selection(&mut self.document, &mut self.selection)
+        {
             return false;
         }
         self.prune_selection();
@@ -3710,7 +3780,10 @@ impl Editor {
     }
 
     fn redo_document(&mut self) -> bool {
-        if !self.history.redo(&mut self.document) {
+        if !self
+            .history
+            .redo_with_selection(&mut self.document, &mut self.selection)
+        {
             return false;
         }
         self.prune_selection();
@@ -4844,16 +4917,51 @@ impl Editor {
         (!bounds.is_empty()).then_some(bounds)
     }
 
+    fn selection_transform_frame(&mut self) -> Option<TransformFrame> {
+        if self.selection.len() == 1 {
+            let id = self.selection.primary()?;
+            let bounds = self.document.local_bounds(id)?;
+            let to_world = self.document.world_transform(id);
+            let determinant = to_world.matrix2.determinant();
+            if determinant.is_finite() && determinant.abs() > f32::EPSILON {
+                return Some(TransformFrame {
+                    bounds,
+                    to_world,
+                    to_frame: to_world.inverse(),
+                });
+            }
+        }
+        let bounds = self.selection_world_bounds()?;
+        Some(TransformFrame {
+            bounds,
+            to_world: Affine2::IDENTITY,
+            to_frame: Affine2::IDENTITY,
+        })
+    }
+
     fn start_selection_transform(&mut self, screen: Vec2, world: Vec2) -> bool {
-        if self.selection.is_empty() {
+        if self.selection.is_empty()
+            || self
+                .selection
+                .iter()
+                .any(|id| !self.document.is_effectively_editable(id))
+        {
             return false;
         }
-        let Some(bounds) = self.selection_world_bounds() else {
+        let Some(frame) = self.selection_transform_frame() else {
             return false;
         };
-        let center_screen = self.view.to_screen(bounds.center());
-        let rotation_position =
-            Vec2::new(center_screen.x, self.view.to_screen(bounds.min).y - 24.0);
+        let bounds = frame.bounds;
+        let center_screen = self
+            .view
+            .to_screen(frame.to_world.transform_point2(bounds.center()));
+        let top_screen = self.view.to_screen(
+            frame
+                .to_world
+                .transform_point2(Vec2::new(bounds.center().x, bounds.min.y)),
+        );
+        let outward = (top_screen - center_screen).normalize_or_zero();
+        let rotation_position = top_screen + outward * 24.0;
         let rotation_hit = screen.distance(rotation_position) <= 8.0;
         let text_only = self.selection.len() == 1
             && self.selection.primary().is_some_and(|id| {
@@ -4867,6 +4975,7 @@ impl Editor {
                 !text_only || !matches!(handle, ResizeHandle::North | ResizeHandle::South)
             })
             .find_map(|(handle, position)| {
+                let position = frame.to_world.transform_point2(position);
                 (self.view.to_screen(position).distance(screen) <= 7.0).then_some(handle)
             });
         if !rotation_hit && handle.is_none() {
@@ -4908,6 +5017,8 @@ impl Editor {
         let session = TransformSession {
             description: if rotation_hit { "Rotate" } else { "Resize" },
             bounds,
+            frame_to_world: frame.to_world,
+            world_to_frame: frame.to_frame,
             start: world,
             handle,
             nodes,
@@ -4929,27 +5040,31 @@ impl Editor {
     }
 
     fn update_resize(&mut self, world_position: Vec2, modifiers: Modifiers) {
-        let (bounds, handle, nodes, preserved_children) = match &self.drag {
-            DragState::Resizing(session) => (
-                session.bounds,
-                session.handle,
-                session.nodes.clone(),
-                session.preserved_children.clone(),
-            ),
-            _ => return,
-        };
+        let (bounds, frame_to_world, world_to_frame, handle, nodes, preserved_children) =
+            match &self.drag {
+                DragState::Resizing(session) => (
+                    session.bounds,
+                    session.frame_to_world,
+                    session.world_to_frame,
+                    session.handle,
+                    session.nodes.clone(),
+                    session.preserved_children.clone(),
+                ),
+                _ => return,
+            };
         let Some(handle) = handle else {
             return;
         };
         let handle_position = resize_handle_position(handle, bounds);
+        let handle_world = frame_to_world.transform_point2(handle_position);
         self.sync_snap_grid_spacing();
         let snap_result = self.snap_engine.find_snap_with_bypass(
-            &creation_snap_points(handle_position),
-            world_position - handle_position,
+            &creation_snap_points(handle_world),
+            world_position - handle_world,
             self.view.zoom,
             modifiers.ctrl,
         );
-        let world_position = handle_position + snap_result.position;
+        let world_position = handle_world + snap_result.position;
         if let DragState::Resizing(session) = &mut self.drag {
             session.snap_result = snap_result.has_snap().then_some(snap_result);
         }
@@ -4959,7 +5074,7 @@ impl Editor {
             resize_handle_position(opposite_handle(handle), bounds)
         };
         let initial = handle_position - fixed;
-        let current = world_position - fixed;
+        let current = world_to_frame.transform_point2(world_position) - fixed;
         let mut scale = Vec2::ONE;
         if handle.affects_x() && initial.x.abs() > f32::EPSILON {
             scale.x = current.x / initial.x;
@@ -4980,9 +5095,10 @@ impl Editor {
         // origin delta with absolute dimensions.
         scale.x = scale.x.max(0.01);
         scale.y = scale.y.max(0.01);
-        let delta = Affine2::from_translation(fixed)
+        let frame_delta = Affine2::from_translation(fixed)
             * Affine2::from_scale(scale)
             * Affine2::from_translation(-fixed);
+        let delta = frame_to_world * frame_delta * world_to_frame;
 
         for (id, snapshot) in nodes {
             match snapshot.kind {
@@ -5086,11 +5202,16 @@ impl Editor {
     }
 
     fn update_rotation(&mut self, world_position: Vec2, modifiers: Modifiers) {
-        let (bounds, start, nodes) = match &self.drag {
-            DragState::Rotating(session) => (session.bounds, session.start, session.nodes.clone()),
+        let (bounds, frame_to_world, start, nodes) = match &self.drag {
+            DragState::Rotating(session) => (
+                session.bounds,
+                session.frame_to_world,
+                session.start,
+                session.nodes.clone(),
+            ),
             _ => return,
         };
-        let center = bounds.center();
+        let center = frame_to_world.transform_point2(bounds.center());
         let mut angle = (world_position - center)
             .y
             .atan2((world_position - center).x)
@@ -5301,8 +5422,9 @@ impl Editor {
             return;
         }
 
+        let before_selection = self.selection.to_vec();
         // Filter out children of selected parents to avoid double-deletion
-        let all_nodes: Vec<_> = self.selection.iter().collect();
+        let all_nodes = before_selection.clone();
         let nodes = self.document.filter_selection_for_transform(&all_nodes);
 
         let mut patches = Vec::new();
@@ -5332,8 +5454,9 @@ impl Editor {
                 patches,
             };
             cmd.apply(&mut self.document);
-            self.history.push(cmd);
             self.selection.clear();
+            self.history
+                .push_with_selection(cmd, before_selection, Vec::new());
             self.needs_redraw = true;
         }
     }
@@ -5341,7 +5464,8 @@ impl Editor {
     /// Group the current selection (with undo support).
     pub fn group_selection(&mut self) {
         self.cancel_active_numeric_property_scrub();
-        let selected: Vec<_> = self.selection.iter().collect();
+        let before_selection = self.selection.to_vec();
+        let selected = before_selection.clone();
         let mut nodes = self.document.filter_selection_for_transform(&selected);
         if nodes.len() < 2 {
             return;
@@ -5454,15 +5578,16 @@ impl Editor {
             patches,
         };
         cmd.apply(&mut self.document);
-        self.history.push(cmd);
-
         self.selection.select(group_id);
+        self.history
+            .push_with_selection(cmd, before_selection, self.selection.to_vec());
         self.needs_redraw = true;
     }
 
     /// Ungroup the selected group(s) (with undo support).
     pub fn ungroup_selection(&mut self) {
         self.cancel_active_numeric_property_scrub();
+        let before_selection = self.selection.to_vec();
         let selected_groups: Vec<_> = self
             .selection
             .iter()
@@ -5576,9 +5701,9 @@ impl Editor {
                 patches,
             };
             cmd.apply(&mut self.document);
-            self.history.push(cmd);
-
             self.selection.set(new_selection);
+            self.history
+                .push_with_selection(cmd, before_selection, self.selection.to_vec());
             self.needs_redraw = true;
         }
     }
@@ -5586,8 +5711,9 @@ impl Editor {
     /// Duplicate the current selection (with undo support).
     pub fn duplicate_selection(&mut self) {
         self.cancel_active_numeric_property_scrub();
+        let before_selection = self.selection.to_vec();
         // Filter selection to avoid duplicating children of selected parents
-        let all_nodes: Vec<_> = self.selection.iter().collect();
+        let all_nodes = before_selection.clone();
         let nodes = self.document.filter_selection_for_transform(&all_nodes);
 
         if nodes.is_empty() {
@@ -5648,9 +5774,9 @@ impl Editor {
                 patches,
             };
             cmd.apply(&mut self.document);
-            self.history.push(cmd);
-
             self.selection.set(new_selection);
+            self.history
+                .push_with_selection(cmd, before_selection, self.selection.to_vec());
             self.needs_redraw = true;
         }
     }
@@ -5690,6 +5816,7 @@ impl Editor {
         }
 
         self.settle_interaction();
+        let before_selection = self.selection.to_vec();
         let parent = self.document.root;
         let first_index = self
             .document
@@ -5733,8 +5860,9 @@ impl Editor {
             patches,
         };
         command.apply(&mut self.document);
-        self.history.push(command);
         self.selection.set(pasted_roots);
+        self.history
+            .push_with_selection(command, before_selection, self.selection.to_vec());
         clipboard.paste_count = paste_count;
         self.needs_redraw = true;
         true
@@ -6363,6 +6491,18 @@ impl Editor {
 
         // Add selection rectangles for selected nodes
         for id in self.selection.iter() {
+            if !self.document.is_effectively_visible(id) {
+                continue;
+            }
+            if self.selection.len() == 1 {
+                if let Some(local) = self.document.local_bounds(id) {
+                    let world = self.document.world_transform(id);
+                    let corners = rect_corners(local)
+                        .map(|corner| self.view.to_screen(world.transform_point2(corner)));
+                    display_list.push(editor_render::DisplayItem::SelectionQuad { corners });
+                    continue;
+                }
+            }
             if let Some(bounds) = self.document.world_bounds(id) {
                 // Transform bounds to screen space
                 let screen_min = self.view.to_screen(bounds.min);
@@ -6377,6 +6517,10 @@ impl Editor {
 
         if self.tool == Tool::Select
             && !self.selection.is_empty()
+            && self
+                .selection
+                .iter()
+                .all(|id| self.document.is_effectively_editable(id))
             && !matches!(
                 self.drag,
                 DragState::Marquee { .. } | DragState::Moving { .. }
@@ -6388,21 +6532,29 @@ impl Editor {
                         .get(id)
                         .is_some_and(|node| matches!(node.kind, NodeKind::Text(_)))
                 });
-            if let Some(bounds) = self.selection_world_bounds() {
-                for (handle, position) in resize_handle_points(bounds) {
+            if let Some(frame) = self.selection_transform_frame() {
+                for (handle, position) in resize_handle_points(frame.bounds) {
                     if text_only && matches!(handle, ResizeHandle::North | ResizeHandle::South) {
                         continue;
                     }
                     display_list.push(editor_render::DisplayItem::TransformHandle {
-                        position: self.view.to_screen(position),
+                        position: self
+                            .view
+                            .to_screen(frame.to_world.transform_point2(position)),
                         rotation: false,
                     });
                 }
-                let top = self
+                let center = self
                     .view
-                    .to_screen(Vec2::new(bounds.center().x, bounds.min.y));
+                    .to_screen(frame.to_world.transform_point2(frame.bounds.center()));
+                let top = self.view.to_screen(
+                    frame
+                        .to_world
+                        .transform_point2(Vec2::new(frame.bounds.center().x, frame.bounds.min.y)),
+                );
+                let outward = (top - center).normalize_or_zero();
                 display_list.push(editor_render::DisplayItem::TransformHandle {
-                    position: top - Vec2::new(0.0, 24.0),
+                    position: top + outward * 24.0,
                     rotation: true,
                 });
             }
@@ -8155,6 +8307,52 @@ mod tests {
         assert_eq!(editor.document.world_bounds(shape).unwrap().max.x, 150.0);
     }
 
+    #[test]
+    fn rotated_shape_resizes_in_its_local_frame_without_shear() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let original = Affine2::from_scale_angle_translation(
+            Vec2::ONE,
+            std::f32::consts::FRAC_PI_4,
+            Vec2::new(40.0, 30.0),
+        );
+        let shape = editor
+            .document
+            .add_child(
+                root,
+                Node::shape("Rotated", PathData::rect(0.0, 0.0, 10.0, 20.0))
+                    .with_transform(original),
+            )
+            .unwrap();
+        editor.selection.select(shape);
+        let bypass_snap = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+
+        editor.handle_event(InputEvent::PointerDown {
+            position: original.transform_point2(Vec2::new(10.0, 20.0)),
+            button: MouseButton::Left,
+            modifiers: bypass_snap,
+        });
+        editor.handle_event(InputEvent::PointerUp {
+            position: original.transform_point2(Vec2::new(20.0, 20.0)),
+            button: MouseButton::Left,
+            modifiers: bypass_snap,
+        });
+
+        let resized = editor.document.world_transform(shape);
+        assert!(resized.matrix2.x_axis.dot(resized.matrix2.y_axis).abs() < 0.0001);
+        assert!((resized.matrix2.x_axis.length() - 2.0).abs() < 0.0001);
+        assert!((resized.matrix2.y_axis.length() - 1.0).abs() < 0.0001);
+        assert!(
+            (resized.transform_point2(Vec2::new(10.0, 20.0))
+                - original.transform_point2(Vec2::new(20.0, 20.0)))
+            .length()
+                < 0.0001
+        );
+    }
+
     fn editor_with_grouped_shapes() -> (Editor, NodeId, NodeId, NodeId) {
         let mut editor = Editor::new();
         let root = editor.document.root;
@@ -8878,6 +9076,7 @@ mod tests {
         assert!(Document::from_json(&deleted_json).is_ok());
 
         assert!(editor.undo_in_context());
+        assert_eq!(editor.selection.to_vec(), vec![group]);
         for id in [group, nested, child] {
             assert!(!editor.document.get(id).unwrap().deleted);
         }
@@ -8886,6 +9085,7 @@ mod tests {
         assert_eq!(editor.document.get(nested).unwrap().children, vec![child]);
 
         assert!(editor.redo_in_context());
+        assert!(editor.selection.is_empty());
         let redone_json = editor.document.to_json().unwrap();
         assert!(Document::from_json(&redone_json).is_ok());
     }
@@ -8970,13 +9170,30 @@ mod tests {
 
         assert!(editor.execute_action(EditorAction::Undo));
         assert_eq!(child_names(&editor, root), ["A", "B", "C"]);
-        assert!(editor.selection.is_empty());
+        assert_eq!(editor.selection.to_vec(), vec![ids[0], ids[1]]);
 
         assert!(editor.execute_action(EditorAction::Redo));
         assert_eq!(
             child_names(&editor, root),
             ["A", "A copy", "B", "B copy", "C"]
         );
+    }
+
+    #[test]
+    fn layer_panel_shift_selects_a_range_and_toggle_modifier_changes_one_row() {
+        let (mut editor, _) = editor_with_named_shapes(&["A", "B", "C", "D"]);
+        let rows = editor
+            .build_layer_tree()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+
+        editor.select_layer_from_panel(rows[0], false, false);
+        editor.select_layer_from_panel(rows[2], true, false);
+        assert_eq!(editor.selection.to_vec(), rows[0..=2]);
+
+        editor.select_layer_from_panel(rows[1], false, true);
+        assert_eq!(editor.selection.to_vec(), vec![rows[0], rows[2]]);
     }
 
     #[test]
@@ -9246,7 +9463,7 @@ mod tests {
 
         assert!(editor.execute_action(EditorAction::Undo));
         assert_eq!(child_names(&editor, root), ["A", "B", "C"]);
-        assert!(editor.selection.is_empty());
+        assert_eq!(editor.selection.to_vec(), vec![ids[2], ids[0]]);
     }
 
     #[test]
@@ -10575,7 +10792,7 @@ mod tests {
     }
 
     #[test]
-    fn uneditable_layer_selection_does_not_settle_active_editing() {
+    fn hidden_and_locked_layers_are_selectable_from_the_layer_panel() {
         let mut editor = Editor::new();
         let root = editor.document.root;
         let editing = editor
@@ -10595,17 +10812,38 @@ mod tests {
         editor.begin_existing_text_edit(editing);
         assert!(editor.replace_text(None, "!"));
 
-        for id in [hidden, locked] {
-            editor.select_layer(id, false);
-            assert_eq!(editor.interaction_kind(), InteractionKind::TextEditing);
-            assert_eq!(editor.selection.primary(), Some(editing));
-            assert!(!editor.history.can_undo());
-        }
+        editor.select_layer(hidden, false);
+        assert_eq!(editor.interaction_kind(), InteractionKind::Idle);
+        assert_eq!(editor.selection.primary(), Some(hidden));
+        assert!(editor.history.can_undo());
+
+        editor.select_layer(locked, false);
+        assert_eq!(editor.selection.primary(), Some(locked));
 
         let NodeKind::Text(text) = &editor.document.get(editing).unwrap().kind else {
             panic!("expected text");
         };
         assert_eq!(text.content, "A!");
+    }
+
+    #[test]
+    fn hiding_or_locking_a_layer_preserves_its_layer_panel_selection() {
+        let (mut editor, ids) = editor_with_named_shapes(&["A"]);
+        let layer = ids[0];
+        editor.selection.select(layer);
+
+        editor.toggle_visibility(layer);
+        assert_eq!(editor.selection.primary(), Some(layer));
+        assert!(!editor.document.get(layer).unwrap().visible);
+        assert!(!editor
+            .build_display_list()
+            .items
+            .iter()
+            .any(|item| matches!(item, editor_render::DisplayItem::TransformHandle { .. })));
+
+        editor.toggle_locked(layer);
+        assert_eq!(editor.selection.primary(), Some(layer));
+        assert!(editor.document.get(layer).unwrap().locked);
     }
 
     #[test]

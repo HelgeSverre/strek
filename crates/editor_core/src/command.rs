@@ -253,7 +253,8 @@ impl Patch {
                 parent,
                 index,
             } => {
-                // Check if node already exists (redo case - was soft-deleted)
+                // Create commands reserve the node id before applying; redo
+                // reaches the same branch after the node was soft-deleted.
                 if let Some(existing) = doc.nodes.get_mut(*id) {
                     // Restore soft-deleted node
                     existing.deleted = false;

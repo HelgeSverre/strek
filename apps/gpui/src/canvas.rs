@@ -420,6 +420,7 @@ pub(crate) fn requires_rasterized_artwork(display_list: &DisplayList) -> bool {
         | DisplayItem::ToolPreview { .. }
         | DisplayItem::SnapGuide { .. }
         | DisplayItem::SelectionRect { .. }
+        | DisplayItem::SelectionQuad { .. }
         | DisplayItem::MarqueeRect { .. }
         | DisplayItem::VectorAnchor { .. }
         | DisplayItem::VectorHandle { .. }
@@ -679,6 +680,9 @@ fn paint_display_list(
             }
             DisplayItem::SelectionRect { min, max } => {
                 paint_selection_rect(window, bounds, *min, *max)
+            }
+            DisplayItem::SelectionQuad { corners } => {
+                paint_selection_quad(window, bounds, *corners)
             }
             DisplayItem::MarqueeRect { min, max } => paint_marquee_rect(window, bounds, *min, *max),
             DisplayItem::SnapGuide { start, end, .. } => {
@@ -1442,6 +1446,18 @@ fn paint_selection_rect(window: &mut Window, bounds: Bounds<Pixels>, min: Vec2, 
         }
         .into(),
     });
+}
+
+fn paint_selection_quad(window: &mut Window, bounds: Bounds<Pixels>, corners: [Vec2; 4]) {
+    let mut outline = PathBuilder::stroke(px(1.0));
+    outline.move_to(canvas_point(bounds, &Affine2::IDENTITY, corners[0]));
+    for corner in &corners[1..] {
+        outline.line_to(canvas_point(bounds, &Affine2::IDENTITY, *corner));
+    }
+    outline.close();
+    if let Ok(path) = outline.build() {
+        window.paint_path(path, gpui::rgba(0x0078d7ff));
+    }
 }
 
 fn paint_marquee_rect(window: &mut Window, bounds: Bounds<Pixels>, min: Vec2, max: Vec2) {

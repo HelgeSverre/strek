@@ -106,6 +106,9 @@ pub enum DisplayItem {
         max: Vec2,
     },
 
+    /// Rotated selection outline in screen coordinates.
+    SelectionQuad { corners: [Vec2; 4] },
+
     /// Marquee selection rectangle (drawn while dragging to select).
     MarqueeRect {
         /// Minimum corner in screen coordinates.
