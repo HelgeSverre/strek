@@ -296,6 +296,13 @@ with the serif fallback, the same face PNG and outlined-SVG export use.
 Standard SVG export writes the stored family name; `system-ui` is written with a
 `sans-serif` fallback.
 
+Strek's interface uses Inter 4.1, embedded in the application under the SIL
+Open Font License 1.1 (`apps/gpui/assets/fonts/inter/OFL.txt`). When Inter is
+not installed, the bundled copy is also listed in the font picker as "Bundled
+with Strek" and used by the canvas and PNG/outlined-SVG export; an installed
+Inter takes precedence. Standard SVG export only names the family, so viewers
+without Inter substitute another font.
+
 ### SVG import
 
 Opening an `.svg` file imports its supported contents as editable native layers.

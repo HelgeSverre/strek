@@ -3169,6 +3169,7 @@ impl Strek {
             &text.font.family,
             typography::installed_font_families(),
             typography::resolve_document_font_family,
+            typography::is_bundled_font_family,
         );
         self.present_palette(
             entries,
@@ -6429,6 +6430,11 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
+            let bundled_fonts =
+                typography::bundled_fonts_for_gpui(&cx.text_system().all_font_names());
+            if let Err(error) = cx.text_system().add_fonts(bundled_fonts) {
+                log::error!("failed to register the bundled interface font: {error:#}");
+            }
             let keymap = commands::Keymap::load();
             register_keybindings(cx, &keymap);
             command_palette::register_keybindings(cx);

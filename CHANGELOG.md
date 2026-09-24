@@ -12,6 +12,9 @@ All notable user-facing changes to Strek are documented here.
   one undoable edit.
 - Marked text families that are not installed as "(missing)" and listed them in
   the picker with the face they draw with.
+- Bundled Inter 4.1 (SIL Open Font License 1.1) as the interface font. When
+  Inter is not installed, the bundled copy is also available to text layers and
+  export; an installed Inter takes precedence.
 
 ### Fixed
 
@@ -22,10 +25,8 @@ All notable user-facing changes to Strek are documented here.
 - Stopped generic families from naming an uninstalled font, which could drop
   text from Linux exports when DejaVu fonts were absent.
 - Fixed the Linux interface drawing in the typewriter font FreeMono (GPUI's
-  Linux default). Strek now uses the first installed desktop sans-serif
-  (Ubuntu Sans, Ubuntu, Adwaita Sans, Cantarell, Noto Sans, Inter, DejaVu Sans,
-  Liberation Sans, or FreeSans) and an installed monospace face for numeric
-  fields. macOS and Windows keep their existing interface fonts.
+  Linux default). The interface now uses the bundled Inter font on every
+  platform, and numeric fields use an installed monospace face.
 
 ## [0.2.3] - 2026-09-01
 

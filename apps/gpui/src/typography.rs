@@ -65,29 +65,19 @@ const MONOSPACE_CANDIDATES: &[&str] = &[
     "FreeMono",
 ];
 
-/// Application chrome font on Linux, in preference order.
-///
-/// GPUI's default Linux UI font is the typewriter face "FreeMono", and its
-/// `.SystemUIFont` alias looks for an unbundled "Zed Plex Sans", so Strek
-/// chooses an installed desktop sans-serif itself. Ubuntu, GNOME, and KDE
-/// defaults come first, then widely installed fallbacks.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const UI_FONT_CANDIDATES: &[&str] = &[
-    "Ubuntu Sans",
-    "Ubuntu",
-    "Adwaita Sans",
-    "Cantarell",
-    "Noto Sans",
-    "Inter",
-    "DejaVu Sans",
-    "Liberation Sans",
-    "FreeSans",
+/// Family name of the bundled interface font.
+pub(crate) const UI_FONT_FAMILY: &str = "Inter";
+
+/// Inter 4.1 (SIL Open Font License 1.1, see `assets/fonts/inter/OFL.txt`),
+/// in the weights the interface uses. Embedding it gives every platform the
+/// same interface font instead of GPUI's per-platform defaults, which on
+/// Linux is the typewriter face "FreeMono".
+const BUNDLED_UI_FONTS: [&[u8]; 4] = [
+    include_bytes!("../assets/fonts/inter/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-Medium.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/inter/Inter-Bold.ttf"),
 ];
-/// macOS and Windows keep GPUI's platform default chrome font.
-#[cfg(target_os = "macos")]
-const UI_FONT_CANDIDATES: &[&str] = &["Helvetica"];
-#[cfg(target_os = "windows")]
-const UI_FONT_CANDIDATES: &[&str] = &["Segoe UI"];
 
 /// Longest document family string the resolver will parse or cache.
 ///
@@ -96,29 +86,70 @@ const MAX_RESOLVED_FAMILY_BYTES: usize = 1024;
 /// Resolution cache entries kept before the cache is cleared and rebuilt.
 const MAX_RESOLUTION_CACHE_ENTRIES: usize = 256;
 
-static SYSTEM_FONT_DATABASE: LazyLock<Arc<fontdb::Database>> =
-    LazyLock::new(|| Arc::new(build_system_font_database()));
+static SYSTEM_FONT_DATABASE: LazyLock<(Arc<fontdb::Database>, bool)> = LazyLock::new(|| {
+    let (database, bundled_ui_font) = build_system_font_database();
+    (Arc::new(database), bundled_ui_font)
+});
 
 static EMPTY_FONT_DATABASE: LazyLock<Arc<fontdb::Database>> =
     LazyLock::new(|| Arc::new(fontdb::Database::new()));
 
 static SYSTEM_FONT_CATALOG: LazyLock<FontCatalog> =
-    LazyLock::new(|| FontCatalog::new(&SYSTEM_FONT_DATABASE));
+    LazyLock::new(|| FontCatalog::new(&SYSTEM_FONT_DATABASE.0));
 
 static RESOLUTION_CACHE: LazyLock<Mutex<HashMap<String, FontResolution>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn build_system_font_database() -> fontdb::Database {
+/// Build the shared database; the flag records whether bundled Inter was loaded.
+fn build_system_font_database() -> (fontdb::Database, bool) {
     let mut database = fontdb::Database::new();
     database.load_system_fonts();
+    let bundled_ui_font = load_bundled_fonts_if_missing(&mut database);
     configure_generic_families(&mut database);
-    database
+    (database, bundled_ui_font)
+}
+
+/// Make the bundled interface font available to document text and export
+/// when the system does not already provide it.
+///
+/// An installed copy wins so each engine sees exactly one "Inter" family.
+/// Returns whether the bundled fonts were loaded.
+fn load_bundled_fonts_if_missing(database: &mut fontdb::Database) -> bool {
+    let installed = database.faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(family, _)| family == UI_FONT_FAMILY)
+    });
+    if !installed {
+        for font in BUNDLED_UI_FONTS {
+            database.load_font_data(font.to_vec());
+        }
+    }
+    !installed
+}
+
+/// Bundled font files GPUI must register, following the same rule as
+/// [`load_bundled_fonts_if_missing`] against GPUI's installed family names.
+pub(crate) fn bundled_fonts_for_gpui(
+    installed_families: &[String],
+) -> Vec<std::borrow::Cow<'static, [u8]>> {
+    if installed_families
+        .iter()
+        .any(|family| family == UI_FONT_FAMILY)
+    {
+        return Vec::new();
+    }
+    BUNDLED_UI_FONTS
+        .iter()
+        .map(|font| std::borrow::Cow::Borrowed(*font))
+        .collect()
 }
 
 /// Point each CSS generic at the first installed platform candidate.
 ///
 /// When no candidate is installed, sans-serif, serif, and monospace fall back
-/// to each other and finally to the alphabetically first installed family, and
+/// to each other, then to Inter, then to the alphabetically first installed
+/// family, and
 /// uninstalled cursive/fantasy defaults use the sans-serif face, so a generic
 /// never names a family that the database cannot load.
 fn configure_generic_families(database: &mut fontdb::Database) {
@@ -129,7 +160,11 @@ fn configure_generic_families(database: &mut fontdb::Database) {
             .find(|candidate| installed.contains_key(**candidate))
             .map(|candidate| (*candidate).to_owned())
     };
-    let any_installed = installed.keys().next().cloned();
+    // Prefer the bundled interface font over an arbitrary installed family.
+    let any_installed = installed
+        .get_key_value(UI_FONT_FAMILY)
+        .or_else(|| installed.iter().next())
+        .map(|(family, _)| family.clone());
     let sans = pick(SANS_SERIF_CANDIDATES);
     let serif = pick(SERIF_CANDIDATES);
     let monospace = pick(MONOSPACE_CANDIDATES);
@@ -177,7 +212,7 @@ fn installed_family_names(database: &fontdb::Database) -> BTreeMap<String, Strin
 }
 
 pub(crate) fn system_font_database() -> Arc<fontdb::Database> {
-    Arc::clone(&SYSTEM_FONT_DATABASE)
+    Arc::clone(&SYSTEM_FONT_DATABASE.0)
 }
 
 pub(crate) fn empty_font_database() -> Arc<fontdb::Database> {
@@ -192,11 +227,14 @@ pub(crate) fn installed_font_families() -> &'static [String] {
     &SYSTEM_FONT_CATALOG.display_families
 }
 
-/// Installed sans-serif family for application chrome text.
+/// Whether a family comes from a font embedded in Strek rather than the system.
+pub(crate) fn is_bundled_font_family(family: &str) -> bool {
+    family == UI_FONT_FAMILY && SYSTEM_FONT_DATABASE.1
+}
+
+/// Interface font family, bundled so it is available on every platform.
 pub(crate) fn ui_font_family() -> &'static str {
-    static UI_FONT: LazyLock<String> =
-        LazyLock::new(|| SYSTEM_FONT_CATALOG.ui_family(UI_FONT_CANDIDATES));
-    &UI_FONT
+    UI_FONT_FAMILY
 }
 
 /// Installed monospace family for numeric fields and codes in the chrome.
@@ -312,19 +350,6 @@ impl FontCatalog {
             GenericFamily::Fantasy => self.fantasy.as_ref(),
             GenericFamily::Monospace => self.monospace.as_ref(),
         }
-    }
-
-    /// First installed chrome candidate, else the installed sans-serif face.
-    ///
-    /// With no fonts installed at all, the first candidate is returned so GPUI
-    /// applies its own fallback stack.
-    fn ui_family(&self, candidates: &[&str]) -> String {
-        candidates
-            .iter()
-            .find(|candidate| self.names.contains_key(**candidate))
-            .map(|candidate| (*candidate).to_owned())
-            .or_else(|| self.sans_serif.clone())
-            .unwrap_or_else(|| candidates[0].to_owned())
     }
 
     /// Mirror `usvg`'s font selection: take the first listed family that is
@@ -509,6 +534,14 @@ mod tests {
             Some("Only Custom Face")
         );
 
+        // With no platform candidate installed, the bundled Inter wins over
+        // an alphabetically earlier family.
+        let catalog = catalog_of(&["Aardvark Display", UI_FONT_FAMILY]);
+        assert_eq!(
+            catalog.resolve("sans-serif").family.as_deref(),
+            Some(UI_FONT_FAMILY)
+        );
+
         let empty = catalog_of(&[]);
         assert_eq!(empty.resolve("sans-serif").family, None);
         assert_eq!(
@@ -548,36 +581,66 @@ mod tests {
     }
 
     #[test]
-    fn ui_font_prefers_installed_desktop_faces_over_generic_fallbacks() {
-        let candidates = ["Ubuntu", "Cantarell", "DejaVu Sans"];
-        let sans = SANS_SERIF_CANDIDATES[0];
+    fn bundled_ui_font_provides_the_interface_weights() {
+        let mut database = fontdb::Database::new();
+        load_bundled_fonts_if_missing(&mut database);
+        let mut weights = database
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family == UI_FONT_FAMILY)
+            })
+            .map(|face| face.weight.0)
+            .collect::<Vec<_>>();
+        weights.sort_unstable();
+        assert_eq!(weights, [400, 500, 600, 700]);
 
-        let catalog = catalog_of(&["FreeMono", "Cantarell", "DejaVu Sans", sans]);
-        assert_eq!(catalog.ui_family(&candidates), "Cantarell");
-
-        // No candidate installed: use the installed sans-serif face, never
-        // GPUI's typewriter default.
-        let catalog = catalog_of(&["FreeMono", sans]);
-        assert_eq!(catalog.ui_family(&candidates), sans);
-
-        let catalog = catalog_of(&[]);
-        assert_eq!(catalog.ui_family(&candidates), "Ubuntu");
+        // A request for 650 (used by the interface) must resolve to a real
+        // bundled face rather than a fallback family.
+        let face = database
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name(UI_FONT_FAMILY)],
+                weight: fontdb::Weight(650),
+                ..Default::default()
+            })
+            .and_then(|id| database.face(id))
+            .expect("bundled Inter resolves");
+        assert_eq!(face.weight.0, 700);
     }
 
     #[test]
-    fn ui_fonts_resolve_to_installed_families_on_this_machine() {
-        let installed = installed_font_families();
-        if installed.is_empty() {
-            return;
-        }
-        for family in [ui_font_family(), ui_monospace_font_family()] {
-            assert!(
-                SYSTEM_FONT_CATALOG.names.contains_key(family),
-                "{family} is not installed"
-            );
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_ne!(ui_font_family(), "FreeMono");
+    fn installed_inter_is_not_duplicated() {
+        let mut database = database_with(&[UI_FONT_FAMILY]);
+        assert!(!load_bundled_fonts_if_missing(&mut database));
+        assert_eq!(database.len(), 1);
+
+        let mut database = database_with(&["DejaVu Sans"]);
+        assert!(load_bundled_fonts_if_missing(&mut database));
+        assert_eq!(database.len(), 5);
+        assert!(bundled_fonts_for_gpui(&[UI_FONT_FAMILY.to_owned()]).is_empty());
+        assert_eq!(bundled_fonts_for_gpui(&["DejaVu Sans".to_owned()]).len(), 4);
+    }
+
+    #[test]
+    fn interface_and_document_text_can_use_inter_on_this_machine() {
+        assert_eq!(ui_font_family(), "Inter");
+        assert!(installed_font_families()
+            .iter()
+            .any(|family| family == "Inter"));
+        let resolution = resolve_document_font_family("Inter");
+        assert_eq!(resolution.status, FontResolutionStatus::Installed);
+        // Only report "bundled" when the system copy is absent.
+        let mut system = fontdb::Database::new();
+        system.load_system_fonts();
+        let system_inter = system
+            .faces()
+            .any(|face| face.families.iter().any(|(family, _)| family == "Inter"));
+        assert_eq!(is_bundled_font_family("Inter"), !system_inter);
+        assert!(!is_bundled_font_family("DejaVu Sans"));
+        assert!(SYSTEM_FONT_CATALOG
+            .names
+            .contains_key(ui_monospace_font_family()));
     }
 
     #[test]

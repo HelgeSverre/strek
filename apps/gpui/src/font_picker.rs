@@ -19,6 +19,7 @@ pub(crate) fn entries(
     current_family: &str,
     installed: &[String],
     resolve: impl Fn(&str) -> FontResolution,
+    is_bundled: impl Fn(&str) -> bool,
 ) -> Vec<PaletteEntry> {
     let current_family = current_family.trim();
     let current = resolve(current_family);
@@ -62,7 +63,11 @@ pub(crate) fn entries(
         entries.push(entry(
             family,
             family,
-            "Installed",
+            if is_bundled(family) {
+                "Bundled with Strek"
+            } else {
+                "Installed"
+            },
             String::new(),
             Some(family.clone()),
             current.status == FontResolutionStatus::Installed && current_family == family.as_str(),
@@ -136,7 +141,7 @@ mod tests {
 
     #[test]
     fn lists_generics_then_installed_families_with_previews() {
-        let entries = entries("Inter", &installed(), resolve);
+        let entries = entries("Inter", &installed(), resolve, |family| family == "Inter");
         assert_eq!(
             targets(&entries),
             [
@@ -149,6 +154,8 @@ mod tests {
             ]
         );
         assert_eq!(current(&entries), ["Inter"]);
+        assert_eq!(entries[3].category.as_ref(), "Bundled with Strek");
+        assert_eq!(entries[4].category.as_ref(), "Installed");
         // The palette lists ranked rows before the alphabetical rest, so the
         // generic rows stay on top after the current family.
         let ranks = entries
@@ -172,22 +179,22 @@ mod tests {
         // "Sans Face" is both installed and the sans-serif face; a document
         // storing the generic must not mark the concrete family as current.
         assert_eq!(
-            current(&entries("sans-serif", &installed(), resolve)),
+            current(&entries("sans-serif", &installed(), resolve, |_| false)),
             ["System Sans-Serif"]
         );
         assert_eq!(
-            current(&entries(" system-ui ", &installed(), resolve)),
+            current(&entries(" system-ui ", &installed(), resolve, |_| false)),
             ["System Sans-Serif"]
         );
         assert_eq!(
-            current(&entries("Sans Face", &installed(), resolve)),
+            current(&entries("Sans Face", &installed(), resolve, |_| false)),
             ["Sans Face"]
         );
     }
 
     #[test]
     fn missing_current_family_is_listed_with_its_fallback() {
-        let entries = entries("Brand Display", &installed(), resolve);
+        let entries = entries("Brand Display", &installed(), resolve, |_| false);
         let missing = entries
             .iter()
             .find(|entry| entry.category.as_ref() == "Missing")
