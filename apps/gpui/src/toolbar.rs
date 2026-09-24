@@ -185,6 +185,7 @@ impl Render for EditorTooltip {
             .border_color(rgb(BORDER))
             .rounded(px(5.0))
             .shadow_md()
+            .font_family(crate::typography::ui_font_family())
             .text_size(px(11.0))
             .text_color(rgb(TEXT))
             .child(self.label.clone())
@@ -755,7 +756,7 @@ fn context_color_input<A: Action + Clone>(
         )
         .child(
             div()
-                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
+                .font_family(crate::typography::ui_monospace_font_family())
                 .text_size(px(9.0))
                 .text_color(rgb(if invalid { 0xfca58f } else { TEXT }))
                 .child(value),

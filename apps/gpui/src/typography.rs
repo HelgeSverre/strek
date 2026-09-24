@@ -65,6 +65,30 @@ const MONOSPACE_CANDIDATES: &[&str] = &[
     "FreeMono",
 ];
 
+/// Application chrome font on Linux, in preference order.
+///
+/// GPUI's default Linux UI font is the typewriter face "FreeMono", and its
+/// `.SystemUIFont` alias looks for an unbundled "Zed Plex Sans", so Strek
+/// chooses an installed desktop sans-serif itself. Ubuntu, GNOME, and KDE
+/// defaults come first, then widely installed fallbacks.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const UI_FONT_CANDIDATES: &[&str] = &[
+    "Ubuntu Sans",
+    "Ubuntu",
+    "Adwaita Sans",
+    "Cantarell",
+    "Noto Sans",
+    "Inter",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "FreeSans",
+];
+/// macOS and Windows keep GPUI's platform default chrome font.
+#[cfg(target_os = "macos")]
+const UI_FONT_CANDIDATES: &[&str] = &["Helvetica"];
+#[cfg(target_os = "windows")]
+const UI_FONT_CANDIDATES: &[&str] = &["Segoe UI"];
+
 /// Longest document family string the resolver will parse or cache.
 ///
 /// Longer values resolve as missing without allocation in the cache.
@@ -166,6 +190,24 @@ pub(crate) fn empty_font_database() -> Arc<fontdb::Database> {
 /// picked family is always one every text path can load.
 pub(crate) fn installed_font_families() -> &'static [String] {
     &SYSTEM_FONT_CATALOG.display_families
+}
+
+/// Installed sans-serif family for application chrome text.
+pub(crate) fn ui_font_family() -> &'static str {
+    static UI_FONT: LazyLock<String> =
+        LazyLock::new(|| SYSTEM_FONT_CATALOG.ui_family(UI_FONT_CANDIDATES));
+    &UI_FONT
+}
+
+/// Installed monospace family for numeric fields and codes in the chrome.
+pub(crate) fn ui_monospace_font_family() -> &'static str {
+    static UI_MONOSPACE_FONT: LazyLock<String> = LazyLock::new(|| {
+        SYSTEM_FONT_CATALOG
+            .generic(GenericFamily::Monospace)
+            .cloned()
+            .unwrap_or_else(|| MONOSPACE_FONT_FAMILY.to_owned())
+    });
+    &UI_MONOSPACE_FONT
 }
 
 /// Resolve a stored document family to the installed family every text path
@@ -270,6 +312,19 @@ impl FontCatalog {
             GenericFamily::Fantasy => self.fantasy.as_ref(),
             GenericFamily::Monospace => self.monospace.as_ref(),
         }
+    }
+
+    /// First installed chrome candidate, else the installed sans-serif face.
+    ///
+    /// With no fonts installed at all, the first candidate is returned so GPUI
+    /// applies its own fallback stack.
+    fn ui_family(&self, candidates: &[&str]) -> String {
+        candidates
+            .iter()
+            .find(|candidate| self.names.contains_key(**candidate))
+            .map(|candidate| (*candidate).to_owned())
+            .or_else(|| self.sans_serif.clone())
+            .unwrap_or_else(|| candidates[0].to_owned())
     }
 
     /// Mirror `usvg`'s font selection: take the first listed family that is
@@ -490,6 +545,39 @@ mod tests {
             catalog.resolve(&oversized).status,
             FontResolutionStatus::Missing
         );
+    }
+
+    #[test]
+    fn ui_font_prefers_installed_desktop_faces_over_generic_fallbacks() {
+        let candidates = ["Ubuntu", "Cantarell", "DejaVu Sans"];
+        let sans = SANS_SERIF_CANDIDATES[0];
+
+        let catalog = catalog_of(&["FreeMono", "Cantarell", "DejaVu Sans", sans]);
+        assert_eq!(catalog.ui_family(&candidates), "Cantarell");
+
+        // No candidate installed: use the installed sans-serif face, never
+        // GPUI's typewriter default.
+        let catalog = catalog_of(&["FreeMono", sans]);
+        assert_eq!(catalog.ui_family(&candidates), sans);
+
+        let catalog = catalog_of(&[]);
+        assert_eq!(catalog.ui_family(&candidates), "Ubuntu");
+    }
+
+    #[test]
+    fn ui_fonts_resolve_to_installed_families_on_this_machine() {
+        let installed = installed_font_families();
+        if installed.is_empty() {
+            return;
+        }
+        for family in [ui_font_family(), ui_monospace_font_family()] {
+            assert!(
+                SYSTEM_FONT_CATALOG.names.contains_key(family),
+                "{family} is not installed"
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_ne!(ui_font_family(), "FreeMono");
     }
 
     #[test]

@@ -21,6 +21,11 @@ All notable user-facing changes to Strek are documented here.
   because GPUI looks for an unbundled "Zed Plex Sans".
 - Stopped generic families from naming an uninstalled font, which could drop
   text from Linux exports when DejaVu fonts were absent.
+- Fixed the Linux interface drawing in the typewriter font FreeMono (GPUI's
+  Linux default). Strek now uses the first installed desktop sans-serif
+  (Ubuntu Sans, Ubuntu, Adwaita Sans, Cantarell, Noto Sans, Inter, DejaVu Sans,
+  Liberation Sans, or FreeSans) and an installed monospace face for numeric
+  fields. macOS and Windows keep their existing interface fonts.
 
 ## [0.2.3] - 2026-09-01
 

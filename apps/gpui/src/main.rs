@@ -5094,6 +5094,7 @@ impl Render for Strek {
 
         div()
             .id("strek")
+            .font_family(typography::ui_font_family())
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_document))
@@ -5591,7 +5592,7 @@ fn render_guide_position_input(input: GuidePositionInput) -> impl IntoElement {
                 .items_center()
                 .rounded(px(4.0))
                 .bg(rgb(0x17181a))
-                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
+                .font_family(crate::typography::ui_monospace_font_family())
                 .text_size(px(10.0))
                 .text_color(rgb(if input.invalid { 0xfca58f } else { 0xf1f3f4 }))
                 .child(input.value),
