@@ -147,6 +147,14 @@ const ICONS: &[(&str, &[u8])] = &[
         "icons/palette.svg",
         include_bytes!("../assets/icons/palette.svg"),
     ),
+    (
+        "icons/window-maximize.svg",
+        include_bytes!("../assets/icons/window-maximize.svg"),
+    ),
+    (
+        "icons/window-restore.svg",
+        include_bytes!("../assets/icons/window-restore.svg"),
+    ),
 ];
 
 pub struct Assets;
@@ -213,6 +221,8 @@ pub enum Icon {
     Properties,
     Magnet,
     Palette,
+    WindowMaximize,
+    WindowRestore,
 }
 
 impl Icon {
@@ -261,6 +271,8 @@ impl Icon {
             Self::Properties => "icons/properties.svg",
             Self::Magnet => "icons/magnet.svg",
             Self::Palette => "icons/palette.svg",
+            Self::WindowMaximize => "icons/window-maximize.svg",
+            Self::WindowRestore => "icons/window-restore.svg",
         }
     }
 }

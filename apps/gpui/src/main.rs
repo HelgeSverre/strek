@@ -23,6 +23,7 @@ mod svg_import;
 mod text_input;
 mod toolbar;
 mod typography;
+mod window_chrome;
 mod workspace_preferences;
 
 use std::cell::Cell;
@@ -79,6 +80,7 @@ actions!(
         OpenKeyboardShortcuts,
         ShowCommandPalette,
         QuitApplication,
+        CloseWindow,
         Undo,
         Redo,
         SelectAll,
@@ -525,6 +527,7 @@ struct Strek {
     layer_context_menu: Option<layer_panel::LayerContextMenu>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
+    title_bar_drag_armed: Rc<Cell<bool>>,
     canvas_input_bounds: Option<Bounds<gpui::Pixels>>,
     text_image_cache: canvas::TextImageCache,
     artwork_image_cache: canvas::ArtworkImageCache,
@@ -604,6 +607,7 @@ impl Strek {
             layer_context_menu: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
+            title_bar_drag_armed: Rc::default(),
             canvas_input_bounds: None,
             text_image_cache: canvas::TextImageCache::default(),
             artwork_image_cache: canvas::ArtworkImageCache::default(),
@@ -1297,6 +1301,17 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.request_document_action(PendingDocumentAction::Close, window, cx);
+    }
+
+    /// Title bar close button for client-decorated windows. Follows the same path
+    /// as a compositor close request, including the unsaved-changes prompt.
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_layer_rename(true, cx);
+        self.dismiss_menus();
+        if self.should_close_window(window, cx) {
+            self.allow_window_close = true;
+            window.remove_window();
+        }
     }
 
     fn request_document_action(
@@ -5035,6 +5050,8 @@ impl Render for Strek {
                 }
             });
         let canvas_bounds_entity = editor_entity.clone();
+        let window_chrome =
+            window_chrome::WindowChrome::for_window(window, Rc::clone(&self.title_bar_drag_armed));
 
         div()
             .id("strek")
@@ -5061,6 +5078,7 @@ impl Render for Strek {
             .on_action(cx.listener(Self::open_keyboard_shortcuts))
             .on_action(cx.listener(Self::show_command_palette))
             .on_action(cx.listener(Self::quit_application))
+            .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::select_all))
@@ -5221,6 +5239,7 @@ impl Render for Strek {
                     open_menu,
                 },
                 &self.keymap,
+                window_chrome.as_ref(),
             ))
             // Main content area
             .child(
@@ -5372,6 +5391,12 @@ impl Render for Strek {
             })
             .when_some(command_palette, |root, palette| root.child(palette))
             .when_some(color_library_panel, |root, panel| root.child(panel))
+            .when_some(
+                window_chrome
+                    .as_ref()
+                    .and_then(|chrome| window_chrome::render_resize_handles(window_size, chrome)),
+                |root, handles| root.child(handles),
+            )
     }
 }
 
@@ -6433,6 +6458,9 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_decorations: window_chrome::requested_window_decorations(),
+                    app_id: Some("strek".to_owned()),
+                    window_min_size: Some(size(px(640.0), px(400.0))),
                     ..Default::default()
                 },
                 move |window, cx| {
@@ -6812,6 +6840,56 @@ mod layout_tests {
             cx.read(|cx| strek.read(cx).editor.interaction_kind()),
             editor_core::InteractionKind::Panning
         );
+    }
+
+    #[gpui::test]
+    fn close_window_action_closes_a_clean_document(cx: &mut gpui::TestAppContext) {
+        let (_strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 1);
+
+        cx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt());
+        assert!(cx.windows().is_empty());
+    }
+
+    #[gpui::test]
+    fn close_window_action_prompts_before_discarding_changes(cx: &mut gpui::TestAppContext) {
+        let (strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        strek.update(cx, |strek, _| {
+            let root = strek.editor.document.root;
+            let shape = strek
+                .editor
+                .document
+                .add_child(
+                    root,
+                    editor_core::Node::shape(
+                        "Rectangle",
+                        editor_core::PathData::rect(0.0, 0.0, 20.0, 20.0),
+                    ),
+                )
+                .unwrap();
+            strek.editor.set_layer_selection([shape]);
+            assert!(strek.editor.execute_action(EditorAction::Duplicate));
+            assert!(strek.document_is_dirty());
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 1, "cancel keeps the window open");
+
+        cx.dispatch_action(CloseWindow);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Discard");
+        cx.run_until_parked();
+        assert!(cx.windows().is_empty(), "discard closes the window");
     }
 
     fn raster_identity(revision: u64) -> ArtworkRasterIdentity {
