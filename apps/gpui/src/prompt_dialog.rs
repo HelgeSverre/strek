@@ -186,10 +186,6 @@ impl Render for PromptDialog {
                 div()
                     .debug_selector(|| "prompt-dialog-card".to_owned())
                     .w(px(CARD_WIDTH))
-                    .max_w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
                     .p(px(18.0))
                     .overflow_hidden()
                     .rounded(px(10.0))
@@ -199,6 +195,7 @@ impl Render for PromptDialog {
                     .shadow_xl()
                     .child(
                         div()
+                            .debug_selector(|| "prompt-dialog-accent".to_owned())
                             .w(px(28.0))
                             .h(px(3.0))
                             .rounded_full()
@@ -207,6 +204,7 @@ impl Render for PromptDialog {
                     .child(
                         div()
                             .debug_selector(|| "prompt-dialog-message".to_owned())
+                            .mt(px(10.0))
                             .w_full()
                             .text_size(px(14.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -218,18 +216,24 @@ impl Render for PromptDialog {
                             div()
                                 .id("prompt-dialog-detail")
                                 .debug_selector(|| "prompt-dialog-detail".to_owned())
+                                .mt(px(8.0))
                                 .w_full()
                                 .max_h(px(DETAIL_MAX_HEIGHT))
                                 .overflow_y_scroll()
                                 .text_size(px(12.0))
                                 .line_height(px(17.0))
                                 .text_color(rgb(0xa8abb2))
-                                .child(detail),
+                                .child(
+                                    div()
+                                        .debug_selector(|| "prompt-dialog-detail-text".to_owned())
+                                        .w_full()
+                                        .child(detail),
+                                ),
                         )
                     })
                     .child(
                         div()
-                            .mt(px(8.0))
+                            .mt(px(16.0))
                             .w_full()
                             .flex()
                             .flex_row()
@@ -271,6 +275,16 @@ mod tests {
         width: f32,
         actions: &'static [&'static str],
     ) -> (&'a mut VisualTestContext, Answer) {
+        open_prompt_with(cx, width, LONG_MESSAGE, LONG_DETAIL, actions)
+    }
+
+    fn open_prompt_with<'a>(
+        cx: &'a mut TestAppContext,
+        width: f32,
+        message: &'static str,
+        detail: &'static str,
+        actions: &'static [&'static str],
+    ) -> (&'a mut VisualTestContext, Answer) {
         cx.update(|cx| {
             register_keybindings(cx);
             cx.set_prompt_builder(build_prompt);
@@ -278,13 +292,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| EmptyView);
         cx.simulate_resize(size(px(width), px(600.0)));
         let receiver = cx.update(|window, cx| {
-            window.prompt(
-                PromptLevel::Warning,
-                LONG_MESSAGE,
-                Some(LONG_DETAIL),
-                actions,
-                cx,
-            )
+            window.prompt(PromptLevel::Warning, message, Some(detail), actions, cx)
         });
         let answer = Answer::default();
         let slot = answer.clone();
@@ -350,6 +358,32 @@ mod tests {
                 "{selector} {button:?} overflows {card:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn two_line_detail_is_not_clipped(cx: &mut TestAppContext) {
+        // The unsaved-changes detail wraps to exactly two lines in the
+        // preferred card width; the detail box must be tall enough for both.
+        let (cx, _receiver) = open_prompt_with(
+            cx,
+            1280.0,
+            "Save changes to “Strek Showcase”?",
+            "Your changes will be lost if you continue without saving.",
+            &["Save", "Discard", "Cancel"],
+        );
+
+        let detail = bounds(cx, "prompt-dialog-detail");
+        let text = bounds(cx, "prompt-dialog-detail-text");
+        assert!(
+            text.size.height >= px(17.0 * 2.0),
+            "detail should wrap onto two lines, got {text:?}"
+        );
+        assert!(
+            detail.size.height >= text.size.height,
+            "detail box {detail:?} clips its text {text:?}"
+        );
+        let accent = bounds(cx, "prompt-dialog-accent");
+        assert_eq!(accent.size.height, px(3.0), "card squeezed its accent bar");
     }
 
     #[gpui::test]
