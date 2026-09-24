@@ -594,7 +594,7 @@ fn write_text_with_fill(
         output,
         r#"<text data-index="{}" xml:space="preserve" font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="{}" fill="{}" opacity="{}" transform="{}">"#,
         index,
-        html_escape(&text.font_family),
+        html_escape(svg_font_family(&text.font_family)),
         text.font_size,
         text.font_weight,
         font_style,
@@ -734,6 +734,19 @@ fn line_join_to_css(join: LineJoin) -> &'static str {
 }
 
 /// Escape HTML special characters.
+/// SVG `font-family` value for a stored document family.
+///
+/// SVG renderers without `system-ui` support (including `usvg`) would fall
+/// back to serif, while the editor draws it as sans-serif, so it is written
+/// with an explicit sans-serif fallback. Other values are written verbatim.
+fn svg_font_family(family: &str) -> &str {
+    if family.trim().eq_ignore_ascii_case("system-ui") {
+        "system-ui, sans-serif"
+    } else {
+        family
+    }
+}
+
 fn html_escape(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1128,6 +1141,8 @@ mod tests {
 
         assert!(svg.contains("<text"));
         assert!(svg.contains("font-family=\"Arial\""));
+        assert_eq!(svg_font_family("Arial"), "Arial");
+        assert_eq!(svg_font_family(" System-UI "), "system-ui, sans-serif");
         assert!(svg.contains("font-size=\"16\""));
         assert!(svg.contains("font-weight=\"700\""));
         assert!(svg.contains("Hello World"));

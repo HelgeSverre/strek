@@ -13,6 +13,7 @@ mod command_palette;
 mod commands;
 mod document_io;
 mod export;
+mod font_picker;
 mod layer_name_input;
 mod layer_panel;
 mod mcp;
@@ -156,6 +157,7 @@ actions!(
         SetTextFamilySystem,
         SetTextFamilySerif,
         SetTextFamilyMonospace,
+        ChooseTextFontFamily,
         TextWeightDown,
         TextWeightUp,
         ToggleTextItalic,
@@ -1119,13 +1121,6 @@ impl Strek {
             return;
         }
 
-        if self.editor.cancel_pointer_interaction() {
-            self.current_cursor = convert_cursor(self.editor.cursor());
-        }
-        self.clear_property_color_input(cx);
-        self.zoom_input = None;
-        self.finish_layer_rename(true, cx);
-        self.dismiss_menus();
         let entries = commands::COMMANDS
             .iter()
             .filter(|spec| {
@@ -1133,30 +1128,67 @@ impl Strek {
                     != commands::CommandTarget::App(commands::AppCommand::ShowCommandPalette)
             })
             .map(|spec| command_palette::PaletteEntry {
-                target: spec.target,
-                label: spec.label,
-                description: spec.description,
-                category: spec.category,
+                target: command_palette::PaletteTarget::Command(spec.target),
+                label: spec.label.into(),
+                description: spec.description.into(),
+                category: spec.category.into(),
                 shortcut: self.keymap.shortcut_label(spec.target),
                 enabled: self.command_is_enabled(spec.target),
                 recent_rank: self
                     .recent_commands
                     .iter()
                     .position(|target| *target == spec.target),
+                preview_font: None,
             })
             .collect();
-        let palette = cx.new(|cx| command_palette::CommandPalette::new(entries, cx));
+        self.present_palette(
+            entries,
+            command_palette::PaletteLabels::COMMANDS,
+            focus_policy,
+            window,
+            cx,
+        );
+    }
+
+    /// Show a palette overlay, replacing any open one, and route its result.
+    fn present_palette(
+        &mut self,
+        entries: Vec<command_palette::PaletteEntry>,
+        labels: command_palette::PaletteLabels,
+        focus_policy: FocusPolicy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_numeric_property_scrub();
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        self.clear_property_color_input(cx);
+        self.zoom_input = None;
+        self.finish_layer_rename(true, cx);
+        self.dismiss_menus();
+        let palette = cx.new(|cx| command_palette::CommandPalette::new(entries, labels, cx));
         cx.subscribe_in(
             &palette,
             window,
             |editor, _, event: &command_palette::CommandPaletteEvent, window, cx| {
                 editor.command_palette = None;
                 editor.focus_handle.focus(window);
-                if let command_palette::CommandPaletteEvent::Execute(target) = event {
-                    editor.recent_commands.retain(|recent| recent != target);
-                    editor.recent_commands.insert(0, *target);
-                    editor.recent_commands.truncate(8);
-                    window.dispatch_action(commands::action_for(*target), cx);
+                match event {
+                    command_palette::CommandPaletteEvent::Execute(
+                        command_palette::PaletteTarget::Command(target),
+                    ) => {
+                        editor.recent_commands.retain(|recent| recent != target);
+                        editor.recent_commands.insert(0, *target);
+                        editor.recent_commands.truncate(8);
+                        window.dispatch_action(commands::action_for(*target), cx);
+                    }
+                    command_palette::CommandPaletteEvent::Execute(
+                        command_palette::PaletteTarget::FontFamily(family),
+                    ) => {
+                        editor.editor.set_selected_text_font_family(family);
+                    }
+                    command_palette::CommandPaletteEvent::Dismiss => {}
                 }
                 cx.notify();
             },
@@ -1244,7 +1276,8 @@ impl Strek {
                 | AppCommand::TextLarger
                 | AppCommand::AlignTextLeft
                 | AppCommand::AlignTextCenter
-                | AppCommand::AlignTextRight,
+                | AppCommand::AlignTextRight
+                | AppCommand::ChooseTextFontFamily,
             ) => self.editor.selected_text_data().is_some(),
             CommandTarget::App(AppCommand::ToggleFrameBackground) => {
                 self.editor.selected_frame_data().is_some()
@@ -3121,6 +3154,29 @@ impl Strek {
         if self.editor.set_selected_text_font_family("monospace") {
             cx.notify();
         }
+    }
+
+    fn choose_text_font_family(
+        &mut self,
+        _: &ChooseTextFontFamily,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.editor.selected_text_data() else {
+            return;
+        };
+        let entries = font_picker::entries(
+            &text.font.family,
+            typography::installed_font_families(),
+            typography::resolve_document_font_family,
+        );
+        self.present_palette(
+            entries,
+            command_palette::PaletteLabels::FONTS,
+            FocusPolicy::Request,
+            window,
+            cx,
+        );
     }
 
     fn text_weight_down(
@@ -5138,6 +5194,7 @@ impl Render for Strek {
             .on_action(cx.listener(Self::set_text_family_system))
             .on_action(cx.listener(Self::set_text_family_serif))
             .on_action(cx.listener(Self::set_text_family_monospace))
+            .on_action(cx.listener(Self::choose_text_font_family))
             .on_action(cx.listener(Self::text_weight_down))
             .on_action(cx.listener(Self::text_weight_up))
             .on_action(cx.listener(Self::toggle_text_italic))

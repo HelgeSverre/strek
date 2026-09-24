@@ -58,7 +58,16 @@ impl PortableFontFamily {
     }
 }
 
+/// Label for a stored family; families that are not installed are marked
+/// because every text path draws them with the serif fallback face.
 pub(crate) fn font_family_label(family: &str) -> String {
+    font_family_label_with(family, crate::typography::resolve_document_font_family)
+}
+
+fn font_family_label_with(
+    family: &str,
+    resolve: impl Fn(&str) -> crate::typography::FontResolution,
+) -> String {
     match PortableFontFamily::from_name(family) {
         PortableFontFamily::System => "System".to_owned(),
         PortableFontFamily::Serif => "Serif".to_owned(),
@@ -67,6 +76,8 @@ pub(crate) fn font_family_label(family: &str) -> String {
             let family = family.trim();
             if family.is_empty() {
                 "Unknown".to_owned()
+            } else if resolve(family).status == crate::typography::FontResolutionStatus::Missing {
+                format!("{family} (missing)")
             } else {
                 family.to_owned()
             }
@@ -497,10 +508,11 @@ pub(crate) fn render_context_bar(
         return Some(
             with_common_selection_actions(
                 panel
-                    .child(context_label(format!(
-                        "Text · {}",
-                        font_family_label(&text.font.family)
-                    )))
+                    .child(context_label("Text"))
+                    .child(context_font_family_button(
+                        font_family_label(&text.font.family),
+                        shortcut(keymap, CommandTarget::App(AppCommand::ChooseTextFontFamily)),
+                    ))
                     .child(context_toggle_text_button(
                         "family-system",
                         "System",
@@ -940,6 +952,40 @@ fn context_stepper_button<A: Action + Clone>(
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(action.clone()), cx);
                 })
+        })
+}
+
+/// Current family; opens the searchable font picker.
+fn context_font_family_button(label: String, shortcut: Option<String>) -> impl IntoElement {
+    div()
+        .id("context-font-family")
+        .h(px(25.0))
+        .max_w(px(180.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .text_color(rgb(TEXT))
+        .text_size(px(10.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .child(icon(Icon::ChevronDown, 10.0, rgb(TEXT_MUTED)))
+        .tooltip(editor_tooltip_owned(
+            "Choose font…",
+            shortcut.map(SharedString::from),
+        ))
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(crate::ChooseTextFontFamily), cx);
         })
 }
 
@@ -1957,7 +2003,7 @@ fn menu_separator() -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        creation_style_context, font_family_label, format_zoom_label, format_zoom_percentage,
+        creation_style_context, font_family_label_with, format_zoom_label, format_zoom_percentage,
         PortableFontFamily,
     };
     use editor_core::{Editor, EditorAction, Node, Paint, PathData, Style};
@@ -1987,9 +2033,24 @@ mod tests {
             PortableFontFamily::from_name("monospace"),
             PortableFontFamily::Monospace
         );
-        assert_eq!(font_family_label("sans-serif"), "System");
-        assert_eq!(font_family_label("Custom Sans"), "Custom Sans");
-        assert_eq!(font_family_label("  "), "Unknown");
+        let resolve = |family: &str| crate::typography::FontResolution {
+            family: Some("Face".to_owned()),
+            status: if family == "Custom Sans" {
+                crate::typography::FontResolutionStatus::Installed
+            } else {
+                crate::typography::FontResolutionStatus::Missing
+            },
+        };
+        assert_eq!(font_family_label_with("sans-serif", resolve), "System");
+        assert_eq!(
+            font_family_label_with(" Custom Sans ", resolve),
+            "Custom Sans"
+        );
+        assert_eq!(
+            font_family_label_with("Brand Display", resolve),
+            "Brand Display (missing)"
+        );
+        assert_eq!(font_family_label_with("  ", resolve), "Unknown");
     }
 
     #[test]

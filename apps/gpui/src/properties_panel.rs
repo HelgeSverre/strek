@@ -14,12 +14,13 @@ use crate::{
     assets::{icon, Icon},
     color_picker::{format_paint, paint_as_rgba, parse_hex_paint},
     toolbar::{editor_tooltip, font_family_label, PortableFontFamily},
-    AlignTextCenter, AlignTextLeft, AlignTextRight, PropertyFillBlack, PropertyFillBlue,
-    PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite, PropertyRotateLeft,
-    PropertyRotateRight, PropertyToggleStroke, SetLayoutFree, SetLayoutHorizontal,
-    SetLayoutVertical, SetTextFamilyMonospace, SetTextFamilySerif, SetTextFamilySystem,
-    StartFillColorInput, StartFrameBackgroundColorInput, StartStrokeColorInput, Strek,
-    TextWeightDown, TextWeightUp, ToggleFrameBackground, ToggleTextItalic,
+    AlignTextCenter, AlignTextLeft, AlignTextRight, ChooseTextFontFamily, PropertyFillBlack,
+    PropertyFillBlue, PropertyFillGreen, PropertyFillNone, PropertyFillRed, PropertyFillWhite,
+    PropertyRotateLeft, PropertyRotateRight, PropertyToggleStroke, SetLayoutFree,
+    SetLayoutHorizontal, SetLayoutVertical, SetTextFamilyMonospace, SetTextFamilySerif,
+    SetTextFamilySystem, StartFillColorInput, StartFrameBackgroundColorInput,
+    StartStrokeColorInput, Strek, TextWeightDown, TextWeightUp, ToggleFrameBackground,
+    ToggleTextItalic,
 };
 
 const SURFACE: u32 = 0x202124;
@@ -678,10 +679,14 @@ fn font_family_controls(text: &TextData) -> gpui::Div {
                 .child(row_label("Family"))
                 .child(
                     div()
+                        .id("text-font-family")
                         .h(px(26.0))
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .items_center()
+                        .justify_between()
+                        .gap(px(4.0))
                         .px(px(8.0))
                         .rounded(px(4.0))
                         .border_1()
@@ -689,7 +694,20 @@ fn font_family_controls(text: &TextData) -> gpui::Div {
                         .bg(rgb(SURFACE_RAISED))
                         .text_size(px(10.0))
                         .text_color(rgb(TEXT))
-                        .child(font_family_label(&text.font.family)),
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(font_family_label(&text.font.family)),
+                        )
+                        .child(icon(Icon::ChevronDown, 10.0, rgb(MUTED)))
+                        .tooltip(editor_tooltip("Choose font…", None))
+                        .on_click(|_, window: &mut Window, cx| {
+                            window.dispatch_action(Box::new(ChooseTextFontFamily), cx);
+                        }),
                 ),
         )
         .child(
