@@ -955,28 +955,28 @@ fn text_font(text: &TextItem) -> gpui::Font {
     font
 }
 
+/// Resolve a document family to the installed face every text path draws.
+///
+/// Native GPUI text, rotated text rasterized by `usvg`, and exports share this
+/// mapping so a generic or missing family never changes face between them.
 fn resolve_gpui_font_family(family: &str) -> String {
-    let trimmed = family.trim();
-    let resolved = if trimmed.eq_ignore_ascii_case("sans-serif")
-        || trimmed.eq_ignore_ascii_case("system-ui")
-    {
-        ".SystemUIFont"
-    } else if trimmed.eq_ignore_ascii_case("serif") {
-        platform_serif_family()
-    } else if trimmed.eq_ignore_ascii_case("monospace") {
-        crate::typography::MONOSPACE_FONT_FAMILY
-    } else {
-        trimmed
-    };
-    resolved.to_owned()
+    crate::typography::resolve_document_font_family(family)
+        .family
+        .unwrap_or_else(|| family.trim().to_owned())
 }
 
-fn platform_serif_family() -> &'static str {
-    if cfg!(any(target_os = "macos", target_os = "windows")) {
-        "Times New Roman"
-    } else {
-        "DejaVu Serif"
+/// Quote a resolved family for an SVG `font-family` attribute value.
+fn svg_font_family_value(family: &str) -> String {
+    let mut quoted = String::with_capacity(family.len() + 2);
+    quoted.push('\'');
+    for character in family.chars() {
+        if matches!(character, '\'' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
     }
+    quoted.push('\'');
+    quoted
 }
 
 fn text_run(len: usize, font: gpui::Font, color: gpui::Hsla) -> TextRun {
@@ -1374,7 +1374,9 @@ fn affine_text_svg(
             r#"font-style="{}" text-anchor="start" fill="rgb({} {} {})" fill-opacity="{}" "#,
             r#"transform="matrix({} {} {} {} {} {})">"#
         ),
-        xml_escape(&text.font_family),
+        xml_escape(&svg_font_family_value(&resolve_gpui_font_family(
+            &text.font_family
+        ))),
         text.font_size,
         text.font_weight,
         font_style,
@@ -1835,15 +1837,75 @@ mod tests {
     }
 
     #[test]
-    fn css_generic_families_resolve_to_gpui_platform_fonts() {
-        assert_eq!(resolve_gpui_font_family("sans-serif"), ".SystemUIFont");
-        assert_eq!(resolve_gpui_font_family("system-ui"), ".SystemUIFont");
-        assert_eq!(resolve_gpui_font_family("serif"), platform_serif_family());
+    fn canvas_font_families_use_the_export_resolver() {
+        use crate::typography::{installed_font_families, resolve_document_font_family};
+
+        let installed = installed_font_families();
+        for family in [
+            "sans-serif",
+            "system-ui",
+            "serif",
+            "monospace",
+            "No Such Face 9c1",
+        ] {
+            let gpui_family = resolve_gpui_font_family(family);
+            // `.SystemUIFont` is not a real family on Linux (GPUI looks for an
+            // unbundled "Zed Plex Sans"), and usvg cannot load it anywhere.
+            assert_ne!(gpui_family, ".SystemUIFont");
+            if installed.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                Some(gpui_family.clone()),
+                resolve_document_font_family(family).family,
+                "{family}"
+            );
+            assert!(
+                installed.contains(&gpui_family),
+                "{family} resolved to uninstalled {gpui_family}"
+            );
+        }
+        if let Some(family) = installed.first() {
+            assert_eq!(&resolve_gpui_font_family(family), family);
+        }
+        // Missing families draw with the serif face, as usvg exports them.
         assert_eq!(
-            resolve_gpui_font_family("monospace"),
-            crate::typography::MONOSPACE_FONT_FAMILY
+            resolve_gpui_font_family("No Such Face 9c1"),
+            resolve_gpui_font_family("serif")
         );
-        assert_eq!(resolve_gpui_font_family("Custom Family"), "Custom Family");
+    }
+
+    #[test]
+    fn affine_text_svg_names_the_resolved_family() {
+        let text = TextItem::new("Rotated", 16.0).with_font_family("No Such Face 9c1");
+        let layout = TextLayout {
+            lines: vec![TextLayoutLine {
+                range: 0..text.content.len(),
+                x: 0.0,
+                character_count: text.content.len(),
+                hard_break: false,
+                positions: (0..=text.content.len())
+                    .map(|index| (index, index as f32 * 9.0))
+                    .collect(),
+            }],
+            character_width: 9.0,
+            line_height: 20.0,
+            width: text.content.len() as f32 * 9.0,
+        };
+        let transform = Affine2::from_angle(0.3);
+        let rendered = affine_text_svg(&text, &layout, &transform, 1.0).unwrap();
+        let expected = xml_escape(&svg_font_family_value(&resolve_gpui_font_family(
+            "No Such Face 9c1",
+        )));
+        assert!(
+            rendered
+                .svg
+                .contains(&format!("font-family=\"{expected}\"")),
+            "{}",
+            rendered.svg
+        );
+        assert!(!rendered.svg.contains("No Such Face"));
+        assert_eq!(svg_font_family_value(r"O'Bri\en"), r"'O\'Bri\\en'");
     }
 
     #[test]

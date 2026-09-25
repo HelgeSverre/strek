@@ -444,6 +444,7 @@ impl Render for DraggedLayerPreview {
             .border_color(rgb(0x0c8ce9))
             .rounded(px(5.0))
             .shadow_md()
+            .font_family(crate::typography::ui_font_family())
             .text_size(px(11.0))
             .text_color(rgb(0xf1f3f4))
             .child(self.name.clone())

@@ -2,6 +2,32 @@
 
 All notable user-facing changes to Strek are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Added a searchable font picker for text layers that lists every installed
+  font family with a preview. Open it from the text toolbar, the Typography
+  family field, or **Choose Font…** in the command palette. Choosing a family is
+  one undoable edit.
+- Marked text families that are not installed as "(missing)" and listed them in
+  the picker with the face they draw with.
+- Bundled Inter 4.1 (SIL Open Font License 1.1) as the interface font. When
+  Inter is not installed, the bundled copy is also available to text layers and
+  export; an installed Inter takes precedence.
+
+### Fixed
+
+- Fixed System, Serif, Monospace, and missing font families drawing with
+  different faces on the canvas, on rotated text, and in PNG/outlined-SVG
+  export. On Linux, System text previously fell back to an arbitrary font
+  because GPUI looks for an unbundled "Zed Plex Sans".
+- Stopped generic families from naming an uninstalled font, which could drop
+  text from Linux exports when DejaVu fonts were absent.
+- Fixed the Linux interface drawing in the typewriter font FreeMono (GPUI's
+  Linux default). The interface now uses the bundled Inter font on every
+  platform, and numeric fields use an installed monospace face.
+
 ## [0.2.3] - 2026-09-01
 
 ### Changed

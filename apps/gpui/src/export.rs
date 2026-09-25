@@ -414,6 +414,38 @@ mod tests {
         assert!(svg.contains(r#"viewBox="-27 38 24 14""#));
     }
 
+    fn text_png(family: &str) -> image::DynamicImage {
+        let mut display_list = DisplayList::new();
+        display_list.push(DisplayItem::Text {
+            text: TextItem::new("Rag Wig 01", 24.0).with_font_family(family),
+            transform: Affine2::IDENTITY,
+            opacity: 1.0,
+        });
+        let snapshot = ArtworkSnapshot {
+            display_list,
+            bounds: Rect::new(Vec2::ZERO, Vec2::new(180.0, 36.0)),
+        };
+        let bytes = encode_artwork(ExportFormat::Png, &snapshot).unwrap();
+        image::load_from_memory(&bytes).unwrap()
+    }
+
+    /// The editor draws `system-ui` as sans-serif; raster export must too
+    /// rather than falling back to usvg's serif default.
+    #[test]
+    fn system_ui_text_rasterizes_like_sans_serif() {
+        if crate::typography::installed_font_families().is_empty() {
+            return;
+        }
+        let system_ui = text_png("system-ui");
+        assert!(system_ui.pixels().any(|(_, _, pixel)| pixel.0[3] > 0));
+        assert_eq!(system_ui.as_bytes(), text_png("sans-serif").as_bytes());
+        let serif = crate::typography::resolve_document_font_family("serif").family;
+        let sans = crate::typography::resolve_document_font_family("sans-serif").family;
+        if serif != sans {
+            assert_ne!(system_ui.as_bytes(), text_png("serif").as_bytes());
+        }
+    }
+
     #[test]
     fn outlined_svg_converts_text_to_paths_and_preserves_the_view_box() {
         let bytes = encode_artwork(ExportFormat::SvgOutlined, &text_snapshot()).unwrap();
