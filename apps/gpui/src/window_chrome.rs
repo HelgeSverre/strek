@@ -62,7 +62,8 @@ impl WindowChrome {
 }
 
 /// Makes `element` behave like a native title bar when decorations are client-side:
-/// drag to move, double click to maximize or restore, right click for the window menu.
+/// drag to move, double click to maximize or restore (when the compositor allows
+/// maximizing), right click for the window menu.
 ///
 /// Apply it only to header regions without their own buttons so clicks on controls
 /// never start a window move.
@@ -74,6 +75,7 @@ pub(crate) fn drag_region(element: Stateful<Div>, chrome: Option<&WindowChrome>)
     let consume = Rc::clone(&chrome.drag_armed);
     let release = Rc::clone(&chrome.drag_armed);
     let release_out = Rc::clone(&chrome.drag_armed);
+    let can_maximize = chrome.controls.maximize;
     element
         .on_mouse_down(MouseButton::Left, move |_, _, _| arm.set(true))
         .on_mouse_up(MouseButton::Left, move |_, _, _| release.set(false))
@@ -83,8 +85,8 @@ pub(crate) fn drag_region(element: Stateful<Div>, chrome: Option<&WindowChrome>)
                 window.start_window_move();
             }
         })
-        .on_click(|event, window, _| {
-            if event.up.click_count == 2 {
+        .on_click(move |event, window, _| {
+            if can_maximize && event.up.click_count == 2 {
                 window.zoom_window();
             }
         })
@@ -246,8 +248,9 @@ fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
 
 /// Invisible resize strips painted above all editor content.
 ///
-/// Each strip owns an opaque hitbox, so the canvas below neither sees the press
-/// nor overrides the resize cursor.
+/// The strips are painted last, so their resize cursors win, and each stops a
+/// left press from propagating, so the canvas below never sees it. Hover and
+/// scroll events still reach the content under the strips.
 pub(crate) fn render_resize_handles(
     window_size: Size<Pixels>,
     chrome: &WindowChrome,
