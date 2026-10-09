@@ -1160,13 +1160,17 @@ impl Document {
             })
     }
 
-    /// Every visible, unlocked node at a world position, groups included,
-    /// from front to back.
+    /// Every visible, unlocked node at a world position, from front to back.
     ///
     /// Each node uses the same test as [`Self::hit_test_with_tolerance`]: leaf
-    /// geometry and frame rectangles within their clip chain, and group
-    /// bounds.
-    pub fn hit_test_all_with_tolerance(&mut self, world_pos: Vec2, tolerance: f32) -> Vec<NodeId> {
+    /// geometry and frame rectangles within their clip chain, and group bounds
+    /// when `include_groups` is set.
+    pub fn hit_test_all_with_tolerance(
+        &mut self,
+        world_pos: Vec2,
+        include_groups: bool,
+        tolerance: f32,
+    ) -> Vec<NodeId> {
         let mut clip_containment_cache = HashMap::new();
         self.reverse_paint_order()
             .collect::<Vec<_>>()
@@ -1175,7 +1179,7 @@ impl Document {
                 self.node_contains_point(
                     id,
                     world_pos,
-                    true,
+                    include_groups,
                     tolerance,
                     &mut clip_containment_cache,
                 )

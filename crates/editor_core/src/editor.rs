@@ -1797,17 +1797,24 @@ impl Editor {
     }
 
     /// Layers under a screen point, for choosing one that a click would not
-    /// reach: every visible, unlocked layer whose geometry contains the point,
-    /// plus the groups and frames whose bounds do, in Layers panel order
-    /// (containers before their contents, topmost siblings first).
+    /// reach: every visible, unlocked shape, text, or frame whose geometry
+    /// contains the point, plus the groups and frames that contain one of
+    /// them, in Layers panel order (containers before their contents, topmost
+    /// siblings first). A group whose bounds merely surround the point is not
+    /// listed.
     pub fn layers_at_screen_point(&mut self, screen_pos: Vec2) -> Vec<NodeId> {
         let world_pos = self.view.to_world(screen_pos);
         let tolerance = 4.0 / self.view.zoom.abs().max(f32::EPSILON);
-        let hits = self
+        let mut hits = self
             .document
-            .hit_test_all_with_tolerance(world_pos, tolerance)
+            .hit_test_all_with_tolerance(world_pos, false, tolerance)
             .into_iter()
             .collect::<HashSet<_>>();
+        let containers = hits
+            .iter()
+            .flat_map(|&id| self.document.ancestors(id))
+            .collect::<Vec<_>>();
+        hits.extend(containers);
         let mut layers = Vec::with_capacity(hits.len());
         self.collect_in_layer_order(self.document.root, &hits, &mut layers);
         layers
@@ -8991,6 +8998,11 @@ mod tests {
         assert_eq!(
             editor.layers_at_screen_point(Vec2::new(40.0, 10.0)),
             [frame, group, elsewhere]
+        );
+        // Inside the group's bounds but between its children.
+        assert_eq!(
+            editor.layers_at_screen_point(Vec2::new(27.5, 10.0)),
+            [frame]
         );
         assert!(editor.layers_at_screen_point(Vec2::splat(200.0)).is_empty());
 
