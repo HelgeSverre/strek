@@ -56,6 +56,9 @@ pub(crate) fn build_prompt(
     window: &mut Window,
     cx: &mut App,
 ) -> RenderablePromptHandle {
+    // Like a native alert, a prompt without answers offers OK so the modal
+    // can always be dismissed.
+    let actions = if actions.is_empty() { &["OK"] } else { actions };
     let dialog = cx.new(|cx| PromptDialog {
         level,
         message: message.to_owned().into(),
@@ -361,29 +364,40 @@ mod tests {
     }
 
     #[gpui::test]
-    fn two_line_detail_is_not_clipped(cx: &mut TestAppContext) {
-        // The unsaved-changes detail wraps to exactly two lines in the
-        // preferred card width; the detail box must be tall enough for both.
-        let (cx, _receiver) = open_prompt_with(
-            cx,
-            1280.0,
-            "Save changes to “Strek Showcase”?",
-            "Your changes will be lost if you continue without saving.",
-            &["Save", "Discard", "Cancel"],
-        );
+    fn wrapped_detail_is_not_clipped(cx: &mut TestAppContext) {
+        // A flex-column card sized the detail's scroll container from an
+        // underestimated intrinsic height, clipping wrapped text and squeezing
+        // the accent bar. The widths that trigger it depend on the platform
+        // font, so sweep narrow to wide windows. The detail is about 1.4–1.7
+        // preferred card widths in proportional and monospace faces, so it
+        // wraps at every width checked.
+        for width in (200..=460).step_by(20).chain([1280]) {
+            let (cx, _receiver) = open_prompt_with(
+                cx,
+                width as f32,
+                "Save changes to “Strek Showcase”?",
+                "Your changes will be lost if you continue without saving. \
+                 Save keeps them in the document.",
+                &["Save", "Discard", "Cancel"],
+            );
 
-        let detail = bounds(cx, "prompt-dialog-detail");
-        let text = bounds(cx, "prompt-dialog-detail-text");
-        assert!(
-            text.size.height >= px(17.0 * 2.0),
-            "detail should wrap onto two lines, got {text:?}"
-        );
-        assert!(
-            detail.size.height >= text.size.height,
-            "detail box {detail:?} clips its text {text:?}"
-        );
-        let accent = bounds(cx, "prompt-dialog-accent");
-        assert_eq!(accent.size.height, px(3.0), "card squeezed its accent bar");
+            let detail = bounds(cx, "prompt-dialog-detail");
+            let text = bounds(cx, "prompt-dialog-detail-text");
+            assert!(
+                text.size.height >= px(17.0 * 2.0),
+                "detail should wrap at {width}px, got {text:?}"
+            );
+            assert!(
+                detail.size.height >= text.size.height,
+                "detail box {detail:?} clips its text {text:?} at {width}px"
+            );
+            let accent = bounds(cx, "prompt-dialog-accent");
+            assert_eq!(
+                accent.size.height,
+                px(3.0),
+                "card squeezed its accent bar at {width}px"
+            );
+        }
     }
 
     #[gpui::test]
@@ -399,6 +413,16 @@ mod tests {
     fn enter_confirms_first_answer(cx: &mut TestAppContext) {
         let (cx, receiver) = open_prompt(cx, 800.0, &["Save", "Discard", "Cancel"]);
         cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(receiver.get(), Some(0));
+        assert!(cx.debug_bounds("prompt-dialog-card").is_none());
+    }
+
+    #[gpui::test]
+    fn prompt_without_answers_can_be_dismissed(cx: &mut TestAppContext) {
+        let (cx, receiver) = open_prompt(cx, 800.0, &[]);
+        bounds(cx, "prompt-dialog-action-0");
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(receiver.get(), Some(0));
         assert!(cx.debug_bounds("prompt-dialog-card").is_none());
