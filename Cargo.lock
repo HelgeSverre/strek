@@ -4574,6 +4574,7 @@ dependencies = [
  "simplecss",
  "smallvec",
  "tokio",
+ "ttf-parser 0.25.1",
  "unicode-segmentation",
  "url",
  "windows-sys 0.61.2",

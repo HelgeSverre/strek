@@ -177,6 +177,9 @@ impl Render for PromptDialog {
             .items_center()
             .justify_center()
             .bg(rgba(0x00000080))
+            // GPUI draws prompts as a separate root that does not inherit the
+            // editor's font, and its Linux default is FreeMono.
+            .font_family(crate::typography::ui_font_family())
             .occlude()
             .cursor_default()
             .key_context(CONTEXT)
@@ -289,6 +292,7 @@ mod tests {
         actions: &'static [&'static str],
     ) -> (&'a mut VisualTestContext, Answer) {
         cx.update(|cx| {
+            crate::typography::register_bundled_ui_fonts(cx.text_system());
             register_keybindings(cx);
             cx.set_prompt_builder(build_prompt);
         });

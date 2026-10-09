@@ -42,19 +42,56 @@ actions!(
     ]
 );
 
+/// What confirming a palette row does.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PaletteTarget {
+    Command(CommandTarget),
+    /// Apply this font family to the selected text.
+    FontFamily(SharedString),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PaletteEntry {
-    pub target: CommandTarget,
-    pub label: &'static str,
-    pub description: &'static str,
-    pub category: &'static str,
+    pub target: PaletteTarget,
+    pub label: SharedString,
+    pub description: SharedString,
+    pub category: SharedString,
     pub shortcut: Option<String>,
     pub enabled: bool,
     pub recent_rank: Option<usize>,
+    /// Installed font family used to draw a sample next to the label.
+    ///
+    /// The label itself stays in the UI font so symbol fonts remain readable.
+    pub preview_font: Option<SharedString>,
+}
+
+/// User-facing strings for one palette mode.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaletteLabels {
+    pub placeholder: &'static str,
+    pub empty: &'static str,
+    pub item_noun: &'static str,
+    pub hint: &'static str,
+}
+
+impl PaletteLabels {
+    pub(crate) const COMMANDS: Self = Self {
+        placeholder: "Search commands…",
+        empty: "No matching commands",
+        item_noun: "commands",
+        hint: "Up/Down navigate   Enter run   Esc close",
+    };
+
+    pub(crate) const FONTS: Self = Self {
+        placeholder: "Search fonts…",
+        empty: "No matching fonts",
+        item_noun: "fonts",
+        hint: "Up/Down navigate   Enter apply   Esc close",
+    };
 }
 
 pub(crate) enum CommandPaletteEvent {
-    Execute(CommandTarget),
+    Execute(PaletteTarget),
     Dismiss,
 }
 
@@ -70,10 +107,15 @@ pub(crate) struct CommandPalette {
     entries: Vec<PaletteEntry>,
     filtered: Vec<usize>,
     selected_match: usize,
+    labels: PaletteLabels,
 }
 
 impl CommandPalette {
-    pub(crate) fn new(entries: Vec<PaletteEntry>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        entries: Vec<PaletteEntry>,
+        labels: PaletteLabels,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut palette = Self {
             focus_handle: cx.focus_handle(),
             content: SharedString::default(),
@@ -86,6 +128,7 @@ impl CommandPalette {
             entries,
             filtered: Vec::new(),
             selected_match: 0,
+            labels,
         };
         palette.refresh_matches();
         palette
@@ -170,7 +213,7 @@ impl CommandPalette {
         };
         let entry = &self.entries[index];
         if entry.enabled {
-            cx.emit(CommandPaletteEvent::Execute(entry.target));
+            cx.emit(CommandPaletteEvent::Execute(entry.target.clone()));
         }
     }
 
@@ -203,7 +246,7 @@ impl CommandPalette {
             return;
         };
         if entry.enabled {
-            cx.emit(CommandPaletteEvent::Execute(entry.target));
+            cx.emit(CommandPaletteEvent::Execute(entry.target.clone()));
         }
         cx.stop_propagation();
     }
@@ -519,6 +562,11 @@ impl Render for CommandPalette {
                 let selected = match_index == self.selected_match;
                 let enabled = entry.enabled;
                 let shortcut = entry.shortcut.clone();
+                let detail = if entry.description.is_empty() {
+                    entry.category.to_string()
+                } else {
+                    format!("{} · {}", entry.category, entry.description)
+                };
 
                 div()
                     .id(SharedString::from(format!("command-row-{}", entry_index)))
@@ -543,7 +591,7 @@ impl Render for CommandPalette {
                                     .text_color(rgb(if enabled { 0xf1f3f4 } else { 0x70737a }))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .child(entry.label),
+                                    .child(entry.label.clone()),
                             )
                             .child(
                                 div()
@@ -556,9 +604,19 @@ impl Render for CommandPalette {
                                     }))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .child(format!("{} · {}", entry.category, entry.description)),
+                                    .child(detail),
                             ),
                     )
+                    .when_some(entry.preview_font.clone(), |row, font| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(18.0))
+                                .text_color(rgb(if selected { 0xffffff } else { 0xd8dbe0 }))
+                                .font_family(font)
+                                .child("Ag"),
+                        )
+                    })
                     .when_some(shortcut, |row, shortcut| {
                         row.child(
                             div()
@@ -650,7 +708,7 @@ impl Render for CommandPalette {
                                         .absolute()
                                         .left(px(42.0))
                                         .text_color(rgb(0x8f929a))
-                                        .child("Search commands…"),
+                                        .child(self.labels.placeholder),
                                 )
                             })
                             .child(div().flex_1().h(px(26.0)).overflow_hidden().child(
@@ -674,7 +732,7 @@ impl Render for CommandPalette {
                                         .justify_center()
                                         .text_size(px(11.0))
                                         .text_color(rgb(0x92959d))
-                                        .child("No matching commands"),
+                                        .child(self.labels.empty),
                                 )
                             })
                             .children(rows),
@@ -690,8 +748,8 @@ impl Render for CommandPalette {
                             .border_color(rgb(0x414349))
                             .text_size(px(9.0))
                             .text_color(rgb(0x858890))
-                            .child(format!("{result_count} commands"))
-                            .child("Up/Down navigate   Enter run   Esc close"),
+                            .child(format!("{result_count} {}", self.labels.item_noun))
+                            .child(self.labels.hint),
                     ),
             )
     }

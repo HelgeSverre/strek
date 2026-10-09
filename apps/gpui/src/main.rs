@@ -13,6 +13,7 @@ mod command_palette;
 mod commands;
 mod document_io;
 mod export;
+mod font_picker;
 mod layer_name_input;
 mod layer_panel;
 mod mcp;
@@ -159,6 +160,7 @@ actions!(
         SetTextFamilySystem,
         SetTextFamilySerif,
         SetTextFamilyMonospace,
+        ChooseTextFontFamily,
         TextWeightDown,
         TextWeightUp,
         ToggleTextItalic,
@@ -561,6 +563,9 @@ struct CachedAutomationResponse {
 
 impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
+        // Every root that renders the interface font registers it first,
+        // including test windows that never run `main`.
+        typography::register_bundled_ui_fonts(cx.text_system());
         let workspace_preferences = workspace_preferences::WorkspacePreferences::load();
         let mut editor = Editor::with_demo_content();
         editor
@@ -1124,13 +1129,6 @@ impl Strek {
             return;
         }
 
-        if self.editor.cancel_pointer_interaction() {
-            self.current_cursor = convert_cursor(self.editor.cursor());
-        }
-        self.clear_property_color_input(cx);
-        self.zoom_input = None;
-        self.finish_layer_rename(true, cx);
-        self.dismiss_menus();
         let entries = commands::COMMANDS
             .iter()
             .filter(|spec| {
@@ -1138,30 +1136,67 @@ impl Strek {
                     != commands::CommandTarget::App(commands::AppCommand::ShowCommandPalette)
             })
             .map(|spec| command_palette::PaletteEntry {
-                target: spec.target,
-                label: spec.label,
-                description: spec.description,
-                category: spec.category,
+                target: command_palette::PaletteTarget::Command(spec.target),
+                label: spec.label.into(),
+                description: spec.description.into(),
+                category: spec.category.into(),
                 shortcut: self.keymap.shortcut_label(spec.target),
                 enabled: self.command_is_enabled(spec.target),
                 recent_rank: self
                     .recent_commands
                     .iter()
                     .position(|target| *target == spec.target),
+                preview_font: None,
             })
             .collect();
-        let palette = cx.new(|cx| command_palette::CommandPalette::new(entries, cx));
+        self.present_palette(
+            entries,
+            command_palette::PaletteLabels::COMMANDS,
+            focus_policy,
+            window,
+            cx,
+        );
+    }
+
+    /// Show a palette overlay, replacing any open one, and route its result.
+    fn present_palette(
+        &mut self,
+        entries: Vec<command_palette::PaletteEntry>,
+        labels: command_palette::PaletteLabels,
+        focus_policy: FocusPolicy,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_numeric_property_scrub();
+        if self.editor.cancel_pointer_interaction() {
+            self.current_cursor = convert_cursor(self.editor.cursor());
+        }
+        self.clear_property_color_input(cx);
+        self.zoom_input = None;
+        self.finish_layer_rename(true, cx);
+        self.dismiss_menus();
+        let palette = cx.new(|cx| command_palette::CommandPalette::new(entries, labels, cx));
         cx.subscribe_in(
             &palette,
             window,
             |editor, _, event: &command_palette::CommandPaletteEvent, window, cx| {
                 editor.command_palette = None;
                 editor.focus_handle.focus(window);
-                if let command_palette::CommandPaletteEvent::Execute(target) = event {
-                    editor.recent_commands.retain(|recent| recent != target);
-                    editor.recent_commands.insert(0, *target);
-                    editor.recent_commands.truncate(8);
-                    window.dispatch_action(commands::action_for(*target), cx);
+                match event {
+                    command_palette::CommandPaletteEvent::Execute(
+                        command_palette::PaletteTarget::Command(target),
+                    ) => {
+                        editor.recent_commands.retain(|recent| recent != target);
+                        editor.recent_commands.insert(0, *target);
+                        editor.recent_commands.truncate(8);
+                        window.dispatch_action(commands::action_for(*target), cx);
+                    }
+                    command_palette::CommandPaletteEvent::Execute(
+                        command_palette::PaletteTarget::FontFamily(family),
+                    ) => {
+                        editor.editor.set_selected_text_font_family(family);
+                    }
+                    command_palette::CommandPaletteEvent::Dismiss => {}
                 }
                 cx.notify();
             },
@@ -1249,7 +1284,8 @@ impl Strek {
                 | AppCommand::TextLarger
                 | AppCommand::AlignTextLeft
                 | AppCommand::AlignTextCenter
-                | AppCommand::AlignTextRight,
+                | AppCommand::AlignTextRight
+                | AppCommand::ChooseTextFontFamily,
             ) => self.editor.selected_text_data().is_some(),
             CommandTarget::App(AppCommand::ToggleFrameBackground) => {
                 self.editor.selected_frame_data().is_some()
@@ -3137,6 +3173,31 @@ impl Strek {
         if self.editor.set_selected_text_font_family("monospace") {
             cx.notify();
         }
+    }
+
+    fn choose_text_font_family(
+        &mut self,
+        _: &ChooseTextFontFamily,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.editor.selected_text_data() else {
+            return;
+        };
+        let families = typography::picker_font_families(|| cx.text_system().all_font_names());
+        let entries = font_picker::entries(
+            &text.font.family,
+            &families,
+            typography::resolve_document_font_family,
+            typography::is_bundled_font_family,
+        );
+        self.present_palette(
+            entries,
+            command_palette::PaletteLabels::FONTS,
+            FocusPolicy::Request,
+            window,
+            cx,
+        );
     }
 
     fn text_weight_down(
@@ -5056,6 +5117,7 @@ impl Render for Strek {
 
         div()
             .id("strek")
+            .font_family(typography::ui_font_family())
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_document))
@@ -5157,6 +5219,7 @@ impl Render for Strek {
             .on_action(cx.listener(Self::set_text_family_system))
             .on_action(cx.listener(Self::set_text_family_serif))
             .on_action(cx.listener(Self::set_text_family_monospace))
+            .on_action(cx.listener(Self::choose_text_font_family))
             .on_action(cx.listener(Self::text_weight_down))
             .on_action(cx.listener(Self::text_weight_up))
             .on_action(cx.listener(Self::toggle_text_italic))
@@ -5560,7 +5623,7 @@ fn render_guide_position_input(input: GuidePositionInput) -> impl IntoElement {
                 .items_center()
                 .rounded(px(4.0))
                 .bg(rgb(0x17181a))
-                .font_family(crate::typography::MONOSPACE_FONT_FAMILY)
+                .font_family(crate::typography::ui_monospace_font_family())
                 .text_size(px(10.0))
                 .text_color(rgb(if input.invalid { 0xfca58f } else { 0xf1f3f4 }))
                 .child(input.value),
@@ -6383,6 +6446,9 @@ fn main() {
     };
 
     env_logger::init();
+    // Enumerating installed fonts is slow on systems with many fonts; start it
+    // before the first frame needs the catalog for the monospace UI font.
+    std::thread::spawn(typography::warm_system_font_catalog);
     let automation_requests = match automation::start_server() {
         Ok(requests) => Some(requests),
         Err(error) => {
@@ -6770,6 +6836,82 @@ mod layout_tests {
             ColorInputScope::Creation,
             properties_panel::ColorTarget::Stroke
         ));
+    }
+
+    #[gpui::test]
+    fn every_font_picker_family_loads_on_the_canvas(cx: &mut gpui::TestAppContext) {
+        // GPUI reports an unloadable family as an error on macOS and Linux
+        // and panics in Windows test builds.
+        let text_system = cx.update(|cx| cx.text_system().clone());
+        typography::register_bundled_ui_fonts(&text_system);
+        let families = typography::picker_font_families(|| text_system.all_font_names());
+        assert!(families.iter().any(|family| family == "Inter"));
+        for family in families {
+            assert!(
+                text_system.font_id(&gpui::font(family.clone())).is_ok(),
+                "the picker offers {family}, which GPUI cannot load"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn editor_window_registers_the_interface_font(cx: &mut gpui::TestAppContext) {
+        // Test platforms start without the bundled font. Without registration
+        // an uninstalled family is an error on macOS and Linux and panics in
+        // Windows test builds.
+        let (_strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        cx.update(|_, cx| {
+            let family = typography::ui_font_family();
+            assert!(
+                cx.text_system().font_id(&gpui::font(family)).is_ok(),
+                "{family} is not available to GPUI"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn font_picker_choice_is_one_undoable_edit(cx: &mut gpui::TestAppContext) {
+        cx.update(command_palette::register_keybindings);
+        let (strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        let family = |cx: &mut gpui::VisualTestContext| {
+            cx.read(|cx| {
+                strek
+                    .read(cx)
+                    .editor
+                    .selected_text_data()
+                    .expect("a text layer is selected")
+                    .font
+                    .family
+            })
+        };
+        strek.update(cx, |strek, _| {
+            let root = strek.editor.document.root;
+            let text = strek
+                .editor
+                .document
+                .add_child(root, editor_core::Node::text("Label", "Ag"))
+                .unwrap();
+            strek.editor.set_layer_selection([text]);
+        });
+        let original = family(cx);
+        assert_ne!(original, "monospace");
+
+        strek.update_in(cx, |strek, window, cx| {
+            strek.choose_text_font_family(&ChooseTextFontFamily, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| strek.read(cx).command_palette.is_some()));
+        cx.simulate_input("System Monospace");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| strek.read(cx).command_palette.is_none()));
+        assert_eq!(family(cx), "monospace");
+        strek.update(cx, |strek, _| {
+            assert!(strek.editor.undo_in_context());
+            assert!(!strek.editor.history.can_undo());
+        });
+        assert_eq!(family(cx), original);
     }
 
     #[gpui::test]
