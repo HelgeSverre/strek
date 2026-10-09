@@ -36,6 +36,14 @@ pub(crate) struct LayerContextMenu {
     position: Point<Pixels>,
 }
 
+/// Layers under the pointer offered by Cmd/Ctrl+right-click on the canvas,
+/// in Layers panel order, with the menu's window-space anchor.
+#[derive(Clone, Debug)]
+pub(crate) struct CanvasLayerMenu {
+    layers: Vec<NodeId>,
+    position: Point<Pixels>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextSelectionPolicy {
     Preserve,
@@ -127,6 +135,38 @@ impl Strek {
         cx: &mut Context<Self>,
     ) {
         self.layer_context_menu = None;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Open the select-layer menu for the layers under a canvas point.
+    ///
+    /// Returns false, leaving every menu unchanged, when no selectable layer
+    /// is under the point.
+    pub(crate) fn open_canvas_layer_menu(
+        &mut self,
+        canvas_position: glam::Vec2,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let layers = self.editor.layers_at_screen_point(canvas_position);
+        if layers.is_empty() {
+            return false;
+        }
+        self.finish_layer_rename(true, cx);
+        self.dismiss_menus();
+        self.canvas_layer_menu = Some(CanvasLayerMenu { layers, position });
+        cx.notify();
+        true
+    }
+
+    fn close_canvas_layer_menu_from_mouse(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.canvas_layer_menu = None;
         cx.stop_propagation();
         cx.notify();
     }
@@ -298,6 +338,118 @@ pub(crate) fn render_layer_context_menu(
                         )),
                 ),
         )
+}
+
+const CANVAS_LAYER_MENU_MAX_HEIGHT: f32 = 360.0;
+
+/// Render the canvas select-layer menu: one row per layer under the pointer,
+/// with its type icon and a check on selected layers.
+pub(crate) fn render_canvas_layer_menu(
+    menu: &CanvasLayerMenu,
+    editor: &Editor,
+    cx: &mut Context<Strek>,
+) -> impl IntoElement {
+    let rows = menu
+        .layers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &id)| {
+            let node = editor.document().get(id)?;
+            let type_icon = match node.kind {
+                NodeKind::Group => Icon::Group,
+                NodeKind::Frame(_) => Icon::Frame,
+                NodeKind::Shape(_) => Icon::Rectangle,
+                NodeKind::Text(_) => Icon::Text,
+            };
+            Some(canvas_layer_menu_item(
+                index,
+                id,
+                node.name.clone(),
+                type_icon,
+                editor.selection().contains(id),
+                cx,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    div()
+        .id("canvas-layer-menu-scrim")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .on_any_mouse_down(cx.listener(Strek::close_canvas_layer_menu_from_mouse))
+        .child(
+            anchored()
+                .anchor(Corner::TopLeft)
+                .position(menu.position)
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("canvas-layer-menu")
+                        .debug_selector(|| "canvas-layer-menu".to_owned())
+                        .w(px(CONTEXT_MENU_WIDTH))
+                        .max_h(px(CANVAS_LAYER_MENU_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .py(px(6.0))
+                        .bg(rgb(0x292a2e))
+                        .border_1()
+                        .border_color(rgb(0x414349))
+                        .rounded(px(8.0))
+                        .shadow_lg()
+                        .occlude()
+                        .on_any_mouse_down(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .children(rows),
+                ),
+        )
+}
+
+fn canvas_layer_menu_item(
+    index: usize,
+    id: NodeId,
+    name: String,
+    type_icon: Icon,
+    selected: bool,
+    cx: &mut Context<Strek>,
+) -> impl IntoElement {
+    div()
+        .id(("canvas-layer-menu-item", index))
+        .debug_selector(move || format!("canvas-layer-menu-item-{index}"))
+        .h(px(28.0))
+        .mx(px(5.0))
+        .px(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(4.0))
+        .text_size(px(11.0))
+        .text_color(rgb(0xf1f3f4))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0x35363b)))
+        .child(div().w(px(12.0)).flex_none().when(selected, |slot| {
+            slot.child(icon(Icon::Check, 12.0, rgb(0xf1f3f4)))
+        }))
+        .child(icon(type_icon, 13.0, rgb(0x8f929a)))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name),
+        )
+        .on_click(cx.listener(move |editor, _, _, cx| {
+            editor.canvas_layer_menu = None;
+            editor.dismiss_inline_inputs(cx);
+            editor.editor.select_layer(id, false);
+            cx.stop_propagation();
+            cx.notify();
+        }))
 }
 
 fn shortcut_for(keymap: &Keymap, action: EditorAction) -> SharedString {

@@ -873,6 +873,7 @@ impl Strek {
                 } else if self.command_palette.is_some()
                     || self.open_menu.is_some()
                     || self.layer_context_menu.is_some()
+                    || self.canvas_layer_menu.is_some()
                 {
                     Err("dismiss open menus and overlays before sending canvas input".to_owned())
                 } else if !x.is_finite() || !y.is_finite() {
@@ -920,6 +921,7 @@ impl Strek {
                 } else if self.command_palette.is_some()
                     || self.open_menu.is_some()
                     || self.layer_context_menu.is_some()
+                    || self.canvas_layer_menu.is_some()
                     || self.property_color_input.is_some()
                     || self.zoom_input.is_some()
                 {
@@ -1200,6 +1202,7 @@ impl Strek {
             })
             .hash(&mut hasher);
         self.layer_context_menu.is_some().hash(&mut hasher);
+        self.canvas_layer_menu.is_some().hash(&mut hasher);
         self.property_color_input.is_some().hash(&mut hasher);
         self.zoom_input.is_some().hash(&mut hasher);
         self.numeric_property_input.is_some().hash(&mut hasher);
@@ -1635,6 +1638,7 @@ impl Strek {
                 } else if self.command_palette.is_some()
                     || self.open_menu.is_some()
                     || self.layer_context_menu.is_some()
+                    || self.canvas_layer_menu.is_some()
                 {
                     disabled("an overlay is intercepting canvas input")
                 } else {

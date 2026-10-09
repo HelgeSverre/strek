@@ -528,6 +528,7 @@ struct Strek {
     design_panel_width: f32,
     layer_name_input: Option<(NodeId, Entity<layer_name_input::LayerNameInput>)>,
     layer_context_menu: Option<layer_panel::LayerContextMenu>,
+    canvas_layer_menu: Option<layer_panel::CanvasLayerMenu>,
     open_menu: Option<toolbar::MenuKind>,
     current_cursor: gpui::CursorStyle,
     title_bar_drag_armed: Rc<Cell<bool>>,
@@ -611,6 +612,7 @@ impl Strek {
             design_panel_width: layer_panel::DEFAULT_PANEL_WIDTH,
             layer_name_input: None,
             layer_context_menu: None,
+            canvas_layer_menu: None,
             open_menu: None,
             current_cursor: gpui::CursorStyle::Arrow,
             title_bar_drag_armed: Rc::default(),
@@ -1899,7 +1901,8 @@ impl Strek {
     fn dismiss_menus(&mut self) -> bool {
         let main_menu_closed = self.open_menu.take().is_some();
         let layer_menu_closed = self.layer_context_menu.take().is_some();
-        main_menu_closed || layer_menu_closed
+        let canvas_layer_menu_closed = self.canvas_layer_menu.take().is_some();
+        main_menu_closed || layer_menu_closed || canvas_layer_menu_closed
     }
 
     fn execute_editor_action(&mut self, action: EditorAction, cx: &mut Context<Self>) {
@@ -4183,6 +4186,15 @@ impl Strek {
             cx.notify();
             return;
         }
+        // Cmd+right-click on macOS and Ctrl+right-click elsewhere (either is
+        // accepted on every platform) lists the layers under the pointer.
+        if event.button == MouseButton::Right
+            && (event.modifiers.platform || event.modifiers.control)
+            && self.open_canvas_layer_menu(position, event.position, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         self.active_guide = None;
         let modifiers = convert_modifiers(&event.modifiers);
         let button = convert_mouse_button(event.button);
@@ -4851,7 +4863,9 @@ impl Render for Strek {
                 || self.zoom_input.is_some()
                 || self.numeric_property_input.is_some()
                 || self.guide_position_input.is_some(),
-            self.open_menu.is_some() || self.layer_context_menu.is_some(),
+            self.open_menu.is_some()
+                || self.layer_context_menu.is_some()
+                || self.canvas_layer_menu.is_some(),
             self.editor.text_input_snapshot().is_some(),
         );
         let selection_count = self.editor.selection().len();
@@ -4866,6 +4880,7 @@ impl Render for Strek {
         };
         let layer_name_input = self.layer_name_input.clone();
         let layer_context_menu = self.layer_context_menu;
+        let canvas_layer_menu = self.canvas_layer_menu.clone();
         let command_palette = self.command_palette.clone();
         let color_library_panel = self.color_library_panel.clone();
         let guide_position_input = self.guide_position_input.clone();
@@ -5424,6 +5439,13 @@ impl Render for Strek {
                     menu,
                     &self.editor,
                     &self.keymap,
+                    cx,
+                ))
+            })
+            .when_some(canvas_layer_menu, |root, menu| {
+                root.child(layer_panel::render_canvas_layer_menu(
+                    &menu,
+                    &self.editor,
                     cx,
                 ))
             })
@@ -6957,6 +6979,102 @@ mod layout_tests {
             );
             assert!(strek.property_color_input.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn secondary_right_click_lists_layers_under_the_pointer(cx: &mut gpui::TestAppContext) {
+        let (strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        cx.run_until_parked();
+        let canvas = cx
+            .debug_bounds("canvas")
+            .expect("canvas should be rendered");
+        let pointer = gpui::point(
+            canvas.origin.x + canvas.size.width / 2.0,
+            canvas.origin.y + canvas.size.height / 2.0,
+        );
+        let empty = gpui::point(canvas.origin.x + px(4.0), canvas.origin.y + px(4.0));
+        let (card, label) = strek.update(cx, |strek, _| {
+            let root = strek.editor.document.root;
+            let demo = strek.editor.document.get(root).unwrap().children.clone();
+            for id in demo {
+                strek.editor.document.get_mut(id).unwrap().visible = false;
+            }
+            let center = strek.editor.view().to_world(glam::Vec2::new(
+                canvas.size.width.0 / 2.0,
+                canvas.size.height.0 / 2.0,
+            ));
+            let card = strek
+                .editor
+                .document
+                .add_child(
+                    root,
+                    editor_core::Node::frame("Card", 40.0, 40.0).with_transform(
+                        glam::Affine2::from_translation(center - glam::Vec2::splat(20.0)),
+                    ),
+                )
+                .unwrap();
+            let label = strek
+                .editor
+                .document
+                .add_child(
+                    card,
+                    editor_core::Node::shape(
+                        "Label",
+                        editor_core::PathData::rect(10.0, 10.0, 20.0, 20.0),
+                    )
+                    .with_style(editor_core::Style::fill(editor_core::Paint::black())),
+                )
+                .unwrap();
+            strek.editor.set_layer_selection([]);
+            (card, label)
+        });
+        let control = gpui::Modifiers {
+            control: true,
+            ..gpui::Modifiers::default()
+        };
+        // Test windows redraw only on input, so read whether the menu is open
+        // from the view; rows are located in the frame drawn on opening.
+        let menu_open = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.read(|cx| strek.read(cx).canvas_layer_menu.is_some())
+        };
+        let selection = |cx: &mut gpui::VisualTestContext| {
+            cx.read(|cx| strek.read(cx).editor.selection().to_vec())
+        };
+
+        cx.simulate_mouse_down(pointer, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(pointer, MouseButton::Right, gpui::Modifiers::default());
+        assert!(!menu_open(cx), "a plain right-click must not open the menu");
+        cx.simulate_mouse_down(empty, MouseButton::Right, control);
+        cx.simulate_mouse_up(empty, MouseButton::Right, control);
+        assert!(!menu_open(cx), "no layer is under the pointer");
+
+        cx.simulate_mouse_down(pointer, MouseButton::Right, control);
+        cx.simulate_mouse_up(pointer, MouseButton::Right, control);
+        assert!(menu_open(cx));
+        assert!(cx.debug_bounds("canvas-layer-menu").is_some());
+        assert!(cx.debug_bounds("canvas-layer-menu-item-2").is_none());
+        let label_row = cx.debug_bounds("canvas-layer-menu-item-1").unwrap();
+        cx.simulate_click(label_row.center(), gpui::Modifiers::default());
+        assert!(!menu_open(cx));
+        assert_eq!(selection(cx), [label]);
+
+        let platform = gpui::Modifiers {
+            platform: true,
+            ..gpui::Modifiers::default()
+        };
+        cx.simulate_mouse_down(pointer, MouseButton::Right, platform);
+        cx.simulate_mouse_up(pointer, MouseButton::Right, platform);
+        assert!(menu_open(cx));
+        let card_row = cx.debug_bounds("canvas-layer-menu-item-0").unwrap();
+        cx.simulate_click(card_row.center(), gpui::Modifiers::default());
+        assert_eq!(selection(cx), [card]);
+
+        cx.simulate_mouse_down(pointer, MouseButton::Right, control);
+        assert!(menu_open(cx));
+        cx.dispatch_action(Escape);
+        assert!(!menu_open(cx));
+        assert_eq!(selection(cx), [card]);
     }
 
     #[gpui::test]

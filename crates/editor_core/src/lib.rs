@@ -1146,81 +1146,114 @@ impl Document {
         tolerance: f32,
     ) -> Option<NodeId> {
         let mut clip_containment_cache = HashMap::new();
-        for id in self.reverse_paint_order().collect::<Vec<_>>() {
-            let Some(node) = self.nodes.get(id) else {
-                continue;
-            };
+        self.reverse_paint_order()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .find(|&id| {
+                self.node_contains_point(
+                    id,
+                    world_pos,
+                    include_groups,
+                    tolerance,
+                    &mut clip_containment_cache,
+                )
+            })
+    }
 
-            if node.deleted
-                || !node.visible
-                || node.locked
-                || self.ancestors(id).any(|ancestor| {
-                    self.nodes
-                        .get(ancestor)
-                        .is_some_and(|node| node.deleted || !node.visible || node.locked)
-                })
-            {
-                continue;
-            }
+    /// Every visible, unlocked node at a world position, groups included,
+    /// from front to back.
+    ///
+    /// Each node uses the same test as [`Self::hit_test_with_tolerance`]: leaf
+    /// geometry and frame rectangles within their clip chain, and group
+    /// bounds.
+    pub fn hit_test_all_with_tolerance(&mut self, world_pos: Vec2, tolerance: f32) -> Vec<NodeId> {
+        let mut clip_containment_cache = HashMap::new();
+        self.reverse_paint_order()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter(|&id| {
+                self.node_contains_point(
+                    id,
+                    world_pos,
+                    true,
+                    tolerance,
+                    &mut clip_containment_cache,
+                )
+            })
+            .collect()
+    }
 
-            if !include_groups && node.is_group() {
-                continue;
-            }
+    fn node_contains_point(
+        &mut self,
+        id: NodeId,
+        world_pos: Vec2,
+        include_groups: bool,
+        tolerance: f32,
+        clip_containment_cache: &mut HashMap<NodeId, bool>,
+    ) -> bool {
+        let Some(node) = self.nodes.get(id) else {
+            return false;
+        };
 
-            let kind = node.kind.clone();
-            let style = node.style.clone();
-            if !self.clip_chain_contains(id, world_pos, &mut clip_containment_cache) {
-                continue;
-            }
-            if matches!(kind, NodeKind::Group) {
-                if self
-                    .world_bounds(id)
-                    .is_some_and(|bounds| bounds.contains(world_pos))
-                {
-                    return Some(id);
-                }
-                continue;
-            }
-
-            let world = self.world_transform(id);
-            let Some(world_inverse) = finite_affine_inverse(world) else {
-                continue;
-            };
-            let local = world_inverse.transform_point2(world_pos);
-            let minimum_scale = world
-                .matrix2
-                .x_axis
-                .length()
-                .min(world.matrix2.y_axis.length())
-                .max(f32::EPSILON);
-            let local_tolerance = tolerance / minimum_scale;
-
-            let hit = match kind {
-                NodeKind::Group => false,
-                NodeKind::Frame(frame) => {
-                    Rect::from_pos_size(Vec2::ZERO, Vec2::new(frame.width, frame.height))
-                        .contains(local)
-                }
-                NodeKind::Text(_) => self
-                    .local_bounds(id)
-                    .is_some_and(|bounds| bounds.contains(local)),
-                NodeKind::Shape(path) => {
-                    let fill_hit = style.fill.is_some()
-                        && path.contains_point_with_rule(local, style.fill_rule);
-                    let stroke_hit = style.stroke.is_some_and(|stroke| {
-                        path.distance_to_point(local, local_tolerance * 0.25)
-                            <= stroke.width * 0.5 + local_tolerance
-                    });
-                    fill_hit || stroke_hit
-                }
-            };
-
-            if hit {
-                return Some(id);
-            }
+        if node.deleted
+            || !node.visible
+            || node.locked
+            || self.ancestors(id).any(|ancestor| {
+                self.nodes
+                    .get(ancestor)
+                    .is_some_and(|node| node.deleted || !node.visible || node.locked)
+            })
+        {
+            return false;
         }
 
-        None
+        if !include_groups && node.is_group() {
+            return false;
+        }
+
+        let kind = node.kind.clone();
+        let style = node.style.clone();
+        if !self.clip_chain_contains(id, world_pos, clip_containment_cache) {
+            return false;
+        }
+        if matches!(kind, NodeKind::Group) {
+            return self
+                .world_bounds(id)
+                .is_some_and(|bounds| bounds.contains(world_pos));
+        }
+
+        let world = self.world_transform(id);
+        let Some(world_inverse) = finite_affine_inverse(world) else {
+            return false;
+        };
+        let local = world_inverse.transform_point2(world_pos);
+        let minimum_scale = world
+            .matrix2
+            .x_axis
+            .length()
+            .min(world.matrix2.y_axis.length())
+            .max(f32::EPSILON);
+        let local_tolerance = tolerance / minimum_scale;
+
+        match kind {
+            NodeKind::Group => false,
+            NodeKind::Frame(frame) => {
+                Rect::from_pos_size(Vec2::ZERO, Vec2::new(frame.width, frame.height))
+                    .contains(local)
+            }
+            NodeKind::Text(_) => self
+                .local_bounds(id)
+                .is_some_and(|bounds| bounds.contains(local)),
+            NodeKind::Shape(path) => {
+                let fill_hit =
+                    style.fill.is_some() && path.contains_point_with_rule(local, style.fill_rule);
+                let stroke_hit = style.stroke.is_some_and(|stroke| {
+                    path.distance_to_point(local, local_tolerance * 0.25)
+                        <= stroke.width * 0.5 + local_tolerance
+                });
+                fill_hit || stroke_hit
+            }
+        }
     }
 
     fn clip_chain_contains(
