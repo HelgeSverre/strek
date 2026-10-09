@@ -6,10 +6,12 @@ All notable user-facing changes to Strek are documented here.
 
 ### Added
 
-- Added a searchable font picker for text layers that lists every installed
-  font family with a preview. Open it from the text toolbar, the Typography
+- Added a searchable font picker for text layers that lists installed font
+  families with a preview. Open it from the text toolbar, the Typography
   family field, or **Choose Font…** in the command palette. Choosing a family is
-  one undoable edit.
+  one undoable edit. The picker omits families the canvas cannot draw by name:
+  fonts without a Latin "m" glyph (most non-Latin script, symbol, and emoji
+  fonts) on macOS and Linux, and names DirectWrite does not list on Windows.
 - Marked text families that are not installed as "(missing)" and listed them in
   the picker with the face they draw with.
 - Bundled Inter 4.1 (SIL Open Font License 1.1) as the interface font. When

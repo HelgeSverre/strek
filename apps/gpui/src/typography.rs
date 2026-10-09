@@ -7,7 +7,7 @@
 //! [`system_font_database`], so every path draws a document family with the
 //! same installed face, including when the requested family is missing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use resvg::usvg::fontdb;
@@ -229,6 +229,36 @@ fn installed_family_names(database: &fontdb::Database) -> BTreeMap<String, Strin
     names
 }
 
+/// Display families with at least one face that maps "m" to a glyph.
+///
+/// GPUI's macOS and Linux text systems skip such faces when loading a family,
+/// so a family without one cannot be drawn by name on the canvas.
+fn families_with_m_glyph(database: &fontdb::Database, display_families: &[String]) -> Vec<String> {
+    let mut found = HashSet::new();
+    for face in database.faces() {
+        let Some((primary, _)) = face.families.first() else {
+            continue;
+        };
+        if found.contains(primary) {
+            continue;
+        }
+        let has_m_glyph = database
+            .with_face_data(face.id, |data, index| {
+                ttf_parser::Face::parse(data, index)
+                    .is_ok_and(|face| face.glyph_index('m').is_some())
+            })
+            .unwrap_or(false);
+        if has_m_glyph {
+            found.insert(primary.clone());
+        }
+    }
+    display_families
+        .iter()
+        .filter(|family| found.contains(*family))
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn system_font_database() -> Arc<fontdb::Database> {
     Arc::clone(&SYSTEM_FONT_DATABASE.0)
 }
@@ -237,12 +267,34 @@ pub(crate) fn empty_font_database() -> Arc<fontdb::Database> {
     Arc::clone(&EMPTY_FONT_DATABASE)
 }
 
-/// Installed font families offered by the font picker, sorted for display.
-///
-/// Names come from the same database that export and rotated text use, so a
-/// picked family is always one every text path can load.
+/// Every installed font family in the export database, sorted for display.
+#[cfg(test)]
 pub(crate) fn installed_font_families() -> &'static [String] {
     &SYSTEM_FONT_CATALOG.display_families
+}
+
+/// Installed families the font picker offers, sorted for display.
+///
+/// Export and rotated text can load every installed family, but the canvas
+/// draws through GPUI's platform text system, which loads fewer: on macOS and
+/// Linux it skips faces without an "m" glyph (most non-Latin script, symbol,
+/// and emoji fonts), and DirectWrite on Windows finds only the names its font
+/// collections list (not "Segoe UI Variable"). Offering only families both
+/// can load keeps a picked family in the same face on the canvas and in
+/// export. `gpui_family_names` lists GPUI's family names and is called only
+/// on Windows.
+pub(crate) fn picker_font_families(gpui_family_names: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    if cfg!(target_os = "windows") {
+        let listed = gpui_family_names().into_iter().collect::<HashSet<_>>();
+        SYSTEM_FONT_CATALOG
+            .display_families
+            .iter()
+            .filter(|family| listed.contains(*family))
+            .cloned()
+            .collect()
+    } else {
+        SYSTEM_FONT_CATALOG.m_glyph_families.clone()
+    }
 }
 
 /// Whether a family comes from a font embedded in Strek rather than the system.
@@ -324,6 +376,9 @@ struct FontCatalog {
     /// Every name a face answers to, mapped to that face's primary family.
     names: BTreeMap<String, String>,
     display_families: Vec<String>,
+    /// Display families GPUI's macOS and Linux text systems load; empty on
+    /// Windows, where DirectWrite's own family list decides instead.
+    m_glyph_families: Vec<String>,
     serif: Option<String>,
     sans_serif: Option<String>,
     cursive: Option<String>,
@@ -345,6 +400,11 @@ impl FontCatalog {
                 .then_with(|| left.cmp(right))
         });
         display_families.dedup();
+        let m_glyph_families = if cfg!(target_os = "windows") {
+            Vec::new()
+        } else {
+            families_with_m_glyph(database, &display_families)
+        };
         let generic = |family: fontdb::Family<'_>| {
             let name = database.family_name(&family);
             names.contains_key(name).then(|| name.to_owned())
@@ -356,6 +416,7 @@ impl FontCatalog {
             fantasy: generic(fontdb::Family::Fantasy),
             monospace: generic(fontdb::Family::Monospace),
             display_families,
+            m_glyph_families,
             names,
         }
     }

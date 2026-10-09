@@ -3184,9 +3184,10 @@ impl Strek {
         let Some(text) = self.editor.selected_text_data() else {
             return;
         };
+        let families = typography::picker_font_families(|| cx.text_system().all_font_names());
         let entries = font_picker::entries(
             &text.font.family,
-            typography::installed_font_families(),
+            &families,
             typography::resolve_document_font_family,
             typography::is_bundled_font_family,
         );
@@ -6835,6 +6836,22 @@ mod layout_tests {
             ColorInputScope::Creation,
             properties_panel::ColorTarget::Stroke
         ));
+    }
+
+    #[gpui::test]
+    fn every_font_picker_family_loads_on_the_canvas(cx: &mut gpui::TestAppContext) {
+        // GPUI reports an unloadable family as an error on macOS and Linux
+        // and panics in Windows test builds.
+        let text_system = cx.update(|cx| cx.text_system().clone());
+        typography::register_bundled_ui_fonts(&text_system);
+        let families = typography::picker_font_families(|| text_system.all_font_names());
+        assert!(families.iter().any(|family| family == "Inter"));
+        for family in families {
+            assert!(
+                text_system.font_id(&gpui::font(family.clone())).is_ok(),
+                "the picker offers {family}, which GPUI cannot load"
+            );
+        }
     }
 
     #[gpui::test]

@@ -285,9 +285,15 @@ Standard SVG keeps text as editable text and relies on compatible fonts being
 available when the file is opened. Outlined-text SVG converts glyphs to paths
 for portable appearance. Strek does not automatically embed fonts in SVG files.
 
-Text layers can use any installed font family: choose **Choose Font…** from the
+Text layers can use installed font families: choose **Choose Font…** from the
 text toolbar, the Typography family field, or the command palette, then search
-the installed families. System Sans-Serif, Serif, and Monospace map to the first
+the installed families. The picker lists only families the canvas text engine
+can draw by name: on macOS and Linux it omits fonts without a Latin "m" glyph
+(most non-Latin script, symbol, and emoji fonts), and on Windows it omits
+names DirectWrite does not list (such as "Segoe UI Variable"). A document that
+already names such a family keeps it; the canvas draws that text in GPUI's
+fallback face while PNG and outlined-SVG export use the named font. System
+Sans-Serif, Serif, and Monospace map to the first
 installed platform default (Helvetica, Times New Roman, and Menlo on macOS;
 Arial, Times New Roman, and Consolas on Windows; DejaVu Sans, Serif, and Sans
 Mono or their Noto/Liberation equivalents on Linux). A family that is not
