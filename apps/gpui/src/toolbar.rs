@@ -13,6 +13,7 @@ use crate::{
     color_picker::{format_paint, paint_as_rgba, parse_hex_paint},
     commands::{AppCommand, CommandTarget, Keymap},
     properties_panel::{self, ColorTarget},
+    window_chrome::{self, WindowChrome},
     AlignObjectsBottom, AlignObjectsCenter, AlignObjectsLeft, AlignObjectsMiddle,
     AlignObjectsRight, AlignObjectsTop, AlignTextCenter, AlignTextLeft, AlignTextRight,
     BringForward, BringToFront, ClearGuides, Copy, CopyAsPng, CopyAsSvg, CopyAsWebP, Cut, Delete,
@@ -227,6 +228,7 @@ pub fn render_header(
     zoom: ZoomState<'_>,
     state: HeaderState,
     keymap: &Keymap,
+    chrome: Option<&WindowChrome>,
 ) -> impl IntoElement {
     let HeaderState {
         panels,
@@ -256,8 +258,10 @@ pub fn render_header(
             ToggleMainMenu,
         ))
         .child(div().w(px(1.0)).h(px(22.0)).mx(px(2.0)).bg(rgb(BORDER)))
-        .child(
+        .child(window_chrome::drag_region(
             div()
+                .id("document-title")
+                .h_full()
                 .min_w(px(176.0))
                 .flex()
                 .flex_col()
@@ -280,10 +284,17 @@ pub fn render_header(
                         .text_size(px(10.0))
                         .child(document.location),
                 ),
-        )
-        .child(div().flex_1())
+            chrome,
+        ))
+        .child(window_chrome::drag_region(
+            div().id("title-drag-leading").h_full().flex_1(),
+            chrome,
+        ))
         .child(render_tool_rail(current_tool, keymap))
-        .child(div().flex_1())
+        .child(window_chrome::drag_region(
+            div().id("title-drag-trailing").h_full().flex_1(),
+            chrome,
+        ))
         .child(icon_action_button(
             "command-palette",
             Icon::Search,
@@ -378,6 +389,11 @@ pub fn render_header(
             shortcut(keymap, CommandTarget::App(AppCommand::ToggleDesignPanel)),
             ToggleDesignPanel,
         ))
+        .when_some(chrome, |header, chrome| {
+            header
+                .child(div().w(px(1.0)).h(px(22.0)).mx(px(2.0)).bg(rgb(BORDER)))
+                .child(window_chrome::render_window_controls(chrome))
+        })
 }
 
 /// Context-sensitive property strip shown over the canvas.
