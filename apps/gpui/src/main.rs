@@ -18,6 +18,7 @@ mod layer_name_input;
 mod layer_panel;
 mod mcp;
 mod precision_ui;
+mod prompt_dialog;
 mod properties_panel;
 mod status_bar;
 mod svg_import;
@@ -6466,6 +6467,7 @@ fn main() {
             command_palette::register_keybindings(cx);
             color_library_panel::register_keybindings(cx);
             layer_name_input::register_keybindings(cx);
+            prompt_dialog::install(cx);
             let mut file_menu_items = vec![
                 MenuItem::action("New", NewDocument),
                 MenuItem::action("Open…", OpenDocument),
