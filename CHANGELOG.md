@@ -2,15 +2,26 @@
 
 All notable user-facing changes to Strek are documented here.
 
-## [Unreleased]
+## [0.2.4] - 2026-10-09
 
 ### Added
 
 - Added a select-layer menu to the canvas: Cmd+right-click on macOS or
   Ctrl+right-click elsewhere (either works on every platform) lists every
-  visible, unlocked layer under the pointer, including the groups and frames
-  that contain it, in Layers panel order. Choosing a row selects that layer, and
-  the menu marks layers that are already selected.
+  visible, unlocked shape, text, or frame under the pointer plus the groups and
+  frames that contain one, in Layers panel order. Choosing a row selects that
+  layer, including layers hidden behind others, and the menu marks layers that
+  are already selected.
+- Added Strek-drawn window controls on Linux and FreeBSD. Strek requests
+  client-side decorations; when the session provides them (Wayland compositors
+  without server-side decorations, such as GNOME, and X11 window managers with a
+  compositor that support GTK frame extents), the header shows minimize,
+  maximize/restore, and close buttons, moves the window when dragged, maximizes
+  or restores on double-click when the compositor allows maximizing, opens the
+  window menu on right-click, and resizes from the window edges. Other X11
+  sessions keep the window manager's frame. On X11, GPUI does not report the
+  maximized state, so the maximize button keeps its Maximize icon while the
+  window is maximized; clicking it still restores the window.
 - Added a searchable font picker for text layers that lists installed font
   families with a preview. Open it from the text toolbar, the Typography
   family field, or **Choose Font…** in the command palette. Choosing a family is
@@ -23,8 +34,19 @@ All notable user-facing changes to Strek are documented here.
   Inter is not installed, the bundled copy is also available to text layers and
   export; an installed Inter takes precedence.
 
+### Changed
+
+- Set a minimum window size of 640 × 400 on every platform.
+
 ### Fixed
 
+- Fixed GNOME on Wayland showing no window controls, which left the window
+  impossible to move, minimize, maximize, or close from its frame.
+- Replaced GPUI's fixed-width, unthemed Linux prompt, whose text overflowed the
+  card, with an in-window prompt in the editor's theme and interface font. Text
+  wraps, long details scroll, the card shrinks in narrow windows, Enter chooses
+  the highlighted answer, Tab and the arrow keys move the highlight, and Escape
+  chooses the last answer (Cancel). macOS and Windows keep native dialogs.
 - Fixed System, Serif, Monospace, and missing font families drawing with
   different faces on the canvas, on rotated text, and in PNG/outlined-SVG
   export. On Linux, System text previously fell back to an arbitrary font
@@ -81,5 +103,6 @@ All notable user-facing changes to Strek are documented here.
 - Kept exposed document revisions monotonic across undo and document
   replacement.
 
+[0.2.4]: https://github.com/HelgeSverre/strek/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HelgeSverre/strek/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HelgeSverre/strek/compare/v0.2.1...v0.2.2
