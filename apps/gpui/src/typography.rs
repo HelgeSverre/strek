@@ -690,7 +690,7 @@ mod tests {
             };
             let stored = render_text(&exported_request);
             assert!(
-                stored.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                stored.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0),
                 "{request} drew no glyphs"
             );
             assert!(
