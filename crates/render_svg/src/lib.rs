@@ -733,7 +733,6 @@ fn line_join_to_css(join: LineJoin) -> &'static str {
     }
 }
 
-/// Escape HTML special characters.
 /// SVG `font-family` value for a stored document family.
 ///
 /// SVG renderers without `system-ui` support (including `usvg`) would fall
@@ -747,6 +746,7 @@ fn svg_font_family(family: &str) -> &str {
     }
 }
 
+/// Escape HTML special characters.
 fn html_escape(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {

@@ -145,6 +145,24 @@ pub(crate) fn bundled_fonts_for_gpui(
         .collect()
 }
 
+/// Register the bundled interface font with GPUI unless it already knows
+/// the family, so repeated calls are no-ops.
+///
+/// Call it before anything shapes text in [`UI_FONT_FAMILY`]: GPUI's Linux
+/// text system caches family lookups, and Windows test builds panic on an
+/// unknown family instead of falling back.
+pub(crate) fn register_bundled_ui_fonts(text_system: &gpui::TextSystem) {
+    let fonts = bundled_fonts_for_gpui(&text_system.all_font_names());
+    if let Err(error) = text_system.add_fonts(fonts) {
+        log::error!("failed to register the bundled interface font: {error:#}");
+    }
+}
+
+/// Load the system font database and catalog ahead of first use.
+pub(crate) fn warm_system_font_catalog() {
+    LazyLock::force(&SYSTEM_FONT_CATALOG);
+}
+
 /// Point each CSS generic at the first installed platform candidate.
 ///
 /// When no candidate is installed, sans-serif, serif, and monospace fall back

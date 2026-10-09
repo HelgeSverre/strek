@@ -562,6 +562,9 @@ struct CachedAutomationResponse {
 
 impl Strek {
     fn new(keymap: commands::Keymap, cx: &mut Context<Self>) -> Self {
+        // Every root that renders the interface font registers it first,
+        // including test windows that never run `main`.
+        typography::register_bundled_ui_fonts(cx.text_system());
         let workspace_preferences = workspace_preferences::WorkspacePreferences::load();
         let mut editor = Editor::with_demo_content();
         editor
@@ -6441,6 +6444,9 @@ fn main() {
     };
 
     env_logger::init();
+    // Enumerating installed fonts is slow on systems with many fonts; start it
+    // before the first frame needs the catalog for the monospace UI font.
+    std::thread::spawn(typography::warm_system_font_catalog);
     let automation_requests = match automation::start_server() {
         Ok(requests) => Some(requests),
         Err(error) => {
@@ -6455,11 +6461,6 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
-            let bundled_fonts =
-                typography::bundled_fonts_for_gpui(&cx.text_system().all_font_names());
-            if let Err(error) = cx.text_system().add_fonts(bundled_fonts) {
-                log::error!("failed to register the bundled interface font: {error:#}");
-            }
             let keymap = commands::Keymap::load();
             register_keybindings(cx, &keymap);
             command_palette::register_keybindings(cx);
@@ -6832,6 +6833,66 @@ mod layout_tests {
             ColorInputScope::Creation,
             properties_panel::ColorTarget::Stroke
         ));
+    }
+
+    #[gpui::test]
+    fn editor_window_registers_the_interface_font(cx: &mut gpui::TestAppContext) {
+        // Test platforms start without the bundled font. Without registration
+        // an uninstalled family is an error on macOS and Linux and panics in
+        // Windows test builds.
+        let (_strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        cx.update(|_, cx| {
+            let family = typography::ui_font_family();
+            assert!(
+                cx.text_system().font_id(&gpui::font(family)).is_ok(),
+                "{family} is not available to GPUI"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn font_picker_choice_is_one_undoable_edit(cx: &mut gpui::TestAppContext) {
+        cx.update(command_palette::register_keybindings);
+        let (strek, cx) = cx.add_window_view(|_, cx| Strek::new(commands::Keymap::default(), cx));
+        let family = |cx: &mut gpui::VisualTestContext| {
+            cx.read(|cx| {
+                strek
+                    .read(cx)
+                    .editor
+                    .selected_text_data()
+                    .expect("a text layer is selected")
+                    .font
+                    .family
+            })
+        };
+        strek.update(cx, |strek, _| {
+            let root = strek.editor.document.root;
+            let text = strek
+                .editor
+                .document
+                .add_child(root, editor_core::Node::text("Label", "Ag"))
+                .unwrap();
+            strek.editor.set_layer_selection([text]);
+        });
+        let original = family(cx);
+        assert_ne!(original, "monospace");
+
+        strek.update_in(cx, |strek, window, cx| {
+            strek.choose_text_font_family(&ChooseTextFontFamily, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| strek.read(cx).command_palette.is_some()));
+        cx.simulate_input("System Monospace");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| strek.read(cx).command_palette.is_none()));
+        assert_eq!(family(cx), "monospace");
+        strek.update(cx, |strek, _| {
+            assert!(strek.editor.undo_in_context());
+            assert!(!strek.editor.history.can_undo());
+        });
+        assert_eq!(family(cx), original);
     }
 
     #[gpui::test]
