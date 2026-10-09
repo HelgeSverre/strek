@@ -38,7 +38,8 @@ revision-safe automation system is described in
 
 ## What works
 
-- Selection, marquee selection, grouping, ordering, alignment, and distribution
+- Selection, marquee selection, a menu of the layers under the pointer,
+  grouping, ordering, alignment, and distribution
 - Layer tree editing: rename, visibility and lock state, reordering, and
   reparenting
 - Frames, rectangles, ellipses, lines, Bézier paths, and editable text
@@ -251,6 +252,7 @@ troubleshooting.
 | Fit artwork / fit selection | `Primary`+`Shift`+`1` / `Primary`+`2` |
 | Nudge / large nudge | Arrow keys / `Shift`+arrow keys |
 | Enter selection / select parent | `Enter` / `Shift`+`Enter` |
+| Choose from the layers under the pointer | `Primary`+right-click on the canvas |
 | Cancel or leave the current mode | `Escape` |
 | Temporary hand tool | Hold `Space` and drag |
 | Pan | Middle-button drag or trackpad/scroll wheel |

@@ -1796,6 +1796,42 @@ impl Editor {
         self.needs_redraw = true;
     }
 
+    /// Layers under a screen point, for choosing one that a click would not
+    /// reach: every visible, unlocked shape, text, or frame whose geometry
+    /// contains the point, plus the groups and frames that contain one of
+    /// them, in Layers panel order (containers before their contents, topmost
+    /// siblings first). A group whose bounds merely surround the point is not
+    /// listed.
+    pub fn layers_at_screen_point(&mut self, screen_pos: Vec2) -> Vec<NodeId> {
+        let world_pos = self.view.to_world(screen_pos);
+        let tolerance = 4.0 / self.view.zoom.abs().max(f32::EPSILON);
+        let mut hits = self
+            .document
+            .hit_test_all_with_tolerance(world_pos, false, tolerance)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let containers = hits
+            .iter()
+            .flat_map(|&id| self.document.ancestors(id))
+            .collect::<Vec<_>>();
+        hits.extend(containers);
+        let mut layers = Vec::with_capacity(hits.len());
+        self.collect_in_layer_order(self.document.root, &hits, &mut layers);
+        layers
+    }
+
+    fn collect_in_layer_order(&self, id: NodeId, hits: &HashSet<NodeId>, layers: &mut Vec<NodeId>) {
+        let Some(node) = self.document.get(id) else {
+            return;
+        };
+        if id != self.document.root && hits.contains(&id) {
+            layers.push(id);
+        }
+        for child in node.children.iter().rev() {
+            self.collect_in_layer_order(*child, hits, layers);
+        }
+    }
+
     /// Apply conventional layer-panel selection modifiers.
     ///
     /// Shift selects the contiguous visible row range from the primary layer;
@@ -8910,6 +8946,71 @@ mod tests {
         assert_eq!(session.anchors, vec![anchor_before]);
         assert!(!session.pointer_down);
         assert_eq!(session.active_anchor, None);
+    }
+
+    #[test]
+    fn layers_at_screen_point_lists_every_hit_layer_in_layer_panel_order() {
+        let mut editor = Editor::new();
+        let root = editor.document.root;
+        let filled = |name: &str, x: f32| {
+            Node::shape(name, PathData::rect(x, 0.0, 20.0, 20.0))
+                .with_style(Style::fill(Paint::black()))
+        };
+        let frame = editor
+            .document
+            .add_child(root, Node::frame("Frame", 50.0, 50.0))
+            .unwrap();
+        let group = editor
+            .document
+            .add_child(frame, Node::group("Group"))
+            .unwrap();
+        let below = editor
+            .document
+            .add_child(group, filled("Below", 0.0))
+            .unwrap();
+        let above = editor
+            .document
+            .add_child(group, filled("Above", 5.0))
+            .unwrap();
+        let elsewhere = editor
+            .document
+            .add_child(group, filled("Elsewhere", 30.0))
+            .unwrap();
+        let hidden = editor
+            .document
+            .add_child(frame, filled("Hidden", 0.0))
+            .unwrap();
+        let locked = editor
+            .document
+            .add_child(frame, filled("Locked", 0.0))
+            .unwrap();
+        let on_top = editor
+            .document
+            .add_child(root, filled("On top", 0.0))
+            .unwrap();
+        editor.document.get_mut(hidden).unwrap().visible = false;
+        editor.document.get_mut(locked).unwrap().locked = true;
+
+        assert_eq!(
+            editor.layers_at_screen_point(Vec2::splat(10.0)),
+            [on_top, frame, group, above, below]
+        );
+        assert_eq!(
+            editor.layers_at_screen_point(Vec2::new(40.0, 10.0)),
+            [frame, group, elsewhere]
+        );
+        // Inside the group's bounds but between its children.
+        assert_eq!(
+            editor.layers_at_screen_point(Vec2::new(27.5, 10.0)),
+            [frame]
+        );
+        assert!(editor.layers_at_screen_point(Vec2::splat(200.0)).is_empty());
+
+        editor.view.zoom = 2.0;
+        assert_eq!(
+            editor.layers_at_screen_point(Vec2::new(80.0, 20.0)),
+            [frame, group, elsewhere]
+        );
     }
 
     #[test]

@@ -6,6 +6,11 @@ All notable user-facing changes to Strek are documented here.
 
 ### Added
 
+- Added a select-layer menu to the canvas: Cmd+right-click on macOS or
+  Ctrl+right-click elsewhere (either works on every platform) lists every
+  visible, unlocked layer under the pointer, including the groups and frames
+  that contain it, in Layers panel order. Choosing a row selects that layer, and
+  the menu marks layers that are already selected.
 - Added a searchable font picker for text layers that lists installed font
   families with a preview. Open it from the text toolbar, the Typography
   family field, or **Choose Font…** in the command palette. Choosing a family is

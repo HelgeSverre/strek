@@ -1366,6 +1366,8 @@ intentional product backlog.
 - [x] Drag-to-reparent into containers
 - [x] Expand/collapse containers
 - [x] Context menu (duplicate, delete, group, ungroup)
+- [x] Canvas select-layer menu listing the layers under the pointer
+  (`Primary`+right-click)
 
 ### Milestone 11: Properties Panel
 - [x] Transform position, bounds, and rotation controls
